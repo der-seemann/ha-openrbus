@@ -1,0 +1,44 @@
+{
+  "title": "OpenRBus",
+  "config": {
+    "step": {
+      "user": {
+        "title": "OpenRBus-Gateway auswählen",
+        "description": "Wähle ein verbindbares Gateway aus der zentralen Home-Assistant-Bluetooth-Erkennung einschließlich ESPHome-Bluetooth-Proxys.",
+        "data": {
+          "address": "Gateway"
+        }
+      },
+      "credentials": {
+        "title": "Pairing-PIN",
+        "description": "Gib die installationsspezifische Pairing-PIN für {name} ({address}) ein. Das aktuelle Grundgerüst speichert die PIN, verwendet sie aber noch nicht; OpenRBus 0.3.0 erwartet ein bereits gepaartes Gateway.",
+        "data": {
+          "pairing_pin": "Pairing-PIN"
+        }
+      },
+      "access_policy": {
+        "title": "Zugriffsrichtlinie",
+        "description": "Nur-Lesen ist der sichere Standard. Schreibzugriffe zu aktivieren öffnet nur das Integrations-Gate; die unabhängigen OpenRBus-Sicherheits- und Zugriffsprüfungen bleiben aktiv. Dieses Grundgerüst stellt noch keinen Schreibdienst bereit.",
+        "data": {
+          "enable_writes": "Schreibzugriffe aktivieren"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Dieses Gateway ist bereits eingerichtet.",
+      "no_devices_found": "Kein verbindbares OpenRBus-Gateway gefunden.",
+      "not_supported": "Das erkannte Gerät bietet den transparenten OpenRBus-Dienst nicht an."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Zugriffsrichtlinie",
+        "description": "Nur-Lesen ist der sichere Standard. Schreibzugriffe zu aktivieren öffnet nur das Integrations-Gate und umgeht keine OpenRBus-Sicherheitsprüfung.",
+        "data": {
+          "enable_writes": "Schreibzugriffe aktivieren"
+        }
+      }
+    }
+  }
+}

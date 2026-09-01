@@ -1,0 +1,44 @@
+{
+  "title": "OpenRBus",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Select an OpenRBus gateway",
+        "description": "Select a connectable gateway discovered by Home Assistant Bluetooth, including ESPHome Bluetooth proxies.",
+        "data": {
+          "address": "Gateway"
+        }
+      },
+      "credentials": {
+        "title": "Pairing PIN",
+        "description": "Enter the installation-specific pairing PIN for {name} ({address}). The current scaffold stores but does not yet use the PIN; OpenRBus 0.3.0 expects an already paired gateway.",
+        "data": {
+          "pairing_pin": "Pairing PIN"
+        }
+      },
+      "access_policy": {
+        "title": "Access policy",
+        "description": "Read-only is the safe default. Enabling writes only opens the integration-level gate; OpenRBus retains its independent safety and access checks, and this scaffold exposes no write service yet.",
+        "data": {
+          "enable_writes": "Enable writes"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This gateway is already configured.",
+      "no_devices_found": "No connectable OpenRBus gateway was found.",
+      "not_supported": "The discovered device does not expose the OpenRBus transparent service."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Access policy",
+        "description": "Read-only is the safe default. Enabling writes only opens the integration-level client gate and does not bypass any OpenRBus safety check.",
+        "data": {
+          "enable_writes": "Enable writes"
+        }
+      }
+    }
+  }
+}
