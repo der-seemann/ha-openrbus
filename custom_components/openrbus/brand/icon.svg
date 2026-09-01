@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="OpenRBus">
+  <circle cx="128" cy="128" r="120" fill="#17324d"/>
+  <path d="M58 151h140" fill="none" stroke="#f7fafc" stroke-linecap="round" stroke-width="16"/>
+  <circle cx="68" cy="151" r="22" fill="#2ec4b6" stroke="#f7fafc" stroke-width="8"/>
+  <circle cx="128" cy="151" r="22" fill="#2ec4b6" stroke="#f7fafc" stroke-width="8"/>
+  <circle cx="188" cy="151" r="22" fill="#2ec4b6" stroke="#f7fafc" stroke-width="8"/>
+  <path d="M82 111c-15-14 15-25 0-42M128 111c-15-14 15-25 0-42M174 111c-15-14 15-25 0-42"
+        fill="none" stroke="#ff9f1c" stroke-linecap="round" stroke-width="12"/>
+</svg>
