@@ -5,6 +5,10 @@
     {
       "connectable": true,
       "service_uuid": "f8fc98e4-5919-4a5c-852e-dfe04ad383c0"
+    },
+    {
+      "connectable": true,
+      "manufacturer_id": 17474
     }
   ],
   "codeowners": ["@der-seemann"],
@@ -15,6 +19,6 @@
   "iot_class": "local_polling",
   "issue_tracker": "https://github.com/der-seemann/ha-openrbus/issues",
   "loggers": ["openrbus"],
-  "requirements": ["openrbus==0.3.0"],
-  "version": "0.1.0"
+  "requirements": ["openrbus==0.3.1"],
+  "version": "0.1.1"
 }
