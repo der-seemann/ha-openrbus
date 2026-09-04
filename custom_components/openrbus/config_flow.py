@@ -5,10 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.components.bluetooth import (
-    BluetoothServiceInfoBleak,
-    async_discovered_service_info,
-)
+from homeassistant.components import bluetooth
+from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlow,
@@ -19,6 +17,7 @@ from homeassistant.const import CONF_ADDRESS
 from homeassistant.helpers.device_registry import format_mac
 
 from .const import (
+    BDR_THERMEA_MANUFACTURER_ID,
     CONF_ENABLE_WRITES,
     CONF_PAIRING_PIN,
     DEFAULT_ENABLE_WRITES,
@@ -28,11 +27,20 @@ from .const import (
 
 
 def _supports_openrbus(info: BluetoothServiceInfoBleak) -> bool:
-    """Return whether an advertisement exposes the transparent service."""
-    return any(
+    """Return whether an advertisement is a plausible OpenRBus gateway."""
+    if any(
         str(service_uuid).lower() == TRANSPARENT_SERVICE_UUID
         for service_uuid in (info.service_uuids or ())
-    )
+    ):
+        return True
+
+    if BDR_THERMEA_MANUFACTURER_ID in (info.manufacturer_data or {}):
+        return True
+
+    # Some BDR Thermea gateways advertise their controller family in the
+    # local name but omit the transparent service UUID until GATT discovery.
+    name = (info.name or "").casefold()
+    return name.startswith("ehc-") or name.startswith("ehc_")
 
 
 def _unique_id(address: str) -> str:
@@ -41,6 +49,14 @@ def _unique_id(address: str) -> str:
         return format_mac(address)
     except ValueError:
         return address.casefold()
+
+
+def _pairing_pin(value: Any) -> str:
+    """Validate the six-digit BLE pairing PIN without converting away zeros."""
+    pin = str(value).strip()
+    if len(pin) != 6 or not pin.isdecimal():
+        raise vol.Invalid("Pairing PIN must contain exactly six digits")
+    return pin
 
 
 class OpenRBusOptionsFlow(OptionsFlow):
@@ -77,6 +93,7 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
         self._address: str | None = None
         self._title = "OpenRBus"
         self._pending_data: dict[str, Any] = {}
+        self._pairing_pin: str | None = None
 
     @staticmethod
     def async_get_options_flow(config_entry: ConfigEntry) -> OpenRBusOptionsFlow:
@@ -111,8 +128,15 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
             self._set_device(self._discovered_devices[address])
             return await self.async_step_credentials()
 
+        # Ask every available HA Bluetooth scanner, including ESPHome proxies,
+        # for an active scan before evaluating the current discovery cache.
+        await bluetooth.async_request_active_scan(self.hass)
+
         current_ids = self._async_current_ids(include_ignore=False)
-        for info in async_discovered_service_info(self.hass, connectable=True):
+        for info in bluetooth.async_discovered_service_info(
+            self.hass,
+            connectable=True,
+        ):
             if _unique_id(info.address) in current_ids or not _supports_openrbus(info):
                 continue
             self._discovered_devices[info.address] = info
@@ -133,22 +157,15 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
         self,
         user_input: dict[str, Any] | None = None,
     ) -> ConfigFlowResult:
-        """Collect the owner-supplied pairing PIN."""
+        """Collect the owner-supplied pairing PIN transiently."""
         assert self._address is not None
         if user_input is not None:
-            self._pending_data[CONF_PAIRING_PIN] = user_input[CONF_PAIRING_PIN]
+            self._pairing_pin = user_input[CONF_PAIRING_PIN]
             return await self.async_step_access_policy()
 
         return self.async_show_form(
             step_id="credentials",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_PAIRING_PIN): vol.All(
-                        str,
-                        vol.Length(min=1, max=64),
-                    )
-                }
-            ),
+            data_schema=vol.Schema({vol.Required(CONF_PAIRING_PIN): _pairing_pin}),
             description_placeholders={
                 "name": self._title,
                 "address": self._address,
@@ -164,6 +181,9 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
             self._pending_data[CONF_ENABLE_WRITES] = bool(
                 user_input[CONF_ENABLE_WRITES]
             )
+            # The pairing PIN deliberately never enters the config entry. The
+            # next roadmap step consumes it through the selected ESPHome proxy
+            # action and clears this transient field after pairing succeeds.
             return self.async_create_entry(
                 title=self._title,
                 data=self._pending_data,
