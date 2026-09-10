@@ -6,7 +6,8 @@
         "title": "OpenRBus-Gateway auswählen",
         "description": "Wähle ein verbindbares Gateway aus der zentralen Home-Assistant-Bluetooth-Erkennung einschließlich ESPHome-Bluetooth-Proxys.",
         "data": {
-          "address": "Gateway"
+          "address": "Gateway",
+          "response_entity": "ESPHome OpenRBus-Gateway"
         }
       },
       "credentials": {

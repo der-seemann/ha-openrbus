@@ -21,6 +21,8 @@ from homeassistant.helpers.device_registry import format_mac
 from .const import (
     CONF_ENABLE_WRITES,
     CONF_PAIRING_PIN,
+    CONF_REFRESH_ACTION,
+    CONF_RESPONSE_ENTITY,
     DEFAULT_ENABLE_WRITES,
     DOMAIN,
     TRANSPARENT_SERVICE_UUID,
@@ -103,13 +105,44 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
         self,
         user_input: dict[str, Any] | None = None,
     ) -> ConfigFlowResult:
-        """Select a gateway discovered by Home Assistant Bluetooth."""
+        """Select the verified ESPHome bridge or a discovered BLE gateway."""
         if user_input is not None:
+            if CONF_RESPONSE_ENTITY in user_input:
+                entity_id = user_input[CONF_RESPONSE_ENTITY]
+                actions = self.hass.services.async_services().get("esphome", {})
+                refresh_actions = sorted(
+                    name for name in actions if name.endswith("openrbus_gateway_auth")
+                )
+                await self.async_set_unique_id(f"esphome_bridge:{entity_id}")
+                self._abort_if_unique_id_configured()
+                return self.async_create_entry(
+                    title="OpenRBus ESPHome Gateway",
+                    data={
+                        CONF_RESPONSE_ENTITY: entity_id,
+                        CONF_ENABLE_WRITES: False,
+                        CONF_REFRESH_ACTION: refresh_actions[0]
+                        if len(refresh_actions) == 1
+                        else "",
+                    },
+                )
             address = user_input[CONF_ADDRESS]
             await self.async_set_unique_id(_unique_id(address), raise_on_progress=False)
             self._abort_if_unique_id_configured()
             self._set_device(self._discovered_devices[address])
             return await self.async_step_credentials()
+
+        response_entities = {
+            state.entity_id: state.name or state.entity_id
+            for state in self.hass.states.async_all("sensor")
+            if state.entity_id.endswith("openrbus_read_raw_response")
+        }
+        if response_entities:
+            return self.async_show_form(
+                step_id="user",
+                data_schema=vol.Schema(
+                    {vol.Required(CONF_RESPONSE_ENTITY): vol.In(response_entities)}
+                ),
+            )
 
         current_ids = self._async_current_ids(include_ignore=False)
         for info in async_discovered_service_info(self.hass, connectable=True):

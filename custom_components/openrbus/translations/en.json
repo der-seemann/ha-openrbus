@@ -4,9 +4,10 @@
     "step": {
       "user": {
         "title": "Select an OpenRBus gateway",
-        "description": "Select a connectable gateway discovered by Home Assistant Bluetooth, including ESPHome Bluetooth proxies.",
+        "description": "Select the verified read-only ESPHome/OpenRBus gateway response. Bluetooth discovery remains available when no bridge is present.",
         "data": {
-          "address": "Gateway"
+          "address": "Gateway",
+          "response_entity": "ESPHome OpenRBus gateway"
         }
       },
       "credentials": {
