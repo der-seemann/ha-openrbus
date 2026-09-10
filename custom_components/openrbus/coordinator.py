@@ -67,7 +67,9 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         if not self.refresh_action:
             return self.hass.states.get(self.response_entity)
         response_ready = asyncio.Event()
+        connection_ready = asyncio.Event()
         received_state = None
+        service_started = False
         previous_generation = self._generation_value(
             self.hass.states.get(self.generation_entity)
         )
@@ -82,6 +84,9 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             nonlocal received_state
             candidate = event.data.get("new_state")
             generation = self._generation_value(candidate)
+            if generation is not None and not service_started:
+                connection_ready.set()
+                return
             if is_new_generation(previous_generation, generation):
                 received_state = self.hass.states.get(self.response_entity)
                 _LOGGER.debug(
@@ -111,6 +116,12 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 "poll cycle=%s service_call esphome.%s", cycle_id, self.refresh_action
             )
             async with asyncio.timeout(50):
+                if previous_generation is None:
+                    await asyncio.wait_for(connection_ready.wait(), timeout=20)
+                    previous_generation = self._generation_value(
+                        self.hass.states.get(self.generation_entity)
+                    )
+                service_started = True
                 await self.hass.services.async_call(
                     "esphome",
                     self.refresh_action,
