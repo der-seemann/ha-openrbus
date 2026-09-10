@@ -13,6 +13,7 @@ from openrbus.value_codec import decode_value
 
 DEVICE_TYPE = ObjectAddress(0x2001, 0x02)
 GATEWAY_BUS_TARGET = 0xFF
+_REGISTRY = Registry.load_default()
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,7 +33,8 @@ def decode_device_type(response_hex: str) -> BridgeRead:
         raise ValueError("ESPHome response is not a final BLE segment")
     canip = CanIpMessage.decode(unwrap_canip(message))
     response = parse_read_response(canip, GATEWAY_BUS_TARGET, DEVICE_TYPE)
-    registry = Registry.load_default()
-    definition = registry.get(DEVICE_TYPE)
-    value = decode_value(definition, DEVICE_TYPE, response.raw_value, registry=registry)
+    definition = _REGISTRY.get(DEVICE_TYPE)
+    value = decode_value(
+        definition, DEVICE_TYPE, response.raw_value, registry=_REGISTRY
+    )
     return BridgeRead(DEVICE_TYPE, response.raw_value, value)

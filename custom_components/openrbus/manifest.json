@@ -1,15 +1,9 @@
 {
   "domain": "openrbus",
   "name": "OpenRBus",
-  "bluetooth": [
-    {
-      "connectable": true,
-      "service_uuid": "f8fc98e4-5919-4a5c-852e-dfe04ad383c0"
-    }
-  ],
   "codeowners": ["@der-seemann"],
   "config_flow": true,
-  "dependencies": ["bluetooth_adapters", "esphome"],
+  "dependencies": ["esphome"],
   "documentation": "https://github.com/der-seemann/ha-openrbus",
   "integration_type": "hub",
   "iot_class": "local_polling",

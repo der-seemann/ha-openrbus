@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
@@ -37,10 +39,16 @@ class OpenRBusDeviceTypeSensor(CoordinatorEntity[OpenRBusCoordinator], SensorEnt
         return self.coordinator.data.value if self.coordinator.data else None
 
     @property
-    def extra_state_attributes(self) -> dict[str, str]:
+    def available(self) -> bool:
+        """Keep the last valid value visible across one transient poll error."""
+        return self.coordinator.data is not None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
         data = self.coordinator.data
         return {
             "object_address": "2001:02",
             "bus_target": "FF",
             "raw_value": data.raw_value.hex() if data else "",
+            "poll_success": self.coordinator.last_update_success,
         }
