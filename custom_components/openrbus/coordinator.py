@@ -132,6 +132,18 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             _LOGGER.debug("poll cycle=%s complete", cycle_id)
             return received_state
         except TimeoutError as error:
+            # ESPHome can deliver the state update while HA is reconnecting;
+            # use the monotonic marker as a final, race-safe completion check.
+            current_generation = self._generation_value(
+                self.hass.states.get(self.generation_entity)
+            )
+            if is_new_generation(previous_generation, current_generation):
+                _LOGGER.debug(
+                    "poll cycle=%s recovered completion generation=%s",
+                    cycle_id,
+                    current_generation,
+                )
+                return self.hass.states.get(self.response_entity)
             _LOGGER.warning("poll cycle=%s timeout after 50s", cycle_id)
             raise UpdateFailed("ESPHome OpenRBus read timed out") from error
         finally:
