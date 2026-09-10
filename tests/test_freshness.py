@@ -19,5 +19,5 @@ def test_identical_raw_reads_use_generation_not_value_change() -> None:
 
 def test_generation_accepts_first_response_and_rejects_stale() -> None:
     assert is_new_generation(None, 1)
-    assert not is_new_generation(4, 3)
+    assert is_new_generation(4, 1)  # counter reset after an ESP reboot
     assert not is_new_generation(4, None)
