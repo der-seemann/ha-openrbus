@@ -13,9 +13,9 @@ PLATFORMS = ["sensor"]
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up OpenRBus from a config entry."""
     coordinator = OpenRBusCoordinator(hass, entry)
-    await coordinator.async_config_entry_first_refresh()
     entry.runtime_data = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    hass.async_create_task(coordinator.async_config_entry_first_refresh())
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
     return True
 
