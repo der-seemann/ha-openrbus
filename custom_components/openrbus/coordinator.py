@@ -7,6 +7,7 @@ import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -122,12 +123,25 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                         self.hass.states.get(self.generation_entity)
                     )
                 service_started = True
-                await self.hass.services.async_call(
-                    "esphome",
-                    self.refresh_action,
-                    {"passkey": 0},
-                    blocking=False,
-                )
+                try:
+                    await self.hass.services.async_call(
+                        "esphome",
+                        self.refresh_action,
+                        {"passkey": 0},
+                        blocking=True,
+                    )
+                except HomeAssistantError:
+                    _LOGGER.warning(
+                        "poll cycle=%s ESPHome action unavailable; retrying once",
+                        cycle_id,
+                    )
+                    await asyncio.sleep(2)
+                    await self.hass.services.async_call(
+                        "esphome",
+                        self.refresh_action,
+                        {"passkey": 0},
+                        blocking=True,
+                    )
                 await response_ready.wait()
             _LOGGER.debug("poll cycle=%s complete", cycle_id)
             return received_state
