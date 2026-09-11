@@ -33,3 +33,18 @@ def test_nan_is_not_a_generation() -> None:
     assert parse_generation("nan") is None
     assert parse_generation("inf") is None
     assert parse_generation("7") == 7
+
+
+def test_non_numeric_and_unavailable_values_are_not_generations() -> None:
+    for value in (None, "", "unknown", "unavailable", "-inf", "not-a-number"):
+        assert parse_generation(value) is None
+
+
+def test_lower_generation_requires_verified_reset() -> None:
+    assert not is_new_generation(10, 9)
+    assert is_new_generation(10, 1, reset_allowed=True)
+
+
+def test_duplicate_generation_is_stale_even_after_reset() -> None:
+    assert not is_new_generation(10, 10)
+    assert not is_new_generation(10, 10, reset_allowed=True)

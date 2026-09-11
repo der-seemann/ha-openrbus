@@ -2,12 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
 from .coordinator import OpenRBusCoordinator
 
 PLATFORMS = ["sensor"]
+
+
+async def _cancel_task(task: asyncio.Task[object]) -> None:
+    """Cancel and await a task from a config-entry unload callback."""
+    if task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -18,7 +31,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     first_refresh = hass.async_create_task(
         coordinator.async_config_entry_first_refresh()
     )
-    entry.async_on_unload(first_refresh.cancel)
+
+    entry.async_on_unload(lambda: _cancel_task(first_refresh))
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
     return True
 
