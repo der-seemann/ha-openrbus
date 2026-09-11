@@ -2,6 +2,19 @@
 
 from __future__ import annotations
 
+import math
+
+
+def parse_generation(value: object) -> int | None:
+    """Parse a finite ESPHome generation value; NaN is not a marker."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return int(number)
+
 
 def is_new_generation(
     previous: int | None,

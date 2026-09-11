@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, EventStateChangedData, HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
@@ -18,7 +20,7 @@ from .const import (
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
 )
-from .freshness import is_new_generation
+from .freshness import is_new_generation, parse_generation
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -70,7 +72,6 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         if not self.refresh_action:
             return self.hass.states.get(self.response_entity)
         response_ready = asyncio.Event()
-        connection_ready = asyncio.Event()
         received_state = None
         service_started = False
         reconnect_seen = False
@@ -110,8 +111,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             if generation is None:
                 reconnect_seen = True
                 return
-            if generation is not None and not service_started:
-                connection_ready.set()
+            if not service_started:
                 return
             if is_new_generation(
                 previous_generation, generation, reset_allowed=reconnect_seen
@@ -145,19 +145,33 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 "poll cycle=%s service_call esphome.%s", cycle_id, self.refresh_action
             )
             async with asyncio.timeout(50):
-                if previous_generation is None:
-                    await asyncio.wait_for(connection_ready.wait(), timeout=20)
-                    previous_generation = self._generation_value(
-                        self.hass.states.get(self.generation_entity)
-                    )
                 service_started = True
-                await self.hass.services.async_call(
-                    "esphome",
-                    self.refresh_action,
-                    {"passkey": 0},
-                    blocking=False,
-                )
-                await response_ready.wait()
+                for attempt in range(2):
+                    try:
+                        await self.hass.services.async_call(
+                            "esphome",
+                            self.refresh_action,
+                            {"passkey": 0},
+                            blocking=False,
+                        )
+                    except HomeAssistantError as error:
+                        _LOGGER.warning(
+                            "poll cycle=%s service call failed attempt=%s: %s",
+                            cycle_id,
+                            attempt + 1,
+                            error,
+                        )
+                    try:
+                        await asyncio.wait_for(response_ready.wait(), timeout=25)
+                        break
+                    except TimeoutError:
+                        if attempt == 0:
+                            _LOGGER.debug(
+                                "poll cycle=%s retrying service call after response timeout",
+                                cycle_id,
+                            )
+                            continue
+                        raise
             _LOGGER.debug("poll cycle=%s complete", cycle_id)
             return received_state
         except TimeoutError as error:
@@ -194,16 +208,14 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
     def _generation_value(state) -> int | None:
         if state is None or state.state in {"", "unknown", "unavailable"}:
             return None
-        try:
-            return int(float(state.state))
-        except (TypeError, ValueError):
-            return None
+        return parse_generation(state.state)
 
     @staticmethod
     def _float_state(state) -> float | None:
         if state is None or state.state in {"", "unknown", "unavailable"}:
             return None
         try:
-            return float(state.state)
+            value = float(state.state)
         except (TypeError, ValueError):
             return None
+        return value if math.isfinite(value) else None
