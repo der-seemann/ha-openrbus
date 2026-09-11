@@ -3,43 +3,18 @@
   "config": {
     "step": {
       "user": {
-        "title": "Select an OpenRBus gateway",
-        "description": "Select the verified read-only ESPHome/OpenRBus gateway response. Bluetooth discovery remains available when no bridge is present.",
+        "title": "Select an ESPHome gateway",
+        "description": "Select the verified ESPHome proxy response and generation sensors.",
         "data": {
-          "address": "Gateway",
-          "response_entity": "ESPHome OpenRBus gateway"
-        }
-      },
-      "credentials": {
-        "title": "Pairing PIN",
-        "description": "Enter the installation-specific pairing PIN for {name} ({address}). The current scaffold stores but does not yet use the PIN; OpenRBus 0.3.0 expects an already paired gateway.",
-        "data": {
-          "pairing_pin": "Pairing PIN"
-        }
-      },
-      "access_policy": {
-        "title": "Access policy",
-        "description": "Read-only is the safe default. Enabling writes only opens the integration-level gate; OpenRBus retains its independent safety and access checks, and this scaffold exposes no write service yet.",
-        "data": {
-          "enable_writes": "Enable writes"
+          "response_entity": "Raw response sensor",
+          "generation_entity": "Read generation sensor"
         }
       }
     },
     "abort": {
       "already_configured": "This gateway is already configured.",
-      "no_devices_found": "No connectable OpenRBus gateway was found.",
-      "not_supported": "The discovered device does not expose the OpenRBus transparent service."
-    }
-  },
-  "options": {
-    "step": {
-      "init": {
-        "title": "Access policy",
-        "description": "Read-only is the safe default. Enabling writes only opens the integration-level client gate and does not bypass any OpenRBus safety check.",
-        "data": {
-          "enable_writes": "Enable writes"
-        }
-      }
+      "no_esphome_gateway": "No ESPHome OpenRBus gateway action is available.",
+      "no_esphome_entities": "No ESPHome OpenRBus response and generation sensors were found."
     }
   }
 }

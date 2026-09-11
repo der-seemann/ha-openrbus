@@ -39,6 +39,9 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             self.response_entity.removesuffix("openrbus_read_raw_response")
             + "openrbus_read_generation"
         )
+        self.uptime_entity = (
+            self.response_entity.removesuffix("openrbus_read_raw_response") + "uptime"
+        )
         self._poll_lock = asyncio.Lock()
         self._cycle_id = 0
         configured_action = entry.data.get(CONF_REFRESH_ACTION)
@@ -70,9 +73,11 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         connection_ready = asyncio.Event()
         received_state = None
         service_started = False
+        reconnect_seen = False
         previous_generation = self._generation_value(
             self.hass.states.get(self.generation_entity)
         )
+        previous_uptime = self._float_state(self.hass.states.get(self.uptime_entity))
         _LOGGER.debug(
             "poll cycle=%s arm listener entity=%s previous_generation=%s",
             cycle_id,
@@ -81,18 +86,42 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         )
 
         async def response_changed(event: Event[EventStateChangedData]) -> None:
-            nonlocal received_state
+            nonlocal received_state, reconnect_seen, previous_uptime
+            entity_id = event.data.get("entity_id")
             candidate = event.data.get("new_state")
+            if entity_id == self.uptime_entity:
+                uptime = self._float_state(candidate)
+                if (
+                    uptime is not None
+                    and previous_uptime is not None
+                    and uptime < previous_uptime
+                ):
+                    reconnect_seen = True
+                    _LOGGER.debug(
+                        "poll cycle=%s detected ESP uptime reset %.0f -> %.0f",
+                        cycle_id,
+                        previous_uptime,
+                        uptime,
+                    )
+                if uptime is not None:
+                    previous_uptime = uptime
+                return
             generation = self._generation_value(candidate)
+            if generation is None:
+                reconnect_seen = True
+                return
             if generation is not None and not service_started:
                 connection_ready.set()
                 return
-            if is_new_generation(previous_generation, generation):
+            if is_new_generation(
+                previous_generation, generation, reset_allowed=reconnect_seen
+            ):
                 received_state = self.hass.states.get(self.response_entity)
                 _LOGGER.debug(
-                    "poll cycle=%s freshness event generation=%s response=%s",
+                    "poll cycle=%s freshness event generation=%s reset=%s response=%s",
                     cycle_id,
                     generation,
+                    reconnect_seen,
                     received_state.state if received_state else None,
                 )
                 response_ready.set()
@@ -109,7 +138,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 )
 
         remove = async_track_state_change_event(
-            self.hass, [self.generation_entity], response_changed
+            self.hass, [self.generation_entity, self.uptime_entity], response_changed
         )
         try:
             _LOGGER.debug(
@@ -137,11 +166,23 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             current_generation = self._generation_value(
                 self.hass.states.get(self.generation_entity)
             )
-            if is_new_generation(previous_generation, current_generation):
+            current_uptime = self._float_state(self.hass.states.get(self.uptime_entity))
+            if (
+                current_uptime is not None
+                and previous_uptime is not None
+                and current_uptime < previous_uptime
+            ):
+                reconnect_seen = True
+            if is_new_generation(
+                previous_generation,
+                current_generation,
+                reset_allowed=reconnect_seen,
+            ):
                 _LOGGER.debug(
-                    "poll cycle=%s recovered completion generation=%s",
+                    "poll cycle=%s recovered completion generation=%s reset=%s",
                     cycle_id,
                     current_generation,
+                    reconnect_seen,
                 )
                 return self.hass.states.get(self.response_entity)
             _LOGGER.warning("poll cycle=%s timeout after 50s", cycle_id)
@@ -158,5 +199,11 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         except (TypeError, ValueError):
             return None
 
-    async def async_shutdown(self) -> None:
-        """Release coordinator resources."""
+    @staticmethod
+    def _float_state(state) -> float | None:
+        if state is None or state.state in {"", "unknown", "unavailable"}:
+            return None
+        try:
+            return float(state.state)
+        except (TypeError, ValueError):
+            return None
