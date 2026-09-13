@@ -8,9 +8,12 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 
 from .const import (
+    CONF_BLE_DEVICE,
     CONF_DYNAMIC_DISABLE_ACTION,
     CONF_DYNAMIC_ENABLE_ACTION,
     CONF_GENERATION_ENTITY,
+    CONF_PAIR_ACTION,
+    CONF_PASSKEY,
     CONF_RAW_READ_ACTION,
     CONF_REFRESH_ACTION,
     CONF_RESPONSE_ENTITY,
@@ -39,6 +42,7 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
         disable_actions = sorted(
             name for name in actions if name.endswith("openrbus_disable_dynamic_transport")
         )
+        pair_actions = sorted(name for name in actions if name.endswith("openrbus_pair"))
         response_entities = {
             state.entity_id: state.name or state.entity_id
             for state in self.hass.states.async_all("sensor")
@@ -65,6 +69,9 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_RAW_READ_ACTION: raw_actions[0] if raw_actions else None,
                     CONF_DYNAMIC_ENABLE_ACTION: enable_actions[0] if enable_actions else None,
                     CONF_DYNAMIC_DISABLE_ACTION: disable_actions[0] if disable_actions else None,
+                    CONF_PAIR_ACTION: pair_actions[0] if pair_actions else None,
+                    CONF_BLE_DEVICE: user_input.get(CONF_BLE_DEVICE),
+                    CONF_PASSKEY: user_input.get(CONF_PASSKEY) or None,
                 },
             )
 
@@ -76,6 +83,10 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                 {
                     vol.Required(CONF_RESPONSE_ENTITY): vol.In(response_entities),
                     vol.Required(CONF_GENERATION_ENTITY): vol.In(generation_entities),
+                    vol.Optional(CONF_BLE_DEVICE, default=""): str,
+                    vol.Optional(CONF_PASSKEY, default=""): vol.All(
+                        vol.Coerce(str), vol.Match(r"^$|^[0-9]{1,6}$")
+                    ),
                 }
             ),
         )

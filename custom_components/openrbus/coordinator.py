@@ -18,6 +18,7 @@ from .bridge import BridgeRead, GenericRead, decode_device_type, decode_read_res
 from .const import (
     CONF_DYNAMIC_ENABLE_ACTION,
     CONF_GENERATION_ENTITY,
+    CONF_PASSKEY,
     CONF_RAW_READ_ACTION,
     CONF_REFRESH_ACTION,
     CONF_RESPONSE_ENTITY,
@@ -60,6 +61,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         )
         self.raw_read_action = entry.data.get(CONF_RAW_READ_ACTION)
         self.dynamic_enable_action = entry.data.get(CONF_DYNAMIC_ENABLE_ACTION)
+        self.passkey = int(entry.data.get(CONF_PASSKEY) or 0)
         self._runtime_request_id = 10000
 
     async def _async_update_data(self) -> BridgeRead:
@@ -158,7 +160,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                         await self.hass.services.async_call(
                             "esphome",
                             self.refresh_action,
-                            {"passkey": 0},
+                            {"passkey": getattr(self, "passkey", 0)},
                             blocking=False,
                         )
                     except HomeAssistantError as error:
