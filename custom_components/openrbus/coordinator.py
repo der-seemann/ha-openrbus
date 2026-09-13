@@ -12,9 +12,13 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .bridge import BridgeRead, decode_device_type
+from openrbus.protocol.canip import ObjectAddress, build_read
+
+from .bridge import BridgeRead, GenericRead, decode_device_type, decode_read_response
 from .const import (
+    CONF_DYNAMIC_ENABLE_ACTION,
     CONF_GENERATION_ENTITY,
+    CONF_RAW_READ_ACTION,
     CONF_REFRESH_ACTION,
     CONF_RESPONSE_ENTITY,
     DEFAULT_UPDATE_INTERVAL,
@@ -54,6 +58,9 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         self.refresh_action = configured_action or (
             candidates[0] if len(candidates) == 1 else None
         )
+        self.raw_read_action = entry.data.get(CONF_RAW_READ_ACTION)
+        self.dynamic_enable_action = entry.data.get(CONF_DYNAMIC_ENABLE_ACTION)
+        self._runtime_request_id = 10000
 
     async def _async_update_data(self) -> BridgeRead:
         self._cycle_id += 1
@@ -203,6 +210,65 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             raise UpdateFailed("ESPHome OpenRBus read timed out") from error
         finally:
             remove()
+
+    async def async_read_object(self, address: ObjectAddress, *, node: int = 0xFF) -> GenericRead:
+        """Read one arbitrary raw object through the verified ESPHome bridge.
+
+        The coordinator lock is shared with scheduled polls, so the ESPHome
+        transport never receives concurrent requests.  This is intentionally
+        read-only and does not add registry semantics to the firmware.
+        """
+
+        if not self.raw_read_action:
+            raise HomeAssistantError("ESPHome runtime raw-read action is unavailable")
+        async with self._poll_lock:
+            self._runtime_request_id += 1
+            request_id = self._runtime_request_id
+            generation_before = self._generation_value(
+                self.hass.states.get(self.generation_entity)
+            )
+            event = asyncio.Event()
+            received: dict[str, object] = {}
+
+            async def changed(change: Event[EventStateChangedData]) -> None:
+                if change.data.get("entity_id") != self.generation_entity:
+                    return
+                candidate = self._generation_value(change.data.get("new_state"))
+                if candidate is None or not is_new_generation(
+                    generation_before, candidate, reset_allowed=True
+                ):
+                    return
+                received["state"] = self.hass.states.get(self.response_entity)
+                event.set()
+
+            remove = async_track_state_change_event(
+                self.hass, [self.generation_entity], changed
+            )
+            try:
+                if self.dynamic_enable_action:
+                    await self.hass.services.async_call(
+                        "esphome", self.dynamic_enable_action, {}, blocking=False
+                    )
+                await self.hass.services.async_call(
+                    "esphome",
+                    self.raw_read_action,
+                    {
+                        "request_id": request_id,
+                        "frame": build_read(node, address).encode().hex(),
+                    },
+                    blocking=False,
+                )
+                async with asyncio.timeout(25):
+                    await event.wait()
+                state = received.get("state")
+                if state is None or state.state in {"", "unknown", "unavailable"}:
+                    raise HomeAssistantError("ESPHome raw response is unavailable")
+                try:
+                    return decode_read_response(state.state, node=node, address=address)
+                except ValueError as error:
+                    raise HomeAssistantError(str(error)) from error
+            finally:
+                remove()
 
     @staticmethod
     def _generation_value(state) -> int | None:

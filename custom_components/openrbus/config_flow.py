@@ -8,7 +8,10 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
 
 from .const import (
+    CONF_DYNAMIC_DISABLE_ACTION,
+    CONF_DYNAMIC_ENABLE_ACTION,
     CONF_GENERATION_ENTITY,
+    CONF_RAW_READ_ACTION,
     CONF_REFRESH_ACTION,
     CONF_RESPONSE_ENTITY,
     DOMAIN,
@@ -28,6 +31,13 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
         actions = self.hass.services.async_services().get("esphome", {})
         refresh_actions = sorted(
             name for name in actions if name.endswith("openrbus_gateway_auth")
+        )
+        raw_actions = sorted(name for name in actions if name.endswith("openrbus_raw_read"))
+        enable_actions = sorted(
+            name for name in actions if name.endswith("openrbus_enable_dynamic_transport")
+        )
+        disable_actions = sorted(
+            name for name in actions if name.endswith("openrbus_disable_dynamic_transport")
         )
         response_entities = {
             state.entity_id: state.name or state.entity_id
@@ -52,6 +62,9 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_RESPONSE_ENTITY: user_input[CONF_RESPONSE_ENTITY],
                     CONF_GENERATION_ENTITY: user_input[CONF_GENERATION_ENTITY],
                     CONF_REFRESH_ACTION: refresh_actions[0],
+                    CONF_RAW_READ_ACTION: raw_actions[0] if raw_actions else None,
+                    CONF_DYNAMIC_ENABLE_ACTION: enable_actions[0] if enable_actions else None,
+                    CONF_DYNAMIC_DISABLE_ACTION: disable_actions[0] if disable_actions else None,
                 },
             )
 
