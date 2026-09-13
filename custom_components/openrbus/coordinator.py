@@ -12,7 +12,10 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from openrbus.errors import ProtocolError
+from openrbus.protocol.ble_segments import BleSegmentCodec
 from openrbus.protocol.canip import ObjectAddress, build_read
+from openrbus.protocol.selector import wrap_canip
 
 from .bridge import BridgeRead, GenericRead, decode_device_type, decode_read_response
 from .const import (
@@ -28,6 +31,12 @@ from .const import (
 from .freshness import is_new_generation, parse_generation
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def _runtime_frame(node: int, address: ObjectAddress) -> str:
+    """Encode one read as the BLE-segmented ESPHome runtime payload."""
+
+    return BleSegmentCodec().encode(wrap_canip(build_read(node, address).encode()))[0].hex()
 
 
 class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
@@ -49,6 +58,9 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         self.uptime_entity = (
             self.response_entity.removesuffix("openrbus_read_raw_response") + "uptime"
         )
+        self.pairing_status_entity = self.response_entity.removesuffix(
+            "openrbus_read_raw_response"
+        ) + "openrbus_pairing_status"
         self._poll_lock = asyncio.Lock()
         self._cycle_id = 0
         configured_action = entry.data.get(CONF_REFRESH_ACTION)
@@ -63,12 +75,19 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         self.dynamic_enable_action = entry.data.get(CONF_DYNAMIC_ENABLE_ACTION)
         self.passkey = int(entry.data.get(CONF_PASSKEY) or 0)
         self._runtime_request_id = 10000
+        self._dynamic_enabled = False
+        self._runtime_authenticated = False
 
     async def _async_update_data(self) -> BridgeRead:
         self._cycle_id += 1
         cycle_id = self._cycle_id
+        _LOGGER.debug("poll cycle=%s start", cycle_id)
+        if getattr(self, "raw_read_action", None):
+            result = await self.async_read_object(
+                ObjectAddress(0x2001, 0x02), node=0xFF
+            )
+            return BridgeRead(result.address, result.raw_value, result.value)
         async with self._poll_lock:
-            _LOGGER.debug("poll cycle=%s start", cycle_id)
             state = await self._async_request_live_read(cycle_id)
         if state is None or state.state in {"", "unknown", "unavailable"}:
             raise UpdateFailed("ESPHome OpenRBus response is unavailable")
@@ -223,42 +242,90 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             received: dict[str, object] = {}
 
             async def changed(change: Event[EventStateChangedData]) -> None:
-                if change.data.get("entity_id") != self.generation_entity:
-                    return
-                candidate = self._generation_value(change.data.get("new_state"))
-                if candidate is None or not is_new_generation(
-                    generation_before, candidate, reset_allowed=True
+                entity_id = change.data.get("entity_id")
+                new_state = change.data.get("new_state")
+                if (
+                    entity_id == self.response_entity
+                    and new_state is not None
+                    and new_state.state not in {"", "unknown", "unavailable"}
                 ):
-                    return
-                received["state"] = self.hass.states.get(self.response_entity)
-                event.set()
+                    received["response"] = new_state
+                if entity_id == self.generation_entity:
+                    candidate = self._generation_value(new_state)
+                    if candidate is not None and is_new_generation(
+                        generation_before, candidate, reset_allowed=True
+                    ):
+                        received["generation"] = candidate
+                if "response" in received and "generation" in received:
+                    event.set()
 
             remove = async_track_state_change_event(
-                self.hass, [self.generation_entity], changed
+                self.hass, [self.generation_entity, self.response_entity], changed
             )
             try:
-                if self.dynamic_enable_action:
+                if self.dynamic_enable_action and not self._dynamic_enabled:
                     await self.hass.services.async_call(
                         "esphome", self.dynamic_enable_action, {}, blocking=False
                     )
+                    self._dynamic_enabled = True
+                if self.refresh_action and not self._runtime_authenticated:
+                    status = self.hass.states.get(self.pairing_status_entity)
+                    ready_states = (
+                        "gateway_authenticated",
+                        "dynamic_session_enabled",
+                        "openrbus_dynamic_response",
+                        "openrbus_read_received",
+                        "ready",
+                    )
+                    if status is None or not str(status.state).startswith(ready_states):
+                        auth_ready = asyncio.Event()
+
+                        async def auth_changed(
+                            change: Event[EventStateChangedData],
+                        ) -> None:
+                            new_state = change.data.get("new_state")
+                            if new_state is not None and str(new_state.state).startswith(ready_states):
+                                auth_ready.set()
+
+                        remove_auth = async_track_state_change_event(
+                            self.hass, [self.pairing_status_entity], auth_changed
+                        )
+                        try:
+                            await self.hass.services.async_call(
+                                "esphome",
+                                self.refresh_action,
+                                {"passkey": self.passkey},
+                                blocking=False,
+                            )
+                            current = self.hass.states.get(self.pairing_status_entity)
+                            if current is not None and str(current.state).startswith(ready_states):
+                                auth_ready.set()
+                            async with asyncio.timeout(20):
+                                await auth_ready.wait()
+                        finally:
+                            remove_auth()
+                    self._runtime_authenticated = True
                 await self.hass.services.async_call(
                     "esphome",
                     self.raw_read_action,
                     {
                         "request_id": request_id,
-                        "frame": build_read(node, address).encode().hex(),
+                        "frame": _runtime_frame(node, address),
                     },
                     blocking=False,
                 )
                 async with asyncio.timeout(25):
                     await event.wait()
-                state = received.get("state")
+                state = received.get("response")
                 if state is None or state.state in {"", "unknown", "unavailable"}:
                     raise HomeAssistantError("ESPHome raw response is unavailable")
                 try:
                     return decode_read_response(state.state, node=node, address=address)
-                except ValueError as error:
+                except (ProtocolError, ValueError) as error:
                     raise HomeAssistantError(str(error)) from error
+            except (TimeoutError, HomeAssistantError):
+                self._runtime_authenticated = False
+                raise
             finally:
                 remove()
 

@@ -8,9 +8,10 @@ from types import SimpleNamespace
 import pytest
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import UpdateFailed
+from openrbus.protocol.canip import ObjectAddress
 
 from custom_components.openrbus import _cancel_task
-from custom_components.openrbus.coordinator import OpenRBusCoordinator
+from custom_components.openrbus.coordinator import OpenRBusCoordinator, _runtime_frame
 
 
 class _States:
@@ -49,6 +50,12 @@ def _coordinator() -> OpenRBusCoordinator:
     coordinator.refresh_action = "proxy_openrbus_gateway_auth"
     coordinator._cycle_id = 0
     return coordinator
+
+
+def test_runtime_frame_is_ble_segmented_and_wrapped() -> None:
+    assert _runtime_frame(0xFF, ObjectAddress(0x2001, 0x02)) == (
+        "ff01020000000000ff2001025d12"
+    )
 
 
 @pytest.mark.asyncio

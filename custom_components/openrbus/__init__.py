@@ -65,7 +65,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             supports_response=SupportsResponse.OPTIONAL,
         )
 
-        async def read_group(call: ServiceCall) -> list[dict[str, object]]:
+        async def read_group(call: ServiceCall) -> dict[str, object]:
             selected = hass.config_entries.async_get_entry(call.data["entry_id"])
             if selected is None or selected.domain != DOMAIN:
                 raise HomeAssistantError("Unknown OpenRBus config entry")
@@ -77,7 +77,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             if not 1 <= len(addresses) <= 16:
                 raise HomeAssistantError("read_group accepts 1..16 objects")
             results = await target.async_read_objects(addresses, node=call.data["node"])
-            return [
+            results = [
                 (
                     {
                         "object": str(result.address),
@@ -90,6 +90,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 )
                 for result in results
             ]
+            return {"results": results}
 
         hass.services.async_register(
             DOMAIN,
