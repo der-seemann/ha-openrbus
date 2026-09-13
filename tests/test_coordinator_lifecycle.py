@@ -84,11 +84,11 @@ async def test_timeout_removes_listener_and_releases_lock(monkeypatch) -> None:
 
     assert removed
     assert not coordinator._poll_lock.locked()
-    assert coordinator.hass.services.calls == 2
+    assert coordinator.hass.services.calls == 1
 
 
 @pytest.mark.asyncio
-async def test_service_error_is_retried_and_listener_cleaned(monkeypatch) -> None:
+async def test_service_error_does_not_overlap_auth_actions(monkeypatch) -> None:
     coordinator = _coordinator()
     coordinator.hass.services = _Services(HomeAssistantError("not ready"))
     removed = False
@@ -119,7 +119,7 @@ async def test_service_error_is_retried_and_listener_cleaned(monkeypatch) -> Non
         await coordinator._async_request_live_read(1)
 
     assert removed
-    assert coordinator.hass.services.calls == 2
+    assert coordinator.hass.services.calls == 1
 
 
 @pytest.mark.asyncio

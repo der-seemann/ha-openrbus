@@ -155,32 +155,22 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             )
             async with asyncio.timeout(50):
                 service_started = True
-                for attempt in range(2):
-                    try:
-                        await self.hass.services.async_call(
-                            "esphome",
-                            self.refresh_action,
-                            {"passkey": getattr(self, "passkey", 0)},
-                            blocking=False,
-                        )
-                    except HomeAssistantError as error:
-                        _LOGGER.warning(
-                            "poll cycle=%s service call failed attempt=%s: %s",
-                            cycle_id,
-                            attempt + 1,
-                            error,
-                        )
-                    try:
-                        await asyncio.wait_for(response_ready.wait(), timeout=25)
-                        break
-                    except TimeoutError:
-                        if attempt == 0:
-                            _LOGGER.debug(
-                                "poll cycle=%s retrying service call after response timeout",
-                                cycle_id,
-                            )
-                            continue
-                        raise
+                try:
+                    await self.hass.services.async_call(
+                        "esphome",
+                        self.refresh_action,
+                        {"passkey": getattr(self, "passkey", 0)},
+                        blocking=False,
+                    )
+                except HomeAssistantError as error:
+                    _LOGGER.warning("poll cycle=%s service call failed: %s", cycle_id, error)
+                # A response timeout is deliberately not retried in the same
+                # cycle.  Gateway auth is an ESPHome automation; triggering a
+                # second action while the first is still unwinding can create
+                # duplicate CCCD/IdentInfo state and the observed
+                # ``gateway_ident_sent`` deadlock.  The next coordinator cycle
+                # is the safe retry boundary.
+                await asyncio.wait_for(response_ready.wait(), timeout=50)
             _LOGGER.debug("poll cycle=%s complete", cycle_id)
             return received_state
         except TimeoutError as error:
