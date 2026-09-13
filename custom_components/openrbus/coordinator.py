@@ -270,6 +270,19 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             finally:
                 remove()
 
+    async def async_read_objects(
+        self, addresses: tuple[ObjectAddress, ...], *, node: int = 0xFF
+    ) -> tuple[GenericRead | HomeAssistantError, ...]:
+        """Read a bounded batch sequentially and retain per-object failures."""
+
+        results: list[GenericRead | HomeAssistantError] = []
+        for address in addresses:
+            try:
+                results.append(await self.async_read_object(address, node=node))
+            except HomeAssistantError as error:
+                results.append(error)
+        return tuple(results)
+
     @staticmethod
     def _generation_value(state) -> int | None:
         if state is None or state.state in {"", "unknown", "unavailable"}:

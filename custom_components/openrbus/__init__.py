@@ -64,6 +64,46 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ),
             supports_response=SupportsResponse.OPTIONAL,
         )
+
+        async def read_group(call: ServiceCall) -> list[dict[str, object]]:
+            selected = hass.config_entries.async_get_entry(call.data["entry_id"])
+            if selected is None or selected.domain != DOMAIN:
+                raise HomeAssistantError("Unknown OpenRBus config entry")
+            target: OpenRBusCoordinator = selected.runtime_data
+            try:
+                addresses = tuple(ObjectAddress.parse(item) for item in call.data["objects"])
+            except ValueError as error:
+                raise HomeAssistantError("objects must use hhhh:ss notation") from error
+            if not 1 <= len(addresses) <= 16:
+                raise HomeAssistantError("read_group accepts 1..16 objects")
+            results = await target.async_read_objects(addresses, node=call.data["node"])
+            return [
+                (
+                    {
+                        "object": str(result.address),
+                        "status": result.status,
+                        "raw_response": result.raw_value.hex(),
+                        "value": result.value,
+                    }
+                    if not isinstance(result, HomeAssistantError)
+                    else {"status": "error", "error": str(result)}
+                )
+                for result in results
+            ]
+
+        hass.services.async_register(
+            DOMAIN,
+            "read_group",
+            read_group,
+            schema=vol.Schema(
+                {
+                    vol.Required("entry_id"): str,
+                    vol.Required("objects"): [str],
+                    vol.Optional("node", default=0xFF): vol.All(vol.Coerce(int), vol.Range(min=1, max=255)),
+                }
+            ),
+            supports_response=SupportsResponse.OPTIONAL,
+        )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     first_refresh = hass.async_create_task(
         coordinator.async_config_entry_first_refresh()
@@ -82,6 +122,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await coordinator.async_shutdown()
     if not hass.config_entries.async_entries(DOMAIN):
         hass.services.async_remove(DOMAIN, "read_object")
+        hass.services.async_remove(DOMAIN, "read_group")
     return unloaded
 
 
