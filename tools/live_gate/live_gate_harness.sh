@@ -14,6 +14,7 @@ readonly SOURCE_COMPONENT="${SOURCE_ROOT}/custom_components/openrbus"
 readonly DEPLOYED_COMPONENT="${HA_CONFIG}/custom_components/openrbus"
 readonly RUNNER="$SCRIPT_DIR/live_gate_rest.py"
 readonly TREE_CHECKER="$SCRIPT_DIR/verify_deployed_tree.py"
+readonly CONTROLLER_GUARD="$SCRIPT_DIR/controller_guard.py"
 readonly LOCKFILE="/tmp/openrbus-live-gate.lock"
 readonly GATE_COMMIT="${GATE_COMMIT:-}"
 readonly OPERATOR_ENV="$HA_ROOT/.openrbus-live-gate.env"
@@ -53,7 +54,7 @@ load_operator_env() {
 [[ "$GATE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || die "gate_commit_required_or_invalid"
 [[ -x "$HA_PYTHON" ]] || die "test_ha_python_missing"
 [[ -f "$HA_CONFIG/configuration.yaml" && -d "$DEPLOYED_COMPONENT" ]] || die "test_ha_config_missing"
-[[ -d "$SOURCE_COMPONENT" && -f "$RUNNER" && -f "$TREE_CHECKER" ]] || die "source_or_runner_missing"
+[[ -d "$SOURCE_COMPONENT" && -f "$RUNNER" && -f "$TREE_CHECKER" && -f "$CONTROLLER_GUARD" ]] || die "source_or_runner_missing"
 load_operator_env
 [[ "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" == "$GATE_COMMIT" ]] || die "gate_commit_not_checked_out"
 git -C "$SOURCE_ROOT" merge-base --is-ancestor "$APPROVED_COMPONENT_BASE" HEAD || die "approved_component_base_missing"
@@ -69,23 +70,26 @@ flock -n 9 || die "another_live_gate_active"
 
 EXPECTED_HA_PID=""
 check_one_controller() {
-  local proc pid command ha_count=0 socket_line
-  for proc in /proc/[0-9]*; do
-    pid="${proc##*/}"
-    command="$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null || true)"
-    [[ -n "$command" ]] || continue
-    case "$command" in
-      *verify_live_read*|*test-gateway-auth*) die "debug_controller_active" ;;
-    esac
-    case "$command" in
-      *homeassistant*|*" hass "*|*"/hass "*)
-        [[ "$command" == *"$HA_CONFIG"* ]] || die "non_test_ha_controller_active"
-        ha_count=$((ha_count + 1))
-        EXPECTED_HA_PID="$pid"
-        ;;
-    esac
-  done
-  [[ "$ha_count" -eq 1 ]] || die "test_ha_controller_count_invalid"
+  local guard_output guard_status server_count server_pid debug_count socket_line
+  local -a guard_lines=()
+  if guard_output="$(
+    env HA_PYTHON="$HA_PYTHON" HASS_LAUNCHER="$HA_ROOT/.venv/bin/hass" HA_CONFIG="$HA_CONFIG" "$HA_PYTHON" "$CONTROLLER_GUARD"
+  )"; then
+    guard_status=0
+  else
+    guard_status=$?
+  fi
+  mapfile -t guard_lines <<< "$guard_output"
+  [[ "${#guard_lines[@]}" -eq 3 ]] || die "controller_guard_invalid_protocol"
+  [[ "${guard_lines[0]}" =~ ^SERVER_COUNT=([0-9]+)$ ]] || die "controller_guard_invalid_server_count"
+  server_count="${BASH_REMATCH[1]}"
+  [[ "${guard_lines[1]}" =~ ^SERVER_PID=([0-9]*)$ ]] || die "controller_guard_invalid_server_pid"
+  server_pid="${BASH_REMATCH[1]}"
+  [[ "${guard_lines[2]}" =~ ^DEBUG_COUNT=([0-9]+)$ ]] || die "controller_guard_invalid_debug_count"
+  debug_count="${BASH_REMATCH[1]}"
+  [[ "$debug_count" -eq 0 ]] || die "debug_controller_active"
+  [[ "$guard_status" -eq 0 && "$server_count" -eq 1 && "$server_pid" =~ ^[1-9][0-9]*$ ]] || die "test_ha_controller_count_invalid"
+  EXPECTED_HA_PID="$server_pid"
   socket_line="$(ss -Htnp state established "dst $TEST_ESP_HOST:$TEST_ESP_PORT" 2>/dev/null || true)"
   [[ -n "$socket_line" ]] || die "test_esp_connection_missing_or_uninspectable"
   [[ "$(printf '%s\n' "$socket_line" | wc -l)" -eq 1 ]] || die "test_esp_connection_count_invalid"

@@ -31,7 +31,7 @@ Run the offline checks first:
 
 ```bash
 cd /home/kiki/Documents/Codex/2026-09-13-role-openrbus-technical-supervisor-lead-engineer/ha-openrbus/tools/live_gate
-/home/kiki/work/openrbus-ha-test/.venv/bin/python -m unittest -v test_live_gate_rest.py test_tree_integrity.py
+/home/kiki/work/openrbus-ha-test/.venv/bin/python -m unittest -v test_live_gate_rest.py test_tree_integrity.py test_controller_guard.py
 bash -n live_gate_harness.sh
 /home/kiki/work/openrbus-ha-test/.venv/bin/python -m py_compile live_gate_rest.py verify_deployed_tree.py
 ```
