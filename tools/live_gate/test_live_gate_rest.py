@@ -8,11 +8,33 @@ from io import StringIO
 from unittest.mock import patch
 from pathlib import Path
 import unittest
+from urllib.error import HTTPError
+from urllib.parse import parse_qs
 
 import live_gate_rest as gate
 
 
 FIXTURE = json.loads((Path(__file__).with_name("live_gate_fixtures.json")).read_text())
+
+
+class _Response:
+    status = 200
+
+    def __init__(self, payload: object) -> None:
+        self.payload = json.dumps(payload).encode()
+
+    def __enter__(self) -> "_Response":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self.payload
+
+
+def _token_response(value: str = "access-fixture", expires_in: int = 1800) -> _Response:
+    return _Response({"access_token": value, "token_type": "Bearer", "expires_in": expires_in})
 
 
 class ServiceResponseTests(unittest.TestCase):
@@ -49,29 +71,65 @@ class ServiceResponseTests(unittest.TestCase):
             gate.select_target(states, services)
 
     def test_service_response_mode_is_only_requested_for_reads(self) -> None:
-        class Response:
-            status = 200
-
-            def __init__(self, payload: object) -> None:
-                self.payload = json.dumps(payload).encode()
-
-            def __enter__(self) -> "Response":
-                return self
-
-            def __exit__(self, *args: object) -> None:
-                return None
-
-            def read(self) -> bytes:
-                return self.payload
-
-        responses = [Response([]), Response({"service_response": FIXTURE["object_response"]})]
+        responses = [_token_response(), _Response([]), _Response({"service_response": FIXTURE["object_response"]})]
         with patch("live_gate_rest.urlopen", side_effect=responses) as opened:
-            api = gate.HAApi("redacted")
+            api = gate.HAApi("refresh-fixture")
             api.standard_service("homeassistant", "reload_config_entry", {"entry_id": "entry_12345"})
             api.response_service("read_object", {"entry_id": "entry_12345", "object": "2001:02", "node": 255})
         urls = [call.args[0].full_url for call in opened.call_args_list]
-        self.assertEqual(urls[0], "http://127.0.0.1:8123/api/services/homeassistant/reload_config_entry")
-        self.assertEqual(urls[1], "http://127.0.0.1:8123/api/services/openrbus/read_object?return_response")
+        self.assertEqual(urls[0], "http://127.0.0.1:8123/auth/token")
+        self.assertEqual(urls[1], "http://127.0.0.1:8123/api/services/homeassistant/reload_config_entry")
+        self.assertEqual(urls[2], "http://127.0.0.1:8123/api/services/openrbus/read_object?return_response")
+
+
+class TokenFlowTests(unittest.TestCase):
+    def test_initial_exchange_omits_null_client_id_and_never_leaves_loopback(self) -> None:
+        with patch("live_gate_rest.urlopen", return_value=_token_response()) as opened:
+            token = gate.TokenProvider("refresh-fixture").access_token()
+        request = opened.call_args.args[0]
+        self.assertEqual(token, "access-fixture")
+        self.assertEqual(request.full_url, "http://127.0.0.1:8123/auth/token")
+        self.assertEqual(parse_qs(request.data.decode()), {"grant_type": ["refresh_token"], "refresh_token": ["refresh-fixture"]})
+        self.assertNotIn("client_id", request.data.decode())
+        self.assertNotIn("Authorization", request.headers)
+
+    def test_proactive_refresh_happens_before_expiry(self) -> None:
+        now = [0.0]
+        with patch("live_gate_rest.urlopen", side_effect=[_token_response("access-one"), _token_response("access-two")]) as opened:
+            provider = gate.TokenProvider("refresh-fixture", clock=lambda: now[0])
+            self.assertEqual(provider.access_token(), "access-one")
+            now[0] = 1680.0
+            self.assertEqual(provider.access_token(), "access-two")
+        self.assertEqual(opened.call_count, 2)
+
+    def test_unauthorized_get_refreshes_and_retries_once(self) -> None:
+        unauthorized = HTTPError("http://127.0.0.1:8123/api/states", 401, "unauthorized", {}, None)
+        responses = [_token_response("access-one"), unauthorized, _token_response("access-two"), _Response(FIXTURE["states_response"])]
+        with patch("live_gate_rest.urlopen", side_effect=responses) as opened:
+            gate.HAApi("refresh-fixture").states()
+        self.assertEqual(opened.call_count, 4)
+        urls = [call.args[0].full_url for call in opened.call_args_list]
+        self.assertEqual(urls.count("http://127.0.0.1:8123/auth/token"), 2)
+        self.assertTrue(all(url.startswith("http://127.0.0.1:8123/") for url in urls))
+
+    def test_unauthorized_service_posts_are_never_retried(self) -> None:
+        for domain, service, data in (
+            ("homeassistant", "reload_config_entry", {"entry_id": "entry_12345"}),
+            ("esphome", "test_openrbus_reboot", {}),
+        ):
+            unauthorized = HTTPError("http://127.0.0.1:8123/api/services", 401, "unauthorized", {}, None)
+            with self.subTest(service=service), patch("live_gate_rest.urlopen", side_effect=[_token_response("access-one"), unauthorized]) as opened:
+                with self.assertRaisesRegex(gate.GateError, "ha_auth_unauthorized"):
+                    gate.HAApi("refresh-fixture").standard_service(domain, service, data)
+            self.assertEqual(opened.call_count, 2)
+            urls = [call.args[0].full_url for call in opened.call_args_list]
+            self.assertEqual(urls.count(f"http://127.0.0.1:8123/api/services/{domain}/{service}"), 1)
+
+    def test_token_failures_redact_fixture_secret(self) -> None:
+        with patch("live_gate_rest.urlopen", side_effect=HTTPError("http://127.0.0.1:8123/auth/token", 400, "bad", {}, None)):
+            with self.assertRaises(gate.GateError) as raised:
+                gate.TokenProvider("refresh-secret-fixture").access_token()
+        self.assertNotIn("refresh-secret-fixture", str(raised.exception))
 
 
 class TransitionTests(unittest.TestCase):
@@ -121,6 +179,9 @@ class _FakeApi:
 
     def states(self) -> dict[str, gate.EntityState]:
         return gate.parse_states(FIXTURE["states_response"])
+
+    def maintain_auth(self) -> None:
+        return None
 
     def standard_service(self, domain: str, service: str, data: dict[str, object]) -> None:
         self.calls.append(("standard", domain, service, data))

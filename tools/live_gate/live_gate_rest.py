@@ -18,6 +18,7 @@ import threading
 import time
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
@@ -32,6 +33,7 @@ OBJECT_RE = re.compile(r"^[0-9a-fA-F]{4}:[0-9a-fA-F]{2}$")
 POLL_COMPLETE_RE = re.compile(r"\bpoll cycle=\d+ complete\b")
 LIFECYCLE_ERROR_RE = re.compile(r"(?:ESPHome OpenRBus lifecycle failed|\blifecycle (?:failed|error)\b|\bpoll cycle=\d+ timeout\b|\bpoll cycle=\d+ service call failed\b)", re.IGNORECASE)
 UPTIME_RESET_RE = re.compile(r"\bdetected ESP uptime reset\b", re.IGNORECASE)
+TOKEN_REFRESH_MARGIN_SECONDS = 120
 
 
 class GateError(RuntimeError):
@@ -338,29 +340,103 @@ class LogWatcher:
             fail("lifecycle_log_failure")
 
 
+class TokenProvider:
+    """Keep short-lived HA access tokens in memory and refresh proactively."""
+
+    def __init__(self, refresh_token: str, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._refresh_token = refresh_token
+        self._clock = clock
+        self._access_token: str | None = None
+        self._expires_at = 0.0
+
+    def access_token(self, *, force: bool = False) -> str:
+        if force or self._access_token is None or self._clock() >= self._expires_at - TOKEN_REFRESH_MARGIN_SECONDS:
+            self._refresh()
+        assert self._access_token is not None
+        return self._access_token
+
+    def _refresh(self) -> None:
+        # Local HA evidence shows a system refresh token with client_id=None.
+        # The installed TokenView requires omitted client_id (not an empty value)
+        # for that token class to compare equal to None.
+        body = urlencode(
+            {"grant_type": "refresh_token", "refresh_token": self._refresh_token}
+        ).encode()
+        request = Request(
+            LOCAL_URL + "/auth/token",
+            data=body,
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=30) as response:
+                if response.status // 100 != 2:
+                    fail("ha_token_endpoint_failed")
+                payload = json.loads(response.read().decode("utf-8"))
+        except (HTTPError, URLError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError):
+            fail("ha_token_exchange_failed")
+        if not isinstance(payload, dict):
+            fail("ha_token_schema_invalid")
+        access_token = payload.get("access_token")
+        token_type = payload.get("token_type")
+        expires_in = payload.get("expires_in")
+        if (
+            not isinstance(access_token, str)
+            or not access_token
+            or token_type != "Bearer"
+            or not isinstance(expires_in, int)
+            or isinstance(expires_in, bool)
+            or expires_in <= TOKEN_REFRESH_MARGIN_SECONDS
+        ):
+            fail("ha_token_schema_invalid")
+        self._access_token = access_token
+        self._expires_at = self._clock() + expires_in
+
+
 class HAApi:
-    def __init__(self, token: str) -> None:
-        self._token = token
+    def __init__(self, refresh_token: str) -> None:
+        self._tokens = TokenProvider(refresh_token)
 
     def _request(self, path: str, body: dict[str, Any] | None = None) -> object:
         payload = None if body is None else json.dumps(body, separators=(",", ":")).encode()
-        request = Request(LOCAL_URL + path, data=payload, headers={"Authorization": f"Bearer {self._token}", "Content-Type": "application/json"}, method="GET" if body is None else "POST")
-        try:
-            with urlopen(request, timeout=70) as response:
-                if response.status // 100 != 2:
-                    fail("ha_http_failure")
-                try:
-                    return json.loads(response.read().decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    fail("ha_json_invalid")
-        except (HTTPError, URLError, TimeoutError):
-            fail("ha_request_failed")
+        # A service invocation is a mutating POST from HA's HTTP perspective,
+        # including read-only OpenRBus services. Retrying it after a 401 could
+        # duplicate a reload/reboot or an in-flight bus request. Only idempotent
+        # GET inventory/state reads may exchange a new token and retry once.
+        retry_allowed = body is None
+        for attempt in range(2 if retry_allowed else 1):
+            token = self._tokens.access_token(force=attempt == 1)
+            request = Request(
+                LOCAL_URL + path,
+                data=payload,
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                method="GET" if body is None else "POST",
+            )
+            try:
+                with urlopen(request, timeout=70) as response:
+                    if response.status // 100 != 2:
+                        fail("ha_http_failure")
+                    try:
+                        return json.loads(response.read().decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        fail("ha_json_invalid")
+            except HTTPError as error:
+                if error.code == 401 and retry_allowed and attempt == 0:
+                    continue
+                fail("ha_auth_unauthorized" if error.code == 401 else "ha_request_failed")
+            except (URLError, TimeoutError):
+                fail("ha_request_failed")
+        fail("ha_auth_unauthorized")
 
     def states(self) -> dict[str, EntityState]:
         return parse_states(self._request("/api/states"))
 
     def services(self) -> dict[str, set[str]]:
         return parse_services(self._request("/api/services"))
+
+    def maintain_auth(self) -> None:
+        """Refresh the in-memory access token before it can expire mid-gate."""
+        self._tokens.access_token()
 
     def standard_service(self, domain: str, service: str, data: dict[str, Any]) -> None:
         result = self._request(f"/api/services/{domain}/{service}", data)
@@ -441,9 +517,9 @@ class StateSampler(threading.Thread):
 def required_env() -> tuple[str, str, int, str, str, Path]:
     if os.environ.get("HA_URL", LOCAL_URL) != LOCAL_URL:
         fail("non_loopback_url")
-    token, entry = os.environ.get("HA_TOKEN", ""), os.environ.get("HA_ENTRY_ID", "")
-    if not token:
-        fail("ha_token_missing")
+    refresh_token, entry = os.environ.get("HA_REFRESH_TOKEN", ""), os.environ.get("HA_ENTRY_ID", "")
+    if not refresh_token:
+        fail("ha_refresh_token_missing")
     if not ENTRY_RE.fullmatch(entry):
         fail("entry_id_invalid")
     validate_test_esp_endpoint(
@@ -457,7 +533,7 @@ def required_env() -> tuple[str, str, int, str, str, Path]:
     log_path = Path(os.environ.get("HA_LOG", str(DEFAULT_LOG)))
     if log_path != DEFAULT_LOG:
         fail("non_test_ha_log")
-    return token, entry, node, valid, invalid, log_path
+    return refresh_token, entry, node, valid, invalid, log_path
 
 
 def assert_services(services: dict[str, set[str]]) -> None:
@@ -499,6 +575,7 @@ def run() -> None:
             print(f"CYCLE={cycle} RESULT=pass", flush=True)
         deadline = time.monotonic() + parse_poll_timeout(os.environ.get("POLL_WAIT_TIMEOUT", "2100"))
         while watcher.completed_polls < 30:
+            api.maintain_auth()
             watcher.scan()
             monitor.assert_no_unexpected()
             if time.monotonic() >= deadline:

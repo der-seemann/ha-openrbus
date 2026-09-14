@@ -24,7 +24,7 @@ load_operator_env() {
   local line key value expected_owner mode
   local -A seen=()
   local -a allowed=(
-    HA_TOKEN HA_ENTRY_ID TEST_ESP_HOST TEST_ESP_PORT OPENRBUS_NODE
+    HA_REFRESH_TOKEN HA_ENTRY_ID TEST_ESP_HOST TEST_ESP_PORT OPENRBUS_NODE
     OPENRBUS_VALID_OBJECT OPENRBUS_INVALID_OBJECT OPENRBUS_RESPONSE_ENTITY
     ESP_REBOOT_SERVICE POLL_WAIT_TIMEOUT
   )
@@ -33,6 +33,7 @@ load_operator_env() {
   [[ "$(stat -c '%u' "$OPERATOR_ENV")" == "$expected_owner" ]] || die "operator_env_owner_invalid"
   mode="$(stat -c '%a' "$OPERATOR_ENV")"
   [[ "$mode" == "600" ]] || die "operator_env_mode_invalid"
+  unset HA_TOKEN || true
   for key in "${allowed[@]}"; do unset "$key" || true; done
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -z "$line" || "$line" == \#* ]] && continue
@@ -45,7 +46,7 @@ load_operator_env() {
     printf -v "$key" '%s' "$value"
     export "$key"
   done < "$OPERATOR_ENV"
-  [[ -n "${HA_TOKEN:-}" && -n "${HA_ENTRY_ID:-}" && -n "${TEST_ESP_HOST:-}" && -n "${TEST_ESP_PORT:-}" ]] || die "operator_env_required_value_missing"
+  [[ -n "${HA_REFRESH_TOKEN:-}" && -n "${HA_ENTRY_ID:-}" && -n "${TEST_ESP_HOST:-}" && -n "${TEST_ESP_PORT:-}" ]] || die "operator_env_required_value_missing"
 }
 
 [[ "$HA_ROOT" == "/home/kiki/work/openrbus-ha-test" ]] || die "non_test_ha_root"
@@ -103,8 +104,8 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-# HA_TOKEN and HA_ENTRY_ID are intentionally inherited, never echoed or put on
-# a command line. live_gate_rest.py rejects every URL except loopback test HA.
+# Operator values are inherited only by the child and never echoed or put on a
+# command line. live_gate_rest.py exchanges its refresh token only at loopback.
 "$HA_PYTHON" "$RUNNER" &
 RUNNER_PID=$!
 wait "$RUNNER_PID"

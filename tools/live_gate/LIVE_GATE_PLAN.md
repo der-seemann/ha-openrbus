@@ -47,13 +47,20 @@ install -m 600 /dev/null /home/kiki/work/openrbus-ha-test/.openrbus-live-gate.en
 ${EDITOR:?set_EDITOR} /home/kiki/work/openrbus-ha-test/.openrbus-live-gate.env
 ```
 
-Required file fields: `HA_TOKEN`, `HA_ENTRY_ID`, `TEST_ESP_HOST`, and
+Required file fields: `HA_REFRESH_TOKEN`, `HA_ENTRY_ID`, `TEST_ESP_HOST`, and
 `TEST_ESP_PORT`. Optional fields: `OPENRBUS_NODE`, `OPENRBUS_VALID_OBJECT`,
 `OPENRBUS_INVALID_OBJECT`, `OPENRBUS_RESPONSE_ENTITY`, `ESP_REBOOT_SERVICE`,
 and `POLL_WAIT_TIMEOUT`. The host must be a private non-loopback IPv4 address;
 the runner validates the protocol port. `HA_ENTRY_ID` is the isolated local
 OpenRBus config-entry id. The runner discovers the unique matching sensor and
 `esphome.*_openrbus_reboot` action from live HA state/service inventory.
+The gate exchanges the refresh token only with fixed loopback `/auth/token`,
+omits `client_id` for the local system-token class, retains only short-lived
+access tokens in memory, refreshes before expiry, and retries one HTTP 401 once
+with a newly exchanged token only for idempotent GET state/inventory requests.
+Every service POST, including reload, reboot, and OpenRBus reads, fails on 401
+without retrying. Neither token type is written to disk, stdout,
+stderr, or process arguments.
 
 ```bash
 export GATE_COMMIT=REVIEWED_GATE_COMMIT_SHA
