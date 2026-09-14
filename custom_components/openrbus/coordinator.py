@@ -77,6 +77,25 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         self._runtime_request_id = 10000
         self._dynamic_enabled = False
         self._runtime_authenticated = False
+        self._reauth_required = False
+
+    _AUTH_READY_PREFIXES = (
+        "gateway_authenticated", "dynamic_session_enabled",
+        "openrbus_dynamic_response", "openrbus_read_received", "ready",
+    )
+    _AUTH_FAILURE_PREFIXES = (
+        "gateway_auth_failed", "gateway_connect_failed",
+        "gateway_ident_characteristic_missing", "security_request_failed",
+        "openrbus_read_timeout", "failed_connect", "failed_pairing",
+        "timeout", "unavailable", "invalid_passkey", "unpaired",
+    )
+
+    @classmethod
+    def _lifecycle_failure(cls, state) -> str | None:
+        if state is None:
+            return None
+        value = str(state.state)
+        return value if value.startswith(cls._AUTH_FAILURE_PREFIXES) else None
 
     async def _async_update_data(self) -> BridgeRead:
         self._cycle_id += 1
@@ -101,12 +120,20 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             return self.hass.states.get(self.response_entity)
         response_ready = asyncio.Event()
         received_state = None
+        lifecycle_error: str | None = None
         service_started = False
         reconnect_seen = False
         previous_generation = self._generation_value(
             self.hass.states.get(self.generation_entity)
         )
         previous_uptime = self._float_state(self.hass.states.get(self.uptime_entity))
+        initial_failure = self._lifecycle_failure(
+            self.hass.states.get(self.pairing_status_entity)
+        )
+        if initial_failure is not None:
+            self._runtime_authenticated = False
+            self._reauth_required = True
+            raise UpdateFailed(f"ESPHome OpenRBus lifecycle failed: {initial_failure}")
         _LOGGER.debug(
             "poll cycle=%s arm listener entity=%s previous_generation=%s",
             cycle_id,
@@ -115,9 +142,17 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         )
 
         async def response_changed(event: Event[EventStateChangedData]) -> None:
-            nonlocal received_state, reconnect_seen, previous_uptime
+            nonlocal received_state, reconnect_seen, previous_uptime, lifecycle_error
             entity_id = event.data.get("entity_id")
             candidate = event.data.get("new_state")
+            if entity_id == self.pairing_status_entity:
+                status = str(candidate.state) if candidate is not None else "unavailable"
+                if status.startswith(self._AUTH_FAILURE_PREFIXES):
+                    lifecycle_error = status
+                    self._runtime_authenticated = False
+                    self._reauth_required = True
+                    response_ready.set()
+                return
             if entity_id == self.uptime_entity:
                 uptime = self._float_state(candidate)
                 if (
@@ -126,6 +161,8 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                     and uptime < previous_uptime
                 ):
                     reconnect_seen = True
+                    self._runtime_authenticated = False
+                    self._reauth_required = True
                     _LOGGER.debug(
                         "poll cycle=%s detected ESP uptime reset %.0f -> %.0f",
                         cycle_id,
@@ -166,7 +203,9 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 )
 
         remove = async_track_state_change_event(
-            self.hass, [self.generation_entity, self.uptime_entity], response_changed
+            self.hass,
+            [self.generation_entity, self.uptime_entity, self.pairing_status_entity],
+            response_changed,
         )
         try:
             _LOGGER.debug(
@@ -190,6 +229,11 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 # ``gateway_ident_sent`` deadlock.  The next coordinator cycle
                 # is the safe retry boundary.
                 await asyncio.wait_for(response_ready.wait(), timeout=50)
+            if lifecycle_error is not None:
+                self._runtime_authenticated = False
+                raise UpdateFailed(
+                    f"ESPHome OpenRBus lifecycle failed: {lifecycle_error}"
+                )
             _LOGGER.debug("poll cycle=%s complete", cycle_id)
             return received_state
         except TimeoutError as error:
@@ -218,6 +262,8 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 )
                 return self.hass.states.get(self.response_entity)
             _LOGGER.warning("poll cycle=%s timeout after 50s", cycle_id)
+            self._runtime_authenticated = False
+            self._reauth_required = True
             raise UpdateFailed("ESPHome OpenRBus read timed out") from error
         finally:
             remove()
@@ -238,12 +284,30 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             generation_before = self._generation_value(
                 self.hass.states.get(self.generation_entity)
             )
+            uptime_before = self._float_state(self.hass.states.get(self.uptime_entity))
+            reconnect_seen = False
+            reconnect_error = False
             event = asyncio.Event()
             received: dict[str, object] = {}
 
             async def changed(change: Event[EventStateChangedData]) -> None:
+                nonlocal reconnect_seen, reconnect_error
                 entity_id = change.data.get("entity_id")
                 new_state = change.data.get("new_state")
+                if entity_id == self.uptime_entity:
+                    uptime = self._float_state(new_state)
+                    if (
+                        uptime is not None
+                        and uptime_before is not None
+                        and uptime < uptime_before
+                    ):
+                        reconnect_seen = True
+                        reconnect_error = True
+                        received.clear()
+                        self._runtime_authenticated = False
+                        self._reauth_required = True
+                        event.set()
+                    return
                 if (
                     entity_id == self.response_entity
                     and new_state is not None
@@ -253,14 +317,16 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 if entity_id == self.generation_entity:
                     candidate = self._generation_value(new_state)
                     if candidate is not None and is_new_generation(
-                        generation_before, candidate, reset_allowed=True
+                        generation_before, candidate, reset_allowed=False
                     ):
                         received["generation"] = candidate
                 if "response" in received and "generation" in received:
                     event.set()
 
             remove = async_track_state_change_event(
-                self.hass, [self.generation_entity, self.response_entity], changed
+                self.hass,
+                [self.generation_entity, self.response_entity, self.uptime_entity],
+                changed,
             )
             try:
                 if self.dynamic_enable_action and not self._dynamic_enabled:
@@ -268,23 +334,33 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                         "esphome", self.dynamic_enable_action, {}, blocking=False
                     )
                     self._dynamic_enabled = True
-                if self.refresh_action and not self._runtime_authenticated:
+                if self.refresh_action and (
+                    not self._runtime_authenticated or self._reauth_required
+                ):
                     status = self.hass.states.get(self.pairing_status_entity)
-                    ready_states = (
-                        "gateway_authenticated",
-                        "dynamic_session_enabled",
-                        "openrbus_dynamic_response",
-                        "openrbus_read_received",
-                        "ready",
-                    )
-                    if status is None or not str(status.state).startswith(ready_states):
+                    initial_failure = self._lifecycle_failure(status)
+                    if initial_failure is not None:
+                        raise HomeAssistantError(
+                            f"ESPHome OpenRBus lifecycle failed: {initial_failure}"
+                        )
+                    if (
+                        self._reauth_required
+                        or status is None
+                        or not str(status.state).startswith(self._AUTH_READY_PREFIXES)
+                    ):
                         auth_ready = asyncio.Event()
+                        auth_error: str | None = None
 
                         async def auth_changed(
                             change: Event[EventStateChangedData],
                         ) -> None:
+                            nonlocal auth_error
                             new_state = change.data.get("new_state")
-                            if new_state is not None and str(new_state.state).startswith(ready_states):
+                            state = str(new_state.state) if new_state is not None else "unavailable"
+                            if state.startswith(self._AUTH_READY_PREFIXES):
+                                auth_ready.set()
+                            elif state.startswith(self._AUTH_FAILURE_PREFIXES):
+                                auth_error = state
                                 auth_ready.set()
 
                         remove_auth = async_track_state_change_event(
@@ -298,10 +374,19 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                                 blocking=False,
                             )
                             current = self.hass.states.get(self.pairing_status_entity)
-                            if current is not None and str(current.state).startswith(ready_states):
+                            if (
+                                not self._reauth_required
+                                and current is not None
+                                and str(current.state).startswith(self._AUTH_READY_PREFIXES)
+                            ):
                                 auth_ready.set()
                             async with asyncio.timeout(20):
                                 await auth_ready.wait()
+                            if auth_error is not None:
+                                raise HomeAssistantError(
+                                    f"ESPHome OpenRBus lifecycle failed: {auth_error}"
+                                )
+                            self._reauth_required = False
                         finally:
                             remove_auth()
                     self._runtime_authenticated = True
@@ -316,6 +401,10 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 )
                 async with asyncio.timeout(25):
                     await event.wait()
+                if reconnect_error:
+                    raise HomeAssistantError(
+                        "ESPHome reconnected during OpenRBus raw read; retry required"
+                    )
                 state = received.get("response")
                 if state is None or state.state in {"", "unknown", "unavailable"}:
                     raise HomeAssistantError("ESPHome raw response is unavailable")
