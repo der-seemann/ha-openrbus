@@ -1,0 +1,65 @@
+{
+  "object_response": {
+    "node": 255,
+    "object": "2001:02",
+    "status": "supported",
+    "raw_response": "1001a0",
+    "value": 528
+  },
+  "group_response": {
+    "results": [
+      {
+        "object": "2001:02",
+        "status": "supported",
+        "raw_response": "1001a0",
+        "value": 528
+      },
+      {
+        "status": "error",
+        "error": "OBJECT_NOT_SUPPORTED:ffff:ff"
+      }
+    ]
+  },
+  "states_response": [
+    {
+      "entity_id": "sensor.test_openrbus_read_raw_response",
+      "state": "10aa",
+      "last_updated": "2026-09-14T10:00:00+00:00"
+    },
+    {
+      "entity_id": "sensor.test_openrbus_read_generation",
+      "state": "7",
+      "last_updated": "2026-09-14T10:00:00+00:00"
+    },
+    {
+      "entity_id": "sensor.test_uptime",
+      "state": "100",
+      "last_updated": "2026-09-14T10:00:00+00:00"
+    },
+    {
+      "entity_id": "sensor.test_openrbus_pairing_status",
+      "state": "gateway_authenticated",
+      "last_updated": "2026-09-14T10:00:00+00:00"
+    }
+  ],
+  "services_response": [
+    {
+      "domain": "homeassistant",
+      "services": {"reload_config_entry": {}}
+    },
+    {
+      "domain": "openrbus",
+      "services": {"read_object": {}, "read_group": {}}
+    },
+    {
+      "domain": "esphome",
+      "services": {"test_openrbus_reboot": {}}
+    }
+  ],
+  "state_sequence": [
+    {"uptime": "100", "status": "gateway_authenticated", "stamp": "a"},
+    {"uptime": "unavailable", "status": "rebooting", "stamp": "b"},
+    {"uptime": "3", "status": "gateway_authenticated_dynamic", "stamp": "c"}
+  ],
+  "log_delta": "poll cycle=4 complete\npoll cycle=5 complete\npoll cycle=6 timeout after 50s\ndetected ESP uptime reset 100 -> 2\n"
+}
