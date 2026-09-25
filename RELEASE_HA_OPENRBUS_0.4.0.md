@@ -32,6 +32,10 @@ metadata.
 | Diagnostics | Aggregate-only output; no addresses, names, object identities, serials, service names, credentials, or exception messages. |
 | Documentation | README, changelog, Core provenance, installation, troubleshooting, privacy, and history guidance updated. |
 
+The observed Home Assistant test topology contained 1,799 OpenRBus entities.
+That is a node- and catalog-dependent validation result, not a universal
+entity-count promise for other installations.
+
 ## Quality-scale matrix
 
 The integration targets Home Assistant Bronze and implements the applicable
