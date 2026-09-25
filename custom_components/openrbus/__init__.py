@@ -48,41 +48,41 @@ PLATFORMS = ["sensor", "number", "select", "switch"]
 # details out of the user-facing flow: the proxy capability selects the
 # transport, while this integration supplies the known profile internally.
 _DEFAULT_THIN_KEY_SECRET = "openrbus_ehc_key"
-_THIN_CCCD = "00000000-0000-4000-8000-000000000001"
+_THIN_CCCD = "00002902-0000-1000-8000-00805f9b34fb"
 
 
 def _default_thin_profile() -> ThinGattProfile:
     """Return the canonical EHC profile used by the bundled Thin-RPC proxy."""
 
     return ThinGattProfile(
-        service="00000000-0000-4000-8000-000000000001",
+        service="6a37b97e-779d-457f-8182-edf334edd01f",
         identity=GATEWAY_IDENT_REQUEST,
         auth=GATEWAY_AUTH_REQUEST,
         notify=GATEWAY_IDENT_RESPONSE,
         roles={
             "identity": (
-                "00000000-0000-4000-8000-000000000001",
+                "6a37b97e-779d-457f-8182-edf334edd01f",
                 GATEWAY_IDENT_REQUEST,
             ),
             "identity_notify": (
-                "00000000-0000-4000-8000-000000000001",
+                "6a37b97e-779d-457f-8182-edf334edd01f",
                 GATEWAY_IDENT_RESPONSE,
             ),
             "identity_cccd": (
-                "00000000-0000-4000-8000-000000000001",
+                "6a37b97e-779d-457f-8182-edf334edd01f",
                 GATEWAY_IDENT_RESPONSE,
                 _THIN_CCCD,
             ),
             "auth": (
-                "00000000-0000-4000-8000-000000000001",
+                "6a37b97e-779d-457f-8182-edf334edd01f",
                 GATEWAY_AUTH_REQUEST,
             ),
             "auth_notify": (
-                "00000000-0000-4000-8000-000000000001",
+                "6a37b97e-779d-457f-8182-edf334edd01f",
                 GATEWAY_AUTH_RESPONSE,
             ),
             "auth_cccd": (
-                "00000000-0000-4000-8000-000000000001",
+                "6a37b97e-779d-457f-8182-edf334edd01f",
                 GATEWAY_AUTH_RESPONSE,
                 _THIN_CCCD,
             ),

@@ -182,19 +182,19 @@ def test_ble_choice_deduplicates_addresses_and_chooses_name_deterministically() 
 def test_native_choice_filter_matches_current_transparent_service_selector() -> None:
     assert _has_openrbus_service(
         SimpleNamespace(
-            service_uuids=["00000000-0000-4000-8000-000000000001"],
+            service_uuids=["F8FC98E4-5919-4A5C-852E-DFE04AD383C0"],
             manufacturer_data={17474: b"BDR"},
         )
     )
     assert not _has_openrbus_service(SimpleNamespace(service_uuids=[]))
     assert not _has_openrbus_service(
         SimpleNamespace(
-            service_uuids=["00000000-0000-4000-8000-000000000001"],
+            service_uuids=["F8FC98E4-5919-4A5C-852E-DFE04AD383C0"],
             manufacturer_data={1: b"other"},
         )
     )
     assert not _has_openrbus_service(
-        SimpleNamespace(service_uuids=["00000000-0000-4000-8000-000000000001"])
+        SimpleNamespace(service_uuids=["0000180f-0000-1000-8000-00805f9b34fb"])
     )
     assert not _has_openrbus_service(SimpleNamespace(manufacturer_data={1: b"other"}))
 

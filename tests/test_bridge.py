@@ -36,7 +36,7 @@ def test_rejects_wrong_crc() -> None:
 
 
 def test_rejects_wrong_object_correlation() -> None:
-    message = bytes.fromhex("01TESTSANITIZED000000000000")
+    message = bytes.fromhex("01020000000100ff200103161e")
     segment = BleSegmentCodec().encode(message)[0].hex()
     with pytest.raises(ProtocolError, match="correlation"):
         decode_device_type(segment)
