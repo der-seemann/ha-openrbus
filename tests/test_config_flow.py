@@ -131,22 +131,22 @@ def test_integration_uses_current_core_authorization_contract() -> None:
 
 def test_ble_choice_shows_name_and_mac_but_keeps_address_as_value() -> None:
     choices = _choices_from_ble_items(
-        [{"address": "BLE_TARGET_ADDRESS", "name": "Gateway"}]
+        [{"address": "aa:bb:cc:dd:ee:ff", "name": "Gateway"}]
     )
-    assert choices == {"BLE_TARGET_ADDRESS": "Gateway (BLE_TARGET_ADDRESS)"}
+    assert choices == {"aa:bb:cc:dd:ee:ff": "Gateway (AA:BB:CC:DD:EE:FF)"}
 
 
 def test_ble_choice_uses_only_mac_for_missing_or_placeholder_name() -> None:
-    assert _format_ble_target_label("BLE_TARGET_ADDRESS", " ") == ("BLE_TARGET_ADDRESS")
-    assert _format_ble_target_label("BLE_TARGET_ADDRESS", "Unknown device") == (
-        "BLE_TARGET_ADDRESS"
+    assert _format_ble_target_label("AA:BB:CC:DD:EE:01", " ") == ("AA:BB:CC:DD:EE:01")
+    assert _format_ble_target_label("AA:BB:CC:DD:EE:02", "Unknown device") == (
+        "AA:BB:CC:DD:EE:02"
     )
 
 
 def test_native_ble_source_map_dedupes_same_target_deterministically(
     monkeypatch,
 ) -> None:
-    target = "BLE_TARGET_ADDRESS"
+    target = "AA:BB:CC:DD:EE:FF"
     records = [
         SimpleNamespace(
             address=target, source="adapter-hci1", rssi=-70, service_uuids=None
@@ -169,13 +169,13 @@ def test_native_ble_source_map_dedupes_same_target_deterministically(
 
 def test_ble_choice_deduplicates_addresses_and_chooses_name_deterministically() -> None:
     items = [
-        {"address": "BLE_TARGET_ADDRESS", "name": "Zulu"},
-        {"address": "BLE_TARGET_ADDRESS", "name": "Alpha"},
-        {"address": "BLE_TARGET_ADDRESS", "name": "Other"},
+        {"address": "AA:BB:CC:DD:EE:03", "name": "Zulu"},
+        {"address": "aa:bb:cc:dd:ee:03", "name": "Alpha"},
+        {"address": "AA:BB:CC:DD:EE:04", "name": "Other"},
     ]
     assert _choices_from_ble_items(items) == {
-        "BLE_TARGET_ADDRESS": "Alpha (BLE_TARGET_ADDRESS)",
-        "BLE_TARGET_ADDRESS": "Other (BLE_TARGET_ADDRESS)",
+        "AA:BB:CC:DD:EE:03": "Alpha (AA:BB:CC:DD:EE:03)",
+        "AA:BB:CC:DD:EE:04": "Other (AA:BB:CC:DD:EE:04)",
     }
 
 

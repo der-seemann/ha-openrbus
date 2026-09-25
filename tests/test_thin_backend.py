@@ -1123,11 +1123,11 @@ async def test_connect_carries_selected_remote_ble_target() -> None:
     channel = HomeAssistantThinGattChannel(
         client,
         ThinRpcCapability("request", "poll", "diagnostics"),
-        target_address="BLE_TARGET_ADDRESS",
+        target_address="AA:BB:CC:DD:EE:FF",
     )
     await channel.action("request", {"op": "CONNECT", "request_id": 1}, timeout=1)
     frame = json.loads(client.calls[0][1]["frame"])
-    assert frame["payload"]["target_address"] == "BLE_TARGET_ADDRESS"
+    assert frame["payload"]["target_address"] == "AA:BB:CC:DD:EE:FF"
 
 
 @pytest.mark.asyncio

@@ -35,7 +35,7 @@ def _backend_with_factory(factory, monkeypatch, authorizer):
     )
     return NativeBluetoothBackend(
         SimpleNamespace(),
-        address="BLE_TARGET_ADDRESS",
+        address="AA:BB:CC:DD:EE:FF",
         access_level=3,
         key_provider=lambda _purpose: b"1234",
         transport_factory=factory,
@@ -52,7 +52,7 @@ async def test_native_backend_owns_local_transport_lifecycle() -> None:
         return transport
 
     backend = NativeBluetoothBackend(
-        SimpleNamespace(), address="BLE_TARGET_ADDRESS", transport_factory=factory
+        SimpleNamespace(), address="AA:BB:CC:DD:EE:FF", transport_factory=factory
     )
     await backend.async_start()
     assert backend.started
@@ -158,7 +158,7 @@ async def test_native_backend_does_not_retry_key_provider_failure(monkeypatch) -
 
     backend = NativeBluetoothBackend(
         SimpleNamespace(),
-        address="BLE_TARGET_ADDRESS",
+        address="AA:BB:CC:DD:EE:FF",
         access_level=3,
         key_provider=key_provider,
         transport_factory=factory,
@@ -182,11 +182,11 @@ def test_native_backend_passes_configured_pin_to_core_transport(monkeypatch) -> 
         _CoreTransport,
     )
     backend = NativeBluetoothBackend(
-        SimpleNamespace(), address="BLE_TARGET_ADDRESS", source="hci1", passkey=123456
+        SimpleNamespace(), address="AA:BB:CC:DD:EE:FF", source="hci1", passkey=123456
     )
-    backend.transport_factory("BLE_TARGET_ADDRESS")
+    backend.transport_factory("AA:BB:CC:DD:EE:FF")
     assert captured == {
-        "address": "BLE_TARGET_ADDRESS",
+        "address": "AA:BB:CC:DD:EE:FF",
         "adapter": "hci1",
         "pairing_pin": 123456,
         "gateway_auth": True,
@@ -211,17 +211,17 @@ def test_native_backend_resolves_persisted_ha_source_to_adapter(monkeypatch) -> 
     )
     backend = NativeBluetoothBackend(
         SimpleNamespace(),
-        address="BLE_TARGET_ADDRESS",
-        source="BLE_TARGET_ADDRESS",
+        address="AA:BB:CC:DD:EE:FF",
+        source="02:00:00:00:00:02",
     )
-    backend.transport_factory("BLE_TARGET_ADDRESS")
+    backend.transport_factory("AA:BB:CC:DD:EE:FF")
     assert captured["adapter"] == "hci1"
 
 
 def test_native_backend_rejects_legacy_entry_without_resolved_source() -> None:
-    backend = NativeBluetoothBackend(SimpleNamespace(), address="BLE_TARGET_ADDRESS")
+    backend = NativeBluetoothBackend(SimpleNamespace(), address="AA:BB:CC:DD:EE:FF")
     with pytest.raises(HomeAssistantError, match="adapter source unavailable"):
-        backend.transport_factory("BLE_TARGET_ADDRESS")
+        backend.transport_factory("AA:BB:CC:DD:EE:FF")
 
 
 @pytest.mark.asyncio
