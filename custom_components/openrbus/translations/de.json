@@ -1,0 +1,124 @@
+{
+  "title": "OpenRBus",
+  "common": {
+    "access_level_warning": "Diese Zugriffsebene macht auch Werte und Parameter zugänglich, die laut Hersteller vom Benutzer nicht geändert werden müssen. Sie sind nun trotzdem da – viel Spaß mit der zusätzlichen Verantwortung 🙂",
+    "write_access_warning": "Falsche Einstellungen können dazu führen, dass die test-device nicht mehr richtig arbeitet, und Verschleiß sowie Energieverbrauch erhöhen.",
+    "optimization_note": "Nicht jede bestehende test-device ist optimal eingestellt; eine fachkundige Optimierung kann daher sinnvoll sein."
+  },
+  "config": {
+    "step": {
+      "user": {
+        "title": "ESPHome-Gateway auswählen",
+        "description": "Wähle einen lokalen Bluetooth-Adapter oder einen ESPHome Thin-RPC-Proxy.",
+        "data": {
+          "backend": "Transport",
+          "language": "Sprache der Entitäten",
+          "write_enabled": "Schreibzugriff aktivieren",
+          "access_level": "Zugriffsebene",
+          "passkey": "Bluetooth-Kopplungs-PIN",
+          "poll_interval_fast": "Schnelles Polling (Sekunden)",
+          "poll_interval_standard": "Standard-Polling (Sekunden)",
+          "poll_interval_slow": "Langsames Polling (Sekunden)"
+        }
+      },
+      "ble_target": {
+        "title": "BLE-Gateway auswählen",
+        "description": "Wähle das erkannte test-device oder den kompatiblen Proxy.",
+        "data": {
+          "ble_device": "BLE-Gateway",
+          "flow_action": "Navigation"
+        }
+      },
+      "access_level": {
+        "title": "Zugriffsebene",
+        "description": "Wählen Sie die gewünschte Zugriffsebene und ob Schreibzugriff aktiviert werden soll.",
+        "data": {
+          "access_level": "Zugriffsebene",
+          "write_enabled": "Schreibzugriff aktivieren",
+          "flow_action": "Navigation"
+        }
+      },
+      "access_warning": {
+        "title": "Zugriffs- und Schreibrechte prüfen",
+        "description": "{warning}",
+        "data": {
+          "access_level_acknowledged": "Ich verstehe die möglichen Auswirkungen und möchte diese Berechtigungen aktivieren.",
+          "flow_action": "Navigation"
+        }
+      },
+      "credentials": {
+        "title": "Verbindung",
+        "data": {
+          "passkey": "Bluetooth-Kopplungs-PIN",
+          "auth_encryption_key": "Verschlüsselungskey",
+          "flow_action": "Navigation"
+        }
+      },
+      "thin_scan": {
+        "title": "BLE-Gerät hinter dem ESP-Proxy auswählen",
+        "description": "Alle während des Remote-Scans sichtbaren BLE-Geräte.",
+        "data": {
+          "ble_device": "BLE-Gerät",
+          "flow_action": "Navigation"
+        }
+      },
+      "thin_controller": {
+        "title": "Thin-RPC-Controller auswählen",
+        "description": "Wähle ein vollständiges Trio aus Request-, Poll- und Diagnose-Service.",
+        "data": {
+          "thin_rpc_controller": "Controller",
+          "flow_action": "Navigation"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "Dieses Gateway ist bereits eingerichtet.",
+      "no_esphome_gateway": "Keine ESPHome-OpenRBus-Gateway-Aktion verfügbar.",
+      "no_esphome_entities": "Keine ESPHome-Sensoren für Rohantwort und Lese-Generation gefunden.",
+      "access_confirmation_required": "Bitte bestätigen Sie die möglichen Auswirkungen, bevor Sie die ausgewählten Berechtigungen aktivieren.",
+      "thin_rpc_scan_failed": "Remote-BLE-Scan über den ESP-Proxy fehlgeschlagen.",
+      "thin_rpc_no_ble_devices": "Keine BLE-Geräte am ESP-Proxy gefunden."
+    }
+  },
+  "options": {
+    "step": {
+      "access_warning": {
+        "title": "Zugriffs- und Schreibrechte prüfen",
+        "description": "{warning}",
+        "data": {
+          "access_level_acknowledged": "Ich verstehe die möglichen Auswirkungen und möchte diese Berechtigungen aktivieren.",
+          "flow_action": "Navigation"
+        }
+      },
+      "credentials": {
+        "title": "Verbindung",
+        "data": {
+          "auth_encryption_key": "Verschlüsselungskey",
+          "flow_action": "Navigation"
+        }
+      },
+      "thin_controller": {
+        "title": "Thin-RPC-Controller auswählen",
+        "data": {
+          "thin_rpc_controller": "Controller",
+          "flow_action": "Navigation"
+        }
+      },
+      "thin_scan": {
+        "title": "BLE-Gerät hinter dem ESP-Proxy auswählen",
+        "data": {
+          "ble_device": "BLE-Gerät",
+          "flow_action": "Navigation"
+        }
+      }
+    }
+  },
+  "selector": {
+    "flow_action": {
+      "options": {
+        "next": "Weiter",
+        "back": "Zurück"
+      }
+    }
+  }
+}

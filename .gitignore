@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.coverage
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# Local live-validation artifacts; never include them in release commits.
+NATIVE_SESSION_STALE_RESPONSE.md
+TYPED_ENTITY_STATE_PROJECTION.md
+final-release-ha.pid
+ha.pid

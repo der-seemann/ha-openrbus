@@ -1,0 +1,135 @@
+{
+  "title": "OpenRBus",
+  "common": {
+    "access_level_warning": "Higher access levels also expose values and parameters that the manufacturer does not expect users to change. They are available anyway — enjoy the extra responsibility 🙂",
+    "write_access_warning": "Incorrect settings can cause the system to stop working correctly and can increase wear and energy consumption.",
+    "optimization_note": "Existing systems are not always configured optimally, so qualified optimization can still be worthwhile."
+  },
+  "config": {
+    "step": {
+      "user": {
+        "title": "Select transport",
+        "description": "Choose a native Bluetooth adapter or an OpenRBus proxy.",
+        "data": {
+          "backend": "Transport",
+          "language": "Language"
+        }
+      },
+      "ble_target": {
+        "title": "Select BLE gateway",
+        "description": "Choose the discovered heating gateway or compatible proxy.",
+        "data": {
+          "ble_device": "BLE gateway",
+          "flow_action": "Navigation"
+        }
+      },
+      "access_level": {
+        "title": "Access level",
+        "description": "Choose the required access level and whether write access should be enabled.",
+        "data": {
+          "access_level": "Access level",
+          "write_enabled": "Enable write access",
+          "flow_action": "Navigation"
+        }
+      },
+      "access_warning": {
+        "title": "Review access and write permissions",
+        "description": "{warning}",
+        "data": {
+          "access_level_acknowledged": "I understand the possible consequences and want to enable these permissions.",
+          "flow_action": "Navigation"
+        }
+      },
+      "credentials": {
+        "title": "Secure connection",
+        "description": "Enter the local pairing PIN and access settings. Keys remain local to Home Assistant.",
+        "data": {
+          "passkey": "Bluetooth pairing PIN",
+          "auth_encryption_key": "Authentication / encryption key"
+          ,"flow_action": "Navigation"
+        }
+      },
+      "thin_controller": {
+        "title": "Select Thin-RPC controller",
+        "description": "Choose one complete request, poll, and diagnostics service trio.",
+        "data": {
+          "thin_rpc_controller": "Controller",
+          "flow_action": "Navigation"
+        }
+      },
+      "thin_scan": {
+        "title": "Select BLE device behind ESP proxy",
+        "description": "All BLE devices visible during the remote scan are shown.",
+        "data": {
+          "ble_device": "BLE device",
+          "flow_action": "Navigation"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This gateway is already configured.",
+      "no_esphome_gateway": "No ESPHome OpenRBus gateway action is available.",
+      "no_esphome_entities": "No ESPHome OpenRBus response and generation sensors were found.",
+      "no_thin_rpc_services": "No complete Thin-RPC service trio is available.",
+      "thin_rpc_profile_required": "A Thin-GATT profile is required for Thin-RPC.",
+      "thin_rpc_credentials_required": "Reference the EHC key in secrets.yaml before enabling Thin-RPC.",
+      "invalid_thin_rpc_controller": "The selected Thin-RPC controller is unavailable.",
+      "auth_key_required": "An authentication key is required for access level 2 or 3.",
+      "access_confirmation_required": "Confirm the possible consequences before enabling the selected permissions.",
+      "thin_rpc_scan_failed": "The remote BLE scan through the ESP proxy failed.",
+      "thin_rpc_no_ble_devices": "No BLE devices were found behind the ESP proxy."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "OpenRBus options",
+        "data": {
+          "language": "Entity language",
+          "write_enabled": "Enable write access",
+          "access_level": "Access level",
+          "poll_interval_fast": "Fast polling interval (seconds)",
+          "poll_interval_standard": "Standard polling interval (seconds)",
+          "poll_interval_slow": "Slow polling interval (seconds)"
+        }
+      },
+      "access_warning": {
+        "title": "Review access and write permissions",
+        "description": "{warning}",
+        "data": {
+          "access_level_acknowledged": "I understand the possible consequences and want to enable these permissions.",
+          "flow_action": "Navigation"
+        }
+      },
+      "credentials": {
+        "title": "Secure connection",
+        "data": {
+          "auth_encryption_key": "Authentication / encryption key",
+          "flow_action": "Navigation"
+        }
+      },
+      "thin_controller": {
+        "title": "Select Thin-RPC controller",
+        "data": {
+          "thin_rpc_controller": "Controller",
+          "flow_action": "Navigation"
+        }
+      },
+      "thin_scan": {
+        "title": "Select BLE device behind ESP proxy",
+        "data": {
+          "ble_device": "BLE device",
+          "flow_action": "Navigation"
+        }
+      }
+    }
+  },
+  "selector": {
+    "flow_action": {
+      "options": {
+        "next": "Continue",
+        "back": "Back"
+      }
+    }
+  }
+}

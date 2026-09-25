@@ -1,0 +1,707 @@
+"""Shared registry-to-HA projection for OpenRBus register entities.
+
+The OpenRBus catalogue is deliberately richer than Home Assistant's entity
+model.  This module is the single place where a catalogue row is classified
+as a read-only sensor or as a safe, typed control.  It also owns the shared
+polling coordinators so forwarding ``sensor``, ``number``, ``select`` and
+``switch`` concurrently cannot create duplicate transport reads.
+"""
+
+from __future__ import annotations
+
+from decimal import Decimal
+from typing import Any
+
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.update_coordinator import CoordinatorEntity
+
+from openrbus.catalog import RegisterCatalogEntry, catalog_for_node
+from openrbus.discovery import DeviceIdentity
+from openrbus.protocol.canip import ObjectAddress
+from openrbus.registry import Registry
+
+from .bridge import GenericRead
+from .const import DOMAIN
+from .coordinator import OpenRBusCoordinator, OpenRBusPollingCoordinator
+
+CATALOG_REGISTRY = Registry.load_default()
+
+
+def identity_for_runtime(runtime_node: Any) -> DeviceIdentity:
+    """Return the evidence-backed identity from an inventory or identity."""
+
+    return getattr(runtime_node, "identity", runtime_node)
+
+
+def runtime_nodes(parent: OpenRBusCoordinator) -> tuple[Any, ...]:
+    """Return the current node projection without assuming a node number."""
+
+    return tuple(parent.inventories or parent.devices)
+
+
+def poll_group(register: RegisterCatalogEntry, recommended: frozenset) -> str:
+    """Assign a stable polling group from registry semantics."""
+
+    if register.address in recommended or register.unit in {"°C", "bar", "%"}:
+        return "fast"
+    semantic = " ".join(
+        str(value or "")
+        for value in (register.internal_code, register.name_en, register.name_de)
+    ).casefold()
+    if any(
+        marker in semantic
+        for marker in (
+            "ident",
+            "version",
+            "diagnostic",
+            "configuration",
+            "config",
+            "parameter number",
+            "device type",
+        )
+    ):
+        return "slow"
+    return "standard"
+
+
+def recommended_addresses(identity: DeviceIdentity) -> frozenset[ObjectAddress]:
+    """Resolve conservative defaults from Core's registry."""
+
+    try:
+        resolution = getattr(identity, "registry_resolution", None)
+        family = getattr(resolution, "family", None) or getattr(
+            identity, "family", None
+        )
+        return frozenset(
+            item.address
+            for item in CATALOG_REGISTRY.recommended_registers(device_family=family)
+        )
+    except (AttributeError, TypeError, ValueError):
+        return frozenset()
+
+
+def access_level(value: object) -> int | None:
+    """Map Core's public access labels, failing closed for unknown levels."""
+
+    labels = {
+        "level 0": 0,
+        "user": 1,
+        "installer": 2,
+        "professional": 3,
+    }
+    try:
+        numeric = int(value)
+    except (TypeError, ValueError):
+        return labels.get(str(value).casefold())
+    return numeric if 0 <= numeric <= 3 else None
+
+
+def catalog_visible(register: RegisterCatalogEntry, max_access_level: int) -> bool:
+    """Return whether a row has explicit read evidence at this level."""
+
+    if not register.readable:
+        return False
+    evidence = register.access_level_evidence.get("read", {})
+    levels = evidence.get("levels", ()) if isinstance(evidence, dict) else ()
+    numeric = [access_level(level) for level in levels]
+    return bool(numeric) and any(
+        level is not None and level <= max_access_level for level in numeric
+    )
+
+
+def rows_for_parent(
+    parent: OpenRBusCoordinator,
+) -> tuple[tuple[DeviceIdentity, RegisterCatalogEntry, str, bool], ...]:
+    """Project all known rows and their poll eligibility for this entry."""
+
+    configured = max(1, min(3, int(parent.configured_access_level)))
+    rows: list[tuple[DeviceIdentity, RegisterCatalogEntry, str, bool]] = []
+    for runtime_node in runtime_nodes(parent):
+        identity = identity_for_runtime(runtime_node)
+        effective = parent.effective_access_levels.get(identity.node)
+        max_level = (
+            min(configured, effective)
+            if effective is not None
+            else (1 if configured == 1 else None)
+        )
+        recommended = recommended_addresses(identity)
+        for register in catalog_for_node(runtime_node, CATALOG_REGISTRY):
+            rows.append(
+                (
+                    identity,
+                    register,
+                    poll_group(register, recommended),
+                    max_level is not None and catalog_visible(register, max_level),
+                )
+            )
+    return tuple(rows)
+
+
+def ensure_polling_coordinators(
+    hass: HomeAssistant,
+    parent: OpenRBusCoordinator,
+) -> dict[str, OpenRBusPollingCoordinator]:
+    """Create/reuse one polling coordinator per group for all HA platforms."""
+
+    rows = rows_for_parent(parent)
+    addresses: dict[str, set[tuple[int, ObjectAddress]]] = {
+        "fast": set(),
+        "standard": set(),
+        "slow": set(),
+    }
+    for identity, register, group, allowed in rows:
+        if not allowed:
+            continue
+        kind = control_kind(register, parent.language)
+        effective = parent.effective_access_levels.get(identity.node)
+        if kind is not None:
+            # A typed control is a read projection first.  Do not couple its
+            # polling to write policy: a readable L3 row must still publish
+            # its current value when the write evidence is unverified or the
+            # explicit unsafe-write option is off.  ``_async_update_data``
+            # applies the entity-registry enabled/disabled gate per row.
+            if effective is None or not catalog_visible(register, effective):
+                continue
+        else:
+            recommended = recommended_addresses(identity)
+            evidence = register.access_level_evidence.get("read", {})
+            levels = evidence.get("levels", ()) if isinstance(evidence, dict) else ()
+            safe_default = register.datatype not in {"STRUCT", "OCTETSTRING"} and any(
+                str(level).casefold() in {"level 0", "user"} for level in levels
+            )
+            if register.address not in recommended and not safe_default:
+                continue
+        addresses[group].add((identity.node, register.address))
+
+    cache = getattr(parent, "_openrbus_polling_coordinators", None)
+    if cache is None:
+        cache = {}
+        parent._openrbus_polling_coordinators = cache
+    for group, group_addresses in addresses.items():
+        existing = cache.get(group)
+        if existing is None:
+            existing = OpenRBusPollingCoordinator(
+                hass,
+                parent,
+                group,
+                tuple(
+                    sorted(
+                        group_addresses,
+                        key=lambda item: (item[0], item[1].index, item[1].subindex),
+                    )
+                ),
+                parent.poll_intervals[group],
+            )
+            cache[group] = existing
+            parent.config_entry.async_on_unload(existing.async_shutdown)
+            hass.async_create_task(existing.async_config_entry_first_refresh())
+        else:
+            existing.add_registers(group_addresses)
+    return cache
+
+
+def cleanup_legacy_sensor_entities(
+    hass: HomeAssistant,
+    parent: OpenRBusCoordinator,
+) -> int:
+    """Migrate registry rows whose current projection changed to a sensor.
+
+    This function keeps its historical name because older platform modules
+    call it during setup.  It now also handles the reverse migration required
+    by the array-count guard: an older release could have registered a
+    ``number``, ``select`` or ``switch`` for a row which is a sensor in the
+    current catalogue.  The migration is deliberately derived from the
+    current catalogue and exact OpenRBus unique ID; it never scans or removes
+    arbitrary HA entities.
+
+    Registry cleanup is naturally idempotent.  Once the stale typed row is
+    removed, subsequent reloads find no matching entry.  Metadata is retained
+    on the runtime coordinator until the sensor platform has created the new
+    row, where :func:`restore_migrated_sensor_entities` applies the safe HA
+    registry customizations that survived the migration.
+    """
+
+    registry = er.async_get(hass)
+    entry_id = parent.config_entry.entry_id
+    pending = getattr(parent, "_openrbus_sensor_migrations", None)
+    if pending is None:
+        pending = {}
+        parent._openrbus_sensor_migrations = pending
+
+    # Iterate the registry rather than relying solely on async_get_entity_id:
+    # HA normally enforces unique IDs per platform, but iterating lets us
+    # remain safe if a legacy registry contains duplicate/stale rows.  Every
+    # predicate below is intentional: integration, platform, entry and the
+    # complete stable object identity must all match.
+    registry_entries = tuple(registry.entities.values())
+    downgrade_rows: set[str] = set()
+    typed_rows: set[str] = set()
+    for identity, register, _group, _poll_allowed in rows_for_parent(parent):
+        if not register.readable:
+            continue
+        unique_id = entity_unique_id(parent, identity, register)
+        if control_kind(register, parent.language) is None:
+            downgrade_rows.add(unique_id)
+        else:
+            typed_rows.add(unique_id)
+    removed = 0
+    for entity in registry_entries:
+        if (
+            getattr(entity, "platform", None) != DOMAIN
+            or getattr(entity, "config_entry_id", None) != entry_id
+            or getattr(entity, "unique_id", None) is None
+        ):
+            continue
+        unique_id = entity.unique_id
+        domain = getattr(entity, "domain", None)
+        # Preserve the original sensor->typed cleanup as well as the new
+        # typed->sensor downgrade.  Both directions use the same strict
+        # integration/entry/identity guards above.
+        if domain == "sensor" and unique_id in typed_rows:
+            registry.async_remove(entity.entity_id)
+            removed += 1
+            continue
+        if (
+            domain not in {"number", "select", "switch"}
+            or unique_id not in downgrade_rows
+        ):
+            continue
+        metadata = pending.setdefault(unique_id, {})
+        for field in _MIGRATED_REGISTRY_FIELDS:
+            value = getattr(entity, field, None)
+            if field in {"disabled_by", "hidden_by"} and not _is_user_registry_value(
+                value
+            ):
+                # Integration-disabled defaults belong to the old platform,
+                # not to the replacement sensor.  Explicit user choices are
+                # the only disable/hide state safe to carry over.
+                continue
+            # Empty values are defaults, not user customizations.  Keeping
+            # only meaningful values also avoids passing HA sentinels through
+            # a later update call.
+            if value is not None and value != "":
+                metadata.setdefault(field, value)
+        registry.async_remove(entity.entity_id)
+        removed += 1
+    return removed
+
+
+def _is_user_registry_value(value: object) -> bool:
+    """Return whether a registry enum/value represents an explicit user choice."""
+
+    return str(getattr(value, "value", value)).casefold() == "user"
+
+
+_MIGRATED_REGISTRY_FIELDS = (
+    "device_id",
+    "area_id",
+    "disabled_by",
+    "hidden_by",
+    "icon",
+    "name",
+    "entity_category",
+    "labels",
+)
+
+
+def restore_migrated_sensor_entities(
+    hass: HomeAssistant,
+    parent: OpenRBusCoordinator,
+) -> int:
+    """Restore safe registry metadata after a typed-to-sensor migration.
+
+    HA creates the replacement sensor only after ``async_add_entities``.  A
+    separate post-add step therefore preserves device/area associations and
+    explicit user customizations without trying to manufacture entity IDs or
+    touching any other integration's registry rows.  If setup is interrupted
+    before the replacement exists, the pending metadata remains for the next
+    idempotent setup attempt.
+    """
+
+    pending = getattr(parent, "_openrbus_sensor_migrations", None)
+    if not pending:
+        return 0
+    registry = er.async_get(hass)
+    entry_id = parent.config_entry.entry_id
+    restored = 0
+    remaining: dict[str, dict[str, object]] = {}
+    for unique_id, metadata in pending.items():
+        sensor_id = registry.async_get_entity_id("sensor", DOMAIN, unique_id)
+        sensor = registry.entities.get(sensor_id) if sensor_id else None
+        if (
+            sensor is None
+            or getattr(sensor, "platform", None) != DOMAIN
+            or getattr(sensor, "config_entry_id", None) != entry_id
+            or getattr(sensor, "domain", None) != "sensor"
+        ):
+            remaining[unique_id] = metadata
+            continue
+        changes = {
+            field: value
+            for field, value in metadata.items()
+            if field in _MIGRATED_REGISTRY_FIELDS
+            and getattr(sensor, field, None) != value
+        }
+        if not changes:
+            restored += 1
+            continue
+        try:
+            registry.async_update_entity(sensor.entity_id, **changes)
+        except (TypeError, ValueError):
+            # Registry API fields vary slightly across supported HA versions.
+            # Apply each field independently so one optional field cannot
+            # prevent device/area association from being preserved.
+            for field, value in changes.items():
+                try:
+                    registry.async_update_entity(sensor.entity_id, **{field: value})
+                except (TypeError, ValueError):
+                    continue
+        restored += 1
+    parent._openrbus_sensor_migrations = remaining
+    return restored
+
+
+def entity_unique_id(
+    parent: OpenRBusCoordinator,
+    identity: DeviceIdentity,
+    register: RegisterCatalogEntry,
+) -> str:
+    """Stable object identity shared by sensor and control projections."""
+
+    return (
+        f"{parent.config_entry.entry_id}:node:{identity.node}:"
+        f"object:{register.address.index:04x}:{register.address.subindex:02x}"
+    )
+
+
+def definition_for(register: RegisterCatalogEntry):
+    """Return the immutable registry definition for a catalogue row."""
+
+    return CATALOG_REGISTRY.find(register.address)
+
+
+def enum_for(register: RegisterCatalogEntry):
+    """Return a complete enumeration definition, if one is declared."""
+
+    definition = definition_for(register)
+    enum_name = getattr(getattr(definition, "wire", None), "enum_name", None)
+    if not enum_name:
+        return None
+    return next(
+        (item for item in CATALOG_REGISTRY.enums if item.name == enum_name), None
+    )
+
+
+def enum_options(
+    register: RegisterCatalogEntry, language: str
+) -> tuple[tuple[int, str], ...]:
+    """Return only enumerations with evidence-backed labels for every value."""
+
+    enumeration = enum_for(register)
+    if enumeration is None or not enumeration.values:
+        return ()
+    result: list[tuple[int, str]] = []
+    for value in enumeration.values:
+        label = enumeration.label(value, language)
+        if not label:
+            return ()
+        result.append((int(value), str(label)))
+    return tuple(result)
+
+
+def control_kind(register: RegisterCatalogEntry, language: str = "de") -> str | None:
+    """Classify a writable row without inventing semantics."""
+
+    if not register.writable or not register.readable:
+        return None
+    definition = definition_for(register)
+    wire = getattr(definition, "wire", None)
+    # In the CANopen-style array representation, :00 is the subindex-count
+    # object.  It is decoded as an integer and Core deliberately rejects
+    # writes to it; the writable typed control is the evidence-backed
+    # concrete element (:01..:N), not the canonical array definition.
+    if register.subindex == 0 and getattr(wire, "is_array", False):
+        return None
+    wire_type = getattr(wire, "type", None)
+    if getattr(wire_type, "value", wire_type) == "ENUMERATION":
+        options = enum_options(register, language)
+        if not options:
+            return None
+        values = {value for value, _label in options}
+        enum_name = str(getattr(wire, "enum_name", "")).casefold()
+        labels = {label.casefold() for _value, label in options}
+        bool_names = {"offon", "onoff", "yesno", "noyes", "boolean", "bool"}
+        bool_labels = {
+            "on",
+            "off",
+            "yes",
+            "no",
+            "ein",
+            "aus",
+            "ja",
+            "nein",
+            "enabled",
+            "disabled",
+        }
+        if values == {0, 1} and (enum_name in bool_names or labels <= bool_labels):
+            return "switch"
+        return "select"
+    type_name = str(getattr(wire_type, "value", wire_type) or register.datatype)
+    if type_name.startswith(("UINT", "INT")):
+        return "number"
+    return None
+
+
+def write_access_allowed(
+    parent: OpenRBusCoordinator,
+    register: RegisterCatalogEntry,
+    effective_access_level: int | None,
+) -> bool:
+    """Return true only for explicitly enabled and proven write access."""
+
+    if (
+        not parent.write_enabled
+        or not register.writable
+        or effective_access_level is None
+    ):
+        return False
+    evidence = register.access_level_evidence.get("write", {})
+    if (
+        not isinstance(evidence, dict)
+        or not evidence.get("known")
+        or not evidence.get("complete")
+    ):
+        return False
+    levels = [access_level(level) for level in evidence.get("levels", ())]
+    # Multiple static levels mean that the catalogue cannot identify the
+    # concrete device family.  Do not turn an ambiguous row into a write
+    # control; Core would reject that write for the same reason.
+    return (
+        len(levels) == 1
+        and levels[0] is not None
+        and levels[0] <= effective_access_level
+    )
+
+
+def storage_bounds(storage: str) -> tuple[Decimal, Decimal] | None:
+    """Return conservative raw bounds for integer storage."""
+
+    try:
+        bits = int(storage.removeprefix("UINT").removeprefix("INT"))
+    except (AttributeError, ValueError):
+        return None
+    if bits <= 0 or bits > 32:
+        return None
+    if storage.startswith("INT"):
+        return Decimal(-(1 << (bits - 1))), Decimal((1 << (bits - 1)) - 1)
+    return Decimal(0), Decimal((1 << bits) - 1)
+
+
+def number_bounds(register: RegisterCatalogEntry) -> tuple[float, float, float] | None:
+    """Derive HA number bounds/step from registry constraints and wire scale."""
+
+    definition = definition_for(register)
+    constraint = getattr(definition, "constraint", None)
+    declared = (
+        (getattr(constraint, "minimum", None), getattr(constraint, "maximum", None))
+        if constraint is not None
+        else (None, None)
+    )
+    bounds = (
+        declared
+        if declared[0] is not None and declared[1] is not None
+        else storage_bounds(register.storage)
+    )
+    if bounds is None or bounds[0] is None or bounds[1] is None:
+        return None
+    scale = register.scale if register.scale is not None else Decimal(1)
+    if scale <= 0:
+        return None
+    # Registry constraints are engineering-unit limits (the same values that
+    # Core's encoder validates).  Only raw storage bounds need conversion by
+    # the wire gain.
+    minimum, maximum = (
+        (bounds[0], bounds[1])
+        if declared[0] is not None and declared[1] is not None
+        else (bounds[0] * scale, bounds[1] * scale)
+    )
+    precision = (
+        getattr(constraint, "precision", None) if constraint is not None else None
+    )
+    step = scale if scale < 1 else Decimal(1)
+    if precision is not None:
+        step = max(step, Decimal(1).scaleb(-int(precision)))
+    if minimum >= maximum or step <= 0:
+        return None
+    return float(minimum), float(maximum), float(step)
+
+
+class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
+    """Common identity, state and safety behavior for all projections."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        parent: OpenRBusCoordinator,
+        coordinator: OpenRBusPollingCoordinator,
+        identity: DeviceIdentity,
+        register: RegisterCatalogEntry,
+        *,
+        language: str = "de",
+        effective_access_level: int | None = None,
+    ) -> None:
+        super().__init__(coordinator)
+        self._parent = parent
+        self._identity = identity
+        self._register = register
+        self._language = language
+        self._effective_access_level = effective_access_level
+        self._attr_name = (
+            (register.name_en if language == "en" else register.name_de)
+            or register.name_en
+            or register.name_de
+        )
+        self._attr_unique_id = entity_unique_id(parent, identity, register)
+        self._attr_native_unit_of_measurement = register.unit
+
+    @property
+    def _result(self) -> GenericRead | Exception | None:
+        return (self.coordinator.data or {}).get(
+            (self._identity.node, self._register.address)
+        )
+
+    @property
+    def available(self) -> bool:
+        return (
+            self._effective_access_level is not None
+            and catalog_visible(self._register, self._effective_access_level)
+            and isinstance(self._result, GenericRead)
+        )
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={
+                (
+                    "openrbus",
+                    f"{self._parent.config_entry.entry_id}:node:{self._identity.node}",
+                )
+            },
+            name=(
+                getattr(self._identity, "display_name", None)
+                or self._identity.name
+                or f"OpenRBus node {self._identity.node}"
+            ),
+            manufacturer=getattr(self._identity, "manufacturer", None) or "OpenRBus",
+            model=getattr(self._identity, "model", None)
+            or getattr(self._identity, "family", None),
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        register = self._register
+        definition = definition_for(register)
+        constraint = getattr(definition, "constraint", None)
+        enumeration = enum_for(register)
+        return {
+            "node": register.node,
+            "index": register.index,
+            "subindex": register.subindex,
+            "object_address": str(register.address),
+            "internal_code": register.internal_code,
+            "datatype": register.datatype,
+            "storage": register.storage,
+            "enum": getattr(getattr(definition, "wire", None), "enum_name", None),
+            "enum_values": list(getattr(enumeration, "values", ()) or ()),
+            "enum_options": [
+                {"value": value, "label": label}
+                for value, label in enum_options(register, self._language)
+            ],
+            "min": (
+                str(constraint.minimum)
+                if constraint is not None
+                and getattr(constraint, "minimum", None) is not None
+                else None
+            ),
+            "max": (
+                str(constraint.maximum)
+                if constraint is not None
+                and getattr(constraint, "maximum", None) is not None
+                else None
+            ),
+            "precision": getattr(constraint, "precision", None),
+            "scale": str(register.scale) if register.scale is not None else None,
+            "unit": register.unit,
+            "readable": register.readable,
+            "writable": register.writable,
+            "access_level_evidence": register.access_level_evidence,
+            "safety": register.safety,
+            "unsafe": register.safety != "validated",
+            "provenance": list(register.provenance),
+            "raw_value": self._result.raw_value.hex()
+            if isinstance(self._result, GenericRead)
+            else "",
+            "poll_group": self.coordinator.group,
+            "write_enabled": self._parent.write_enabled,
+            "effective_access_level": self._effective_access_level,
+            "access_blocked": not write_access_allowed(
+                self._parent, register, self._effective_access_level
+            ),
+        }
+
+    async def _async_write(self, value: Any) -> None:
+        """Write through Core and publish only the confirmed read-back value."""
+
+        if not write_access_allowed(
+            self._parent, self._register, self._effective_access_level
+        ):
+            raise HomeAssistantError(
+                "OpenRBus write access is unavailable for this register"
+            )
+        plan = await self._parent.async_write_object(
+            self._register.address,
+            value,
+            node=self._identity.node,
+            # The integration's write option is the explicit unsafe opt-in for
+            # currently unverified registry writes.  Core still validates type,
+            # range, access and read-back before returning.
+            allow_unsafe=self._register.safety != "validated",
+            verify=True,
+        )
+        if not plan.verified:
+            raise HomeAssistantError("OpenRBus write was not read-back verified")
+        readback = await self._parent.async_read_object(
+            self._register.address, node=self._identity.node
+        )
+        self.coordinator.async_set_updated_data(
+            {
+                **(self.coordinator.data or {}),
+                (self._identity.node, self._register.address): readback,
+            }
+        )
+
+
+__all__ = [
+    "CATALOG_REGISTRY",
+    "OpenRBusRegisterEntity",
+    "access_level",
+    "catalog_visible",
+    "cleanup_legacy_sensor_entities",
+    "control_kind",
+    "definition_for",
+    "ensure_polling_coordinators",
+    "entity_unique_id",
+    "enum_for",
+    "enum_options",
+    "number_bounds",
+    "poll_group",
+    "recommended_addresses",
+    "restore_migrated_sensor_entities",
+    "rows_for_parent",
+    "runtime_nodes",
+    "write_access_allowed",
+]

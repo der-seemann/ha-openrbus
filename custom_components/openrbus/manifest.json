@@ -1,0 +1,15 @@
+{
+  "domain": "openrbus",
+  "name": "OpenRBus",
+  "codeowners": ["@der-seemann"],
+  "config_flow": true,
+  "after_dependencies": ["esphome"],
+  "documentation": "https://github.com/der-seemann/ha-openrbus",
+  "integration_type": "hub",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/der-seemann/ha-openrbus/issues",
+  "loggers": ["openrbus"],
+  "quality_scale": "bronze",
+  "requirements": ["openrbus==0.4.0"],
+  "version": "0.4.0"
+}

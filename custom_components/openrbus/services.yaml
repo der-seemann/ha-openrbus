@@ -1,0 +1,40 @@
+write_object:
+  name: Write object
+  description: Write one registry object through the configured OpenRBus transport.
+  fields:
+    entry_id:
+      name: Config entry
+      description: OpenRBus config-entry ID.
+      required: true
+      selector:
+        text:
+    object:
+      name: Object
+      description: Object address in hhhh:ss notation.
+      required: true
+      selector:
+        text:
+    node:
+      name: Node
+      default: 255
+      selector:
+        number:
+          min: 1
+          max: 255
+          mode: box
+    value:
+      name: Value
+      required: true
+      selector:
+        text:
+    allow_unsafe:
+      name: Confirm unsafe write
+      description: Required for catalog entries that need explicit write confirmation.
+      default: false
+      selector:
+        boolean:
+    verify:
+      name: Verify by readback
+      default: true
+      selector:
+        boolean:
