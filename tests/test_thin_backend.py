@@ -79,6 +79,7 @@ async def test_thin_batch_reprepares_after_link_loss(monkeypatch) -> None:
 
     backend = ThinRpcBackend.__new__(ThinRpcBackend)
     backend._read_lock = asyncio.Lock()
+    backend.channel = None
     backend.client = object()
     backend.session = SimpleNamespace(connected=False)
     address = ObjectAddress(0x500F, 0x00)
@@ -193,6 +194,94 @@ async def test_thin_batch_preserves_session_error_after_one_retry(monkeypatch) -
     assert recoveries == 1
     assert isinstance(result[0], HomeAssistantError)
     assert result[0]._openrbus_error_class == "session"
+
+
+@pytest.mark.asyncio
+async def test_transport_recovery_waits_and_drains_before_reprepare() -> None:
+    """Do not let a delayed physical disconnect retire the replacement epoch."""
+
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    events: list[str] = []
+
+    class _Session:
+        def retire(self) -> None:
+            events.append("retire")
+
+    backend.session = _Session()
+
+    async def force_disconnect() -> None:
+        events.append("disconnect")
+
+    async def wait_for_disconnect() -> None:
+        events.append("physical_disconnect")
+
+    async def drain_stale_frames() -> None:
+        events.append("drain")
+
+    async def ensure_session_ready() -> None:
+        events.append("reprepare")
+
+    backend._force_disconnect_current_session = force_disconnect
+    backend._wait_for_physical_disconnect = wait_for_disconnect
+    backend._drain_stale_frames = drain_stale_frames
+    backend._ensure_session_ready = ensure_session_ready
+
+    await backend._recover_after_transport_loss()
+
+    assert events == [
+        "disconnect",
+        "retire",
+        "physical_disconnect",
+        "drain",
+        "reprepare",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_transport_recovery_does_not_reprepare_after_disconnect_timeout() -> None:
+    """A missing physical down boundary must fail closed before reconnect."""
+
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    events: list[str] = []
+
+    async def force_disconnect() -> None:
+        events.append("disconnect")
+
+    async def wait_for_disconnect() -> None:
+        events.append("physical_disconnect")
+        raise HomeAssistantError("Thin-RPC physical disconnect did not complete")
+
+    async def drain_stale_frames() -> None:
+        events.append("drain")
+
+    async def ensure_session_ready() -> None:
+        events.append("reprepare")
+
+    backend.session = None
+    backend._force_disconnect_current_session = force_disconnect
+    backend._wait_for_physical_disconnect = wait_for_disconnect
+    backend._drain_stale_frames = drain_stale_frames
+    backend._ensure_session_ready = ensure_session_ready
+
+    with pytest.raises(HomeAssistantError, match="physical disconnect"):
+        await backend._recover_after_transport_loss()
+
+    assert events == ["disconnect", "physical_disconnect"]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_physical_disconnect_times_out(monkeypatch) -> None:
+    class _Channel:
+        async def diagnostics(self):
+            return {"link_active": True, "parent_connected": True}
+
+    backend = ThinRpcBackend(_hass(), controller_id="controller", channel=_Channel())
+    monkeypatch.setattr(
+        "custom_components.openrbus.transport._THIN_DISCONNECT_TIMEOUT", 0
+    )
+
+    with pytest.raises(HomeAssistantError, match="physical disconnect"):
+        await backend._wait_for_physical_disconnect()
 
 
 @pytest.mark.asyncio

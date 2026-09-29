@@ -1723,6 +1723,14 @@ class ThinRpcBackend:
             retire = getattr(self.session, "retire", None)
             if callable(retire):
                 retire()
+        # ESPHome acknowledges DISCONNECT before its asynchronous BLE callback
+        # marks the physical link down.  Starting CONNECT as soon as that API
+        # action returns can therefore attach the replacement session to the
+        # old link; its delayed disconnect event then invalidates the new
+        # session.  Use the same physical boundary and bounded queue drain as
+        # the controlled lifecycle paths before opening the new epoch.
+        await self._wait_for_physical_disconnect()
+        await self._drain_stale_frames()
         await self._ensure_session_ready()
 
     async def _ensure_session_ready(self) -> None:
