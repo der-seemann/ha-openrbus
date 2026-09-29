@@ -25,10 +25,14 @@ from custom_components.openrbus.coordinator import (
 )
 from custom_components.openrbus.diagnostics import (
     _safe_poll_snapshot,
+    _safe_recovery_fence,
     _safe_setup_response,
     async_get_config_entry_diagnostics,
 )
-from custom_components.openrbus.setup_observability import SetupResponseMetrics
+from custom_components.openrbus.setup_observability import (
+    RecoveryFenceMetrics,
+    SetupResponseMetrics,
+)
 from custom_components.openrbus.transport import (
     _read_error_class,
     _read_error_subtype,
@@ -187,6 +191,55 @@ def test_safe_setup_response_rejects_unbounded_fields_and_values() -> None:
     }
 
 
+def test_recovery_fence_metrics_are_bounded_and_privacy_safe() -> None:
+    metrics = RecoveryFenceMetrics()
+    metrics.begin_attempt()
+    metrics.record_dispatch(True)
+    metrics.record_state(False, True)
+    metrics.record_timeout()
+    snapshot = metrics.diagnostics()
+
+    assert snapshot == {
+        "attempts": 1,
+        "dispatch_acknowledged": True,
+        "link_active": False,
+        "parent_connected": True,
+        "timeout_count": 1,
+        "timeout_classes": {
+            "both_connected": 0,
+            "link_active": 0,
+            "parent_connected": 1,
+            "state_unavailable": 0,
+        },
+        "last_timeout_class": "parent_connected",
+    }
+    assert _safe_recovery_fence({**snapshot, "identity": "private"}) == snapshot
+
+    unsafe = _safe_recovery_fence(
+        {
+            "attempts": 2_147_483_648,
+            "dispatch_acknowledged": 1,
+            "link_active": "true",
+            "parent_connected": False,
+            "timeout_count": -1,
+            "timeout_classes": {
+                "both_connected": 2_147_483_648,
+                "parent_connected": -1,
+                "private": 3,
+            },
+            "last_timeout_class": "secret",
+            "raw_frame": "must not export",
+        }
+    )
+    assert unsafe == {
+        "parent_connected": False,
+        "timeout_classes": {
+            "both_connected": 2_147_483_647,
+            "parent_connected": 0,
+        },
+    }
+
+
 @pytest.mark.asyncio
 async def test_entry_diagnostics_add_only_redacted_transport_metrics() -> None:
     poller = SimpleNamespace(
@@ -216,6 +269,21 @@ async def test_entry_diagnostics_add_only_redacted_transport_metrics() -> None:
             diagnostics=lambda: {
                 "session_generation": 5,
                 "session_epoch": 17,
+                "recovery_fence": {
+                    "attempts": 2,
+                    "dispatch_acknowledged": False,
+                    "link_active": True,
+                    "parent_connected": False,
+                    "timeout_count": 1,
+                    "timeout_classes": {
+                        "both_connected": 0,
+                        "link_active": 1,
+                        "parent_connected": 0,
+                        "state_unavailable": 0,
+                    },
+                    "last_timeout_class": "link_active",
+                    "private": "must not escape",
+                },
                 "target_address": "AA:BB:CC:DD:EE:FF",
                 "token": "credential",
             }
@@ -231,6 +299,20 @@ async def test_entry_diagnostics_add_only_redacted_transport_metrics() -> None:
     assert diagnostics["coordinator"]["transport_session"] == {
         "session_generation": 5,
         "session_epoch": 17,
+        "recovery_fence": {
+            "attempts": 2,
+            "dispatch_acknowledged": False,
+            "link_active": True,
+            "parent_connected": False,
+            "timeout_count": 1,
+            "timeout_classes": {
+                "both_connected": 0,
+                "link_active": 1,
+                "parent_connected": 0,
+                "state_unavailable": 0,
+            },
+            "last_timeout_class": "link_active",
+        },
     }
     assert diagnostics["coordinator"]["coordinator_error_counts"]["correlation"] == 2
     assert diagnostics["coordinator"]["poll_in_progress"] is True

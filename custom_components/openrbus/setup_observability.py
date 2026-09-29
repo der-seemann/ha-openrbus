@@ -21,6 +21,69 @@ OUTCOMES = (
     "error",
 )
 _BUCKETS = ("lt_100ms", "100_499ms", "500_1999ms", "2_9999ms", "gte_10s")
+_FENCE_TIMEOUT_CLASSES = (
+    "both_connected",
+    "link_active",
+    "parent_connected",
+    "state_unavailable",
+)
+
+
+class RecoveryFenceMetrics:
+    """Keep the latest bounded physical-disconnect recovery evidence."""
+
+    def __init__(self) -> None:
+        self._attempts = 0
+        self._dispatch_acknowledged: bool | None = None
+        self._link_active: bool | None = None
+        self._parent_connected: bool | None = None
+        self._timeout_count = 0
+        self._timeout_classes = dict.fromkeys(_FENCE_TIMEOUT_CLASSES, 0)
+        self._last_timeout_class: str | None = None
+
+    def begin_attempt(self) -> None:
+        self._attempts = min(_MAX, self._attempts + 1)
+        self._dispatch_acknowledged = None
+        self._link_active = None
+        self._parent_connected = None
+        self._last_timeout_class = None
+
+    def record_dispatch(self, acknowledged: bool) -> None:
+        self._dispatch_acknowledged = acknowledged is True
+
+    def record_state(self, link_active: object, parent_connected: object) -> None:
+        self._link_active = link_active if type(link_active) is bool else None
+        self._parent_connected = (
+            parent_connected if type(parent_connected) is bool else None
+        )
+
+    def record_timeout(self) -> None:
+        if (
+            type(self._link_active) is not bool
+            or type(self._parent_connected) is not bool
+        ):
+            outcome = "state_unavailable"
+        elif self._link_active and self._parent_connected:
+            outcome = "both_connected"
+        elif self._link_active:
+            outcome = "link_active"
+        else:
+            outcome = "parent_connected"
+        self._timeout_count = min(_MAX, self._timeout_count + 1)
+        self._timeout_classes[outcome] = min(_MAX, self._timeout_classes[outcome] + 1)
+        self._last_timeout_class = outcome
+
+    def diagnostics(self) -> dict[str, Any]:
+        """Return only fixed counters, booleans, and fixed timeout classes."""
+        return {
+            "attempts": self._attempts,
+            "dispatch_acknowledged": self._dispatch_acknowledged,
+            "link_active": self._link_active,
+            "parent_connected": self._parent_connected,
+            "timeout_count": self._timeout_count,
+            "timeout_classes": dict(self._timeout_classes),
+            "last_timeout_class": self._last_timeout_class,
+        }
 
 
 class SetupResponseMetrics:

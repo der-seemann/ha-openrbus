@@ -33,7 +33,10 @@ from custom_components.openrbus.const import (
     CONF_THIN_PROFILE,
 )
 from custom_components.openrbus.coordinator import _configured_entry_data
-from custom_components.openrbus.setup_observability import SetupResponseMetrics
+from custom_components.openrbus.setup_observability import (
+    RecoveryFenceMetrics,
+    SetupResponseMetrics,
+)
 from custom_components.openrbus.transport import (
     _THIN_SECURE_TIMEOUT,
     _THIN_SUBSCRIPTIONS,
@@ -206,6 +209,7 @@ async def test_transport_recovery_waits_and_drains_before_reprepare() -> None:
 
     backend = ThinRpcBackend.__new__(ThinRpcBackend)
     events: list[str] = []
+    backend._recovery_fence_metrics = RecoveryFenceMetrics()
 
     class _Session:
         def retire(self) -> None:
@@ -213,11 +217,14 @@ async def test_transport_recovery_waits_and_drains_before_reprepare() -> None:
 
     backend.session = _Session()
 
-    async def force_disconnect() -> None:
+    async def force_disconnect() -> bool:
         events.append("disconnect")
+        return True
 
-    async def wait_for_disconnect() -> None:
+    async def wait_for_disconnect(*, recovery_fence=None) -> None:
         events.append("physical_disconnect")
+        assert recovery_fence is backend._recovery_fence_metrics
+        recovery_fence.record_state(False, False)
 
     async def drain_stale_frames() -> None:
         events.append("drain")
@@ -239,6 +246,11 @@ async def test_transport_recovery_waits_and_drains_before_reprepare() -> None:
         "drain",
         "reprepare",
     ]
+    fence = backend._recovery_fence_metrics.diagnostics()
+    assert fence["attempts"] == 1
+    assert fence["dispatch_acknowledged"] is True
+    assert fence["link_active"] is False
+    assert fence["parent_connected"] is False
 
 
 @pytest.mark.asyncio
@@ -247,12 +259,17 @@ async def test_transport_recovery_does_not_reprepare_after_disconnect_timeout() 
 
     backend = ThinRpcBackend.__new__(ThinRpcBackend)
     events: list[str] = []
+    backend._recovery_fence_metrics = RecoveryFenceMetrics()
 
-    async def force_disconnect() -> None:
+    async def force_disconnect() -> bool:
         events.append("disconnect")
+        return False
 
-    async def wait_for_disconnect() -> None:
+    async def wait_for_disconnect(*, recovery_fence=None) -> None:
         events.append("physical_disconnect")
+        assert recovery_fence is backend._recovery_fence_metrics
+        recovery_fence.record_state(True, False)
+        recovery_fence.record_timeout()
         raise HomeAssistantError("Thin-RPC physical disconnect did not complete")
 
     async def drain_stale_frames() -> None:
@@ -271,6 +288,10 @@ async def test_transport_recovery_does_not_reprepare_after_disconnect_timeout() 
         await backend._recover_after_transport_loss()
 
     assert events == ["disconnect", "physical_disconnect"]
+    fence = backend._recovery_fence_metrics.diagnostics()
+    assert fence["dispatch_acknowledged"] is False
+    assert fence["timeout_count"] == 1
+    assert fence["last_timeout_class"] == "link_active"
 
 
 @pytest.mark.asyncio
@@ -286,6 +307,38 @@ async def test_wait_for_physical_disconnect_times_out(monkeypatch) -> None:
 
     with pytest.raises(HomeAssistantError, match="physical disconnect"):
         await backend._wait_for_physical_disconnect()
+
+
+@pytest.mark.asyncio
+async def test_wait_for_physical_disconnect_requires_both_live_states_down(
+    monkeypatch,
+) -> None:
+    """A GATT close alone is not the physical BLE disconnect boundary."""
+
+    class _Channel:
+        def __init__(self) -> None:
+            self.snapshots = [
+                # The Thin GATT wrapper can process CLOSE_EVT before the
+                # ESPHome BLEClient has reported its own disconnected state.
+                {"link_active": False, "parent_connected": True, "epoch": 7},
+                {"link_active": True, "parent_connected": False, "epoch": 7},
+                # Epoch is a monotonically increasing connection identifier;
+                # it is retained after disconnect and is not a down sentinel.
+                {"link_active": False, "parent_connected": False, "epoch": 7},
+            ]
+
+        async def diagnostics(self):
+            return self.snapshots.pop(0)
+
+    channel = _Channel()
+    backend = ThinRpcBackend(_hass(), controller_id="controller", channel=channel)
+    monkeypatch.setattr(
+        "custom_components.openrbus.transport._THIN_DISCONNECT_TIMEOUT", 0.5
+    )
+
+    await backend._wait_for_physical_disconnect()
+
+    assert channel.snapshots == []
 
 
 @pytest.mark.asyncio

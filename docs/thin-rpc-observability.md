@@ -37,6 +37,15 @@ policy, write safety, or Core's frame acceptance rules. A counter records
 failed returned items; a batch failure followed by successful single-item
 fallbacks is not a returned item error.
 
+`coordinator.transport_session.recovery_fence` reports the backend-lifetime
+attempt count, whether the latest Thin-RPC disconnect action was acknowledged,
+the latest bounded `link_active` and `parent_connected` booleans, and a
+saturating timeout count split across fixed state categories. The epoch is not
+a disconnect sentinel: the proxy increments it for a new connection and
+retains it after disconnect. A replacement connection is not prepared until
+both live connection booleans are false. These fields report the final sample
+from a bounded wait and do not alter that gate.
+
 ## Initial setup service-response evidence
 
 Config-entry diagnostics also include `coordinator.setup_response` while the

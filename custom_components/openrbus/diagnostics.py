@@ -32,6 +32,12 @@ _SUBTYPES_BY_CLASS = {
     ),
 }
 _BATCH_EVENTS = ("malformed", "abort", "fallback")
+_FENCE_TIMEOUT_CLASSES = (
+    "both_connected",
+    "link_active",
+    "parent_connected",
+    "state_unavailable",
+)
 _COUNTER_MAX = 2_147_483_647
 
 
@@ -144,6 +150,34 @@ def _safe_setup_response(snapshot: object) -> dict[str, Any]:
     return safe
 
 
+def _safe_recovery_fence(snapshot: object) -> dict[str, Any]:
+    """Project physical-disconnect recovery through its fixed schema."""
+    if not isinstance(snapshot, dict):
+        return {}
+    safe: dict[str, Any] = {}
+    for key in ("attempts", "timeout_count"):
+        value = snapshot.get(key)
+        if type(value) is int and 0 <= value <= _COUNTER_MAX:
+            safe[key] = value
+    for key in ("dispatch_acknowledged", "link_active", "parent_connected"):
+        value = snapshot.get(key)
+        if type(value) is bool or value is None:
+            safe[key] = value
+    classes = snapshot.get("timeout_classes")
+    if isinstance(classes, dict):
+        safe["timeout_classes"] = {
+            name: min(_COUNTER_MAX, max(0, classes[name]))
+            for name in _FENCE_TIMEOUT_CLASSES
+            if type(classes.get(name)) is int
+        }
+    last_class = snapshot.get("last_timeout_class")
+    if last_class is None or (
+        isinstance(last_class, str) and last_class in _FENCE_TIMEOUT_CLASSES
+    ):
+        safe["last_timeout_class"] = last_class
+    return safe
+
+
 def _safe_batch_events(snapshot: object) -> dict[str, int]:
     """Project only bounded batch-recovery event counters."""
     if not isinstance(snapshot, dict):
@@ -194,6 +228,10 @@ async def async_get_config_entry_diagnostics(
         if isinstance(backend_snapshot, dict)
         else {}
     )
+    if isinstance(backend_snapshot, dict):
+        recovery_fence = _safe_recovery_fence(backend_snapshot.get("recovery_fence"))
+        if recovery_fence:
+            transport_session["recovery_fence"] = recovery_fence
     setup_response = _safe_setup_response(
         backend_snapshot.get("setup_response")
         if isinstance(backend_snapshot, dict)

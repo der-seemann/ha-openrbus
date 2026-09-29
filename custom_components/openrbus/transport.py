@@ -56,7 +56,7 @@ from openrbus.value_codec import decode_value
 from .bridge import GenericRead
 from .const import BACKEND_NATIVE, BACKEND_THIN_RPC
 from .proxy_provisioning import check_proxy_compatibility
-from .setup_observability import SetupResponseMetrics
+from .setup_observability import RecoveryFenceMetrics, SetupResponseMetrics
 
 _DEFAULT_REQUEST_SERVICE = "openrbus_gatt_rpc_request"
 _DEFAULT_POLL_SERVICE = "openrbus_gatt_rpc_poll"
@@ -1359,6 +1359,7 @@ class ThinRpcBackend:
         )
         self.channel = channel
         self.setup_metrics = SetupResponseMetrics()
+        self._recovery_fence_metrics = RecoveryFenceMetrics()
         self._batch_event_counts = dict.fromkeys(("malformed", "abort", "fallback"), 0)
         self.frame_trace = frame_trace
         self.target_address = target_address
@@ -1481,15 +1482,15 @@ class ThinRpcBackend:
                 self.authentication = None
                 raise
 
-    async def _force_disconnect_current_session(self) -> None:
+    async def _force_disconnect_current_session(self) -> bool:
         """Fence a partially prepared session using its observed identity."""
 
         if self.channel is None or self.session is None:
-            return
+            return False
         identity = self.session.identity
         epoch = self.session.epoch
         if identity is None or type(epoch) is not int or epoch <= 0:
-            return
+            return False
         await self.channel.action(
             self.capability.request_service,
             {
@@ -1502,6 +1503,7 @@ class ThinRpcBackend:
             timeout=_THIN_DISCONNECT_TIMEOUT,
         )
         self.session.retire()
+        return True
 
     async def _arm_pairing_if_configured(self) -> bool:
         """Arm the existing ESPHome pairing state machine before first connect.
@@ -1631,7 +1633,9 @@ class ThinRpcBackend:
                 self.authentication = None
                 self._active_controllers.discard(self.controller_id)
 
-    async def _wait_for_physical_disconnect(self) -> None:
+    async def _wait_for_physical_disconnect(
+        self, *, recovery_fence: RecoveryFenceMetrics | None = None
+    ) -> None:
         """Fence reload until the ESP reports that the BLE link is down."""
 
         if self.channel is None:
@@ -1639,12 +1643,18 @@ class ThinRpcBackend:
         deadline = asyncio.get_running_loop().time() + _THIN_DISCONNECT_TIMEOUT
         while True:
             snapshot = await self.channel.diagnostics()
+            if recovery_fence is not None:
+                recovery_fence.record_state(
+                    snapshot.get("link_active"), snapshot.get("parent_connected")
+                )
             if (
                 snapshot.get("link_active") is False
                 and snapshot.get("parent_connected") is False
             ):
                 return
             if asyncio.get_running_loop().time() >= deadline:
+                if recovery_fence is not None:
+                    recovery_fence.record_timeout()
                 raise HomeAssistantError(
                     "Thin-RPC physical disconnect did not complete before reload"
                 )
@@ -1782,8 +1792,18 @@ class ThinRpcBackend:
         # Retire locally even when the best-effort remote fence cannot be
         # delivered, so no old identity, handles, or authorization proof can
         # be reused by the replacement session.
-        with contextlib.suppress(Exception):
-            await self._force_disconnect_current_session()
+        fence_metrics = getattr(self, "_recovery_fence_metrics", None)
+        if fence_metrics is not None:
+            fence_metrics.begin_attempt()
+        dispatch_acknowledged = False
+        try:
+            dispatch_acknowledged = (
+                await self._force_disconnect_current_session()
+            ) is True
+        except Exception:  # noqa: BLE001 - physical state remains authoritative
+            dispatch_acknowledged = False
+        if fence_metrics is not None:
+            fence_metrics.record_dispatch(dispatch_acknowledged)
         if self.session is not None:
             retire = getattr(self.session, "retire", None)
             if callable(retire):
@@ -1794,7 +1814,7 @@ class ThinRpcBackend:
         # old link; its delayed disconnect event then invalidates the new
         # session.  Use the same physical boundary and bounded queue drain as
         # the controlled lifecycle paths before opening the new epoch.
-        await self._wait_for_physical_disconnect()
+        await self._wait_for_physical_disconnect(recovery_fence=fence_metrics)
         await self._drain_stale_frames()
         await self._ensure_session_ready()
 
@@ -2011,6 +2031,7 @@ class ThinRpcBackend:
             ),
             "proxy": proxy,
             "setup_response": self.setup_metrics.diagnostics(),
+            "recovery_fence": self._recovery_fence_metrics.diagnostics(),
             "batch_events": dict(self._batch_event_counts),
         }
 
