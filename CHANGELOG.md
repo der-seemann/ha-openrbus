@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.0 — release candidate
+## 0.4.1 — release candidate
 
 ### Added
 
@@ -12,6 +12,8 @@
   reload-safe entity lifecycle handling.
 - Secret-free diagnostics, localized setup/options warnings, history/recorder
   documentation, and idempotent typed-entity registry migration.
+- Preserve the standardized CANopen `TIME_OF_DAY` date as a diagnostic
+  `protocol_date` attribute without assigning a timezone.
 
 ### Security and safety
 
@@ -25,5 +27,5 @@
 
 ### Compatibility
 
-- Pins `openrbus==0.4.0` in the integration manifest.
+- Pins `openrbus==0.4.1` in the integration manifest.
 - Minimum Home Assistant version for HACS is `2026.8.0`.

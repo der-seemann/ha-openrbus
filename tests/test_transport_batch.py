@@ -47,9 +47,16 @@ async def test_poll_group_falls_back_to_single_reads_when_batch_is_unsupported()
             calls.append("single")
             return raw
 
-    result = await _read_objects_batched(_Client(), (definition.address,), node=7)
+    events: list[str] = []
+    result = await _read_objects_batched(
+        _Client(),
+        (definition.address,),
+        node=7,
+        record_batch_event=events.append,
+    )
 
     assert calls == ["batch", "single"]
+    assert events == ["fallback"]
     assert result[0].value == 0
 
 
@@ -77,9 +84,16 @@ async def test_poll_group_retries_partial_batch_entry_errors_individually() -> N
             calls.append("single")
             return raw
 
-    result = await _read_objects_batched(_Client(), (definition.address,), node=7)
+    events: list[str] = []
+    result = await _read_objects_batched(
+        _Client(),
+        (definition.address,),
+        node=7,
+        record_batch_event=events.append,
+    )
 
     assert calls == ["batch", "single"]
+    assert events == ["abort", "fallback"]
     assert result[0].value == 0
 
 
@@ -101,7 +115,14 @@ async def test_poll_group_retries_when_batch_result_count_is_malformed() -> None
             calls.append("single")
             return raw
 
-    result = await _read_objects_batched(_Client(), (definition.address,), node=7)
+    events: list[str] = []
+    result = await _read_objects_batched(
+        _Client(),
+        (definition.address,),
+        node=7,
+        record_batch_event=events.append,
+    )
 
     assert calls == ["batch", "single"]
+    assert events == ["malformed", "fallback"]
     assert result[0].value == 0

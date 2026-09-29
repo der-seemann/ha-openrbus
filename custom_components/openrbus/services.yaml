@@ -38,3 +38,29 @@ write_object:
       default: true
       selector:
         boolean:
+reactivate_register:
+  name: Reactivate invalid register
+  description: Resume polling an OpenRBus register retired after a continuous known sentinel value. The existing entity and unique ID are retained.
+  fields:
+    entry_id:
+      name: Config entry
+      required: true
+      selector:
+        text:
+    object:
+      name: Object
+      description: Object address in hhhh:ss notation.
+      required: true
+      selector:
+        text:
+    node:
+      name: Node
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 255
+          mode: box
+prepare_proxy_yaml:
+  name: Prepare ESPHome proxy YAML
+  description: Return the generic, secret-free ESPHome reference YAML for local review and configuration.

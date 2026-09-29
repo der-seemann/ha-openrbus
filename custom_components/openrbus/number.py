@@ -11,9 +11,11 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .register_entities import (
     OpenRBusRegisterEntity,
+    async_apply_diagnostic_visibility,
     cleanup_legacy_sensor_entities,
     control_kind,
     ensure_polling_coordinators,
+    entity_enabled_by_default,
     number_bounds,
     rows_for_parent,
     write_access_allowed,
@@ -28,6 +30,7 @@ async def async_setup_entry(
     """Create registry-backed numeric controls without probing or writing."""
 
     parent = entry.runtime_data
+    async_apply_diagnostic_visibility(hass, parent)
     polling = ensure_polling_coordinators(hass, parent)
     entities: list[OpenRBusNumber] = []
     for identity, register, group, _poll_allowed in rows_for_parent(parent):
@@ -65,8 +68,9 @@ class OpenRBusNumber(OpenRBusRegisterEntity, NumberEntity):
         self._attr_native_min_value = minimum
         self._attr_native_max_value = maximum
         self._attr_native_step = step
-        self._attr_entity_registry_enabled_default = write_access_allowed(
-            parent, register, self._effective_access_level
+        self._attr_entity_registry_enabled_default = (
+            entity_enabled_by_default(parent, identity, register)
+            and write_access_allowed(parent, register, self._effective_access_level)
         )
 
     @property

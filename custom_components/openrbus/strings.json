@@ -25,10 +25,13 @@
       },
       "access_level": {
         "title": "Access level",
-        "description": "Choose the required access level and whether write access should be enabled.",
+        "description": "Choose independent read and write access policies. A higher read policy does not enable writes.",
         "data": {
-          "access_level": "Access level",
+          "read_access_level": "Read access level",
+          "write_access_level": "Write access level",
           "write_enabled": "Enable write access",
+          "diagnostics_enabled": "Enable diagnostics and debug entities",
+          "screed_drying_enabled": "Enable screed drying program entities",
           "flow_action": "Navigation"
         }
       },
@@ -81,16 +84,24 @@
     }
   },
   "options": {
+    "error": {
+      "transport_mac_mismatch": "A transport can be changed only for the same verified BLE gateway. Select the configured MAC address."
+    },
     "step": {
       "init": {
         "title": "OpenRBus options",
         "data": {
           "language": "Entity language",
           "write_enabled": "Enable write access",
-          "access_level": "Access level",
+          "diagnostics_enabled": "Enable diagnostics and debug entities",
+          "screed_drying_enabled": "Enable screed drying program entities",
+          "read_access_level": "Read access level",
+          "write_access_level": "Write access level",
           "poll_interval_fast": "Fast polling interval (seconds)",
           "poll_interval_standard": "Standard polling interval (seconds)",
-          "poll_interval_slow": "Slow polling interval (seconds)"
+          "poll_interval_slow": "Slow polling interval (seconds)",
+          "entity_overrides": "Enabled entities",
+          "zone_overrides": "Active zones"
         }
       },
       "access_warning": {

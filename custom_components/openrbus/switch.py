@@ -9,9 +9,11 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .register_entities import (
     OpenRBusRegisterEntity,
+    async_apply_diagnostic_visibility,
     cleanup_legacy_sensor_entities,
     control_kind,
     ensure_polling_coordinators,
+    entity_enabled_by_default,
     enum_options,
     rows_for_parent,
     write_access_allowed,
@@ -26,6 +28,7 @@ async def async_setup_entry(
     """Create switches only for registry enums with proven boolean semantics."""
 
     parent = entry.runtime_data
+    async_apply_diagnostic_visibility(hass, parent)
     polling = ensure_polling_coordinators(hass, parent)
     entities: list[OpenRBusSwitch] = []
     for identity, register, group, _poll_allowed in rows_for_parent(parent):
@@ -56,8 +59,9 @@ class OpenRBusSwitch(OpenRBusRegisterEntity, SwitchEntity):
 
     def __init__(self, parent, coordinator, identity, register, **kwargs):
         super().__init__(parent, coordinator, identity, register, **kwargs)
-        self._attr_entity_registry_enabled_default = write_access_allowed(
-            parent, register, self._effective_access_level
+        self._attr_entity_registry_enabled_default = (
+            entity_enabled_by_default(parent, identity, register)
+            and write_access_allowed(parent, register, self._effective_access_level)
         )
 
     @property

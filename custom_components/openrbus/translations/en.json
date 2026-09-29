@@ -14,6 +14,8 @@
           "backend": "Transport backend",
           "language": "Entity language",
           "write_enabled": "Enable write access",
+          "diagnostics_enabled": "Enable diagnostics and debug entities",
+          "screed_drying_enabled": "Enable screed drying program entities",
           "access_level": "Access level",
           "passkey": "Bluetooth pairing PIN",
           "auth_encryption_key": "Encryption key",
@@ -35,8 +37,11 @@
       "access_level": {
         "title": "Access level",
         "data": {
-          "access_level": "Access level",
+          "read_access_level": "Read access level",
+          "write_access_level": "Write access level",
           "write_enabled": "Enable write access",
+          "screed_drying_enabled": "Enable screed drying program entities",
+          "diagnostics_enabled": "Enable diagnostics and debug entities",
           "flow_action": "Navigation"
         }
       },
@@ -91,7 +96,20 @@
     }
   },
   "options": {
+    "error": {
+      "transport_mac_mismatch": "A transport can be changed only for the same verified BLE gateway. Select the configured MAC address."
+    },
     "step": {
+      "init": {
+        "title": "OpenRBus options",
+        "data": {
+          "read_access_level": "Read access level",
+          "write_access_level": "Write access level",
+          "write_enabled": "Enable write access",
+          "entity_overrides": "Enabled entities",
+          "zone_overrides": "Active zones"
+        }
+      },
       "access_warning": {
         "title": "Review access and write permissions",
         "description": "{warning}",

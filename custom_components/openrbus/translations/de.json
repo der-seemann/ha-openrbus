@@ -2,8 +2,8 @@
   "title": "OpenRBus",
   "common": {
     "access_level_warning": "Diese Zugriffsebene macht auch Werte und Parameter zugänglich, die laut Hersteller vom Benutzer nicht geändert werden müssen. Sie sind nun trotzdem da – viel Spaß mit der zusätzlichen Verantwortung 🙂",
-    "write_access_warning": "Falsche Einstellungen können dazu führen, dass die test-device nicht mehr richtig arbeitet, und Verschleiß sowie Energieverbrauch erhöhen.",
-    "optimization_note": "Nicht jede bestehende test-device ist optimal eingestellt; eine fachkundige Optimierung kann daher sinnvoll sein."
+    "write_access_warning": "Falsche Einstellungen können dazu führen, dass die Anlage nicht mehr richtig arbeitet, und Verschleiß sowie Energieverbrauch erhöhen.",
+    "optimization_note": "Nicht jede bestehende Anlage ist optimal eingestellt; eine fachkundige Optimierung kann daher sinnvoll sein."
   },
   "config": {
     "step": {
@@ -14,6 +14,8 @@
           "backend": "Transport",
           "language": "Sprache der Entitäten",
           "write_enabled": "Schreibzugriff aktivieren",
+          "diagnostics_enabled": "Diagnose- und Debug-Entitäten aktivieren",
+          "screed_drying_enabled": "Entitäten für Estrichtrocknung aktivieren",
           "access_level": "Zugriffsebene",
           "passkey": "Bluetooth-Kopplungs-PIN",
           "poll_interval_fast": "Schnelles Polling (Sekunden)",
@@ -23,7 +25,7 @@
       },
       "ble_target": {
         "title": "BLE-Gateway auswählen",
-        "description": "Wähle das erkannte test-device oder den kompatiblen Proxy.",
+        "description": "Wähle das erkannte Heizungs-Gateway oder den kompatiblen Proxy.",
         "data": {
           "ble_device": "BLE-Gateway",
           "flow_action": "Navigation"
@@ -31,10 +33,13 @@
       },
       "access_level": {
         "title": "Zugriffsebene",
-        "description": "Wählen Sie die gewünschte Zugriffsebene und ob Schreibzugriff aktiviert werden soll.",
+        "description": "Wählen Sie Lese- und Schreibzugriff getrennt. Eine höhere Lesestufe aktiviert keinen Schreibzugriff.",
         "data": {
-          "access_level": "Zugriffsebene",
+          "read_access_level": "Lesezugriffsebene",
+          "write_access_level": "Schreibzugriffsebene",
           "write_enabled": "Schreibzugriff aktivieren",
+          "screed_drying_enabled": "Entitäten für Estrichtrocknung aktivieren",
+          "diagnostics_enabled": "Diagnose- und Debug-Entitäten aktivieren",
           "flow_action": "Navigation"
         }
       },
@@ -81,7 +86,20 @@
     }
   },
   "options": {
+    "error": {
+      "transport_mac_mismatch": "Ein Transportwechsel ist nur für dasselbe verifizierte BLE-Gateway möglich. Bitte die bereits konfigurierte MAC-Adresse auswählen."
+    },
     "step": {
+      "init": {
+        "title": "OpenRBus-Optionen",
+        "data": {
+          "read_access_level": "Lesezugriffsebene",
+          "write_access_level": "Schreibzugriffsebene",
+          "write_enabled": "Schreibzugriff aktivieren",
+          "entity_overrides": "Aktivierte Entitäten",
+          "zone_overrides": "Aktive Zonen"
+        }
+      },
       "access_warning": {
         "title": "Zugriffs- und Schreibrechte prüfen",
         "description": "{warning}",

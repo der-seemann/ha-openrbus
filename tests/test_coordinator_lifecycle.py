@@ -8,6 +8,7 @@ import pytest
 from homeassistant.exceptions import HomeAssistantError
 from openrbus.protocol.canip import ObjectAddress
 
+from custom_components.openrbus import _async_validate_transport_migration
 from custom_components.openrbus.bridge import GenericRead
 from custom_components.openrbus.const import (
     BACKEND_NATIVE,
@@ -17,6 +18,8 @@ from custom_components.openrbus.const import (
     CONF_POLL_FAST,
     CONF_POLL_SLOW,
     CONF_POLL_STANDARD,
+    CONF_READ_ACCESS_LEVEL,
+    CONF_WRITE_ACCESS_LEVEL,
     CONF_WRITE_ENABLED,
 )
 from custom_components.openrbus.coordinator import (
@@ -48,6 +51,34 @@ def test_transport_selection_has_exactly_two_modes() -> None:
     for value in (None, "auto", "legacy", "custom_runtime"):
         with pytest.raises(HomeAssistantError, match="Unknown OpenRBus transport"):
             select_backend_mode(value, capability)
+
+
+@pytest.mark.asyncio
+async def test_transport_migration_validation_is_read_only_and_always_stops(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    class _Candidate:
+        def __init__(self, _hass, entry, **_kwargs) -> None:
+            assert entry.entry_id == "migration"
+
+        async def async_start(self) -> None:
+            calls.append("start")
+
+        async def async_shutdown(self) -> None:
+            calls.append("stop")
+
+    monkeypatch.setattr("custom_components.openrbus.OpenRBusCoordinator", _Candidate)
+    monkeypatch.setattr(
+        "custom_components.openrbus._thin_runtime", lambda *_args: (None, None)
+    )
+    await _async_validate_transport_migration(
+        _hass(),
+        SimpleNamespace(entry_id="migration"),
+        {CONF_BACKEND: BACKEND_NATIVE, "ble_device": "AA:BB:CC:DD:EE:FF"},
+    )
+    assert calls == ["start", "stop"]
 
 
 def test_enabled_typed_projection_is_not_shadowed_by_disabled_legacy_sensor() -> None:
@@ -175,6 +206,34 @@ async def test_coordinator_blocks_requested_elevated_write_without_effective_lev
         await coordinator.async_write_object(
             ObjectAddress(0x346A, 0x04), 1, node=4, allow_unsafe=True
         )
+
+
+@pytest.mark.asyncio
+async def test_higher_read_policy_does_not_raise_write_policy(monkeypatch) -> None:
+    backend = _Backend()
+    monkeypatch.setattr(
+        "custom_components.openrbus.coordinator.NativeBluetoothBackend",
+        lambda *a, **k: backend,
+    )
+    entry = _entry(BACKEND_NATIVE)
+    entry.data.update(
+        {
+            CONF_WRITE_ENABLED: True,
+            CONF_READ_ACCESS_LEVEL: 3,
+            CONF_WRITE_ACCESS_LEVEL: 1,
+        }
+    )
+    async def read_access(address, *, node=0xFF):
+        return GenericRead(node, address, b"\x03", 3)
+
+    backend.async_read_object = read_access
+    coordinator = OpenRBusCoordinator(_hass(), entry)
+    assert coordinator.configured_access_level == 3
+    assert coordinator.configured_write_access_level == 1
+    result = await coordinator.async_write_object(
+        ObjectAddress(0x346A, 0x04), 1, node=4, allow_unsafe=True
+    )
+    assert result.value == 1
 
 
 @pytest.mark.asyncio

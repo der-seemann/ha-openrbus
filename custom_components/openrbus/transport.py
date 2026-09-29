@@ -32,6 +32,7 @@ from openrbus.errors import (
     CanOpenAbortError,
     ProtocolError,
     RegistryError,
+    RequestTimeoutError,
     TransportError,
     ValidationError,
 )
@@ -54,6 +55,8 @@ from openrbus.value_codec import decode_value
 
 from .bridge import GenericRead
 from .const import BACKEND_NATIVE, BACKEND_THIN_RPC
+from .proxy_provisioning import check_proxy_compatibility
+from .setup_observability import SetupResponseMetrics
 
 _DEFAULT_REQUEST_SERVICE = "openrbus_gatt_rpc_request"
 _DEFAULT_POLL_SERVICE = "openrbus_gatt_rpc_poll"
@@ -127,11 +130,76 @@ _TRACE_STATES = frozenset(
 _REGISTRY = Registry.load_default()
 
 
+_SESSION_SUBTYPES = frozenset(
+    {"not_ready", "link_lost", "timeout", "not_secure", "transport"}
+)
+_BATCH_SUBTYPES = frozenset({"malformed", "abort", "fallback"})
+
+
+def _tag_read_error(
+    error: HomeAssistantError, error_class: str, error_subtype: str | None = None
+) -> HomeAssistantError:
+    """Attach a fixed, non-sensitive classification for aggregate diagnostics."""
+    if error_class in {"item", "abort", "batch", "decode", "correlation", "session"}:
+        error._openrbus_error_class = error_class  # type: ignore[attr-defined]
+    allowed = _SESSION_SUBTYPES if error_class == "session" else _BATCH_SUBTYPES
+    if error_subtype in allowed:
+        error._openrbus_error_subtype = error_subtype  # type: ignore[attr-defined]
+    return error
+
+
+def _read_error_class(error: BaseException) -> str:
+    """Map a read failure to a bounded diagnostic enum without parsing text."""
+    tagged = getattr(error, "_openrbus_error_class", None)
+    if tagged in {"item", "abort", "batch", "decode", "correlation", "session"}:
+        return tagged
+    if isinstance(error, ThinGattCorrelationError):
+        return "correlation"
+    if isinstance(error, ThinGattSessionStateError):
+        return "session"
+    if isinstance(error, CanOpenAbortError):
+        return "abort"
+    if isinstance(error, TransportError):
+        return "session"
+    if isinstance(error, (RegistryError, ValidationError, ValueError)):
+        return "decode"
+    return "item"
+
+
+def _read_error_subtype(error: BaseException, error_class: str) -> str | None:
+    """Map a failure to a fixed optional subtype without exporting its text."""
+    allowed = _SESSION_SUBTYPES if error_class == "session" else _BATCH_SUBTYPES
+    tagged = getattr(error, "_openrbus_error_subtype", None)
+    if tagged in allowed:
+        return tagged
+    if error_class != "session":
+        return None
+    if isinstance(error, (RequestTimeoutError, TimeoutError)):
+        return "timeout"
+    if isinstance(error, ThinGattSessionStateError):
+        # Core's state exception is a bounded type; its messages currently
+        # describe these three fixed states. The message is inspected only to
+        # select an enum and is never retained or exported.
+        detail = str(error).casefold()
+        if "secure" in detail:
+            return "not_secure"
+        if "disconnect" in detail or "link lost" in detail:
+            return "link_lost"
+        return "not_ready"
+    if isinstance(error, TransportError):
+        detail = str(error).casefold()
+        if "link lost" in detail or "disconnected" in detail:
+            return "link_lost"
+        return "transport"
+    return "transport"
+
+
 async def _read_objects_batched(
     client: RawObjectClient,
     addresses: Sequence[ObjectAddress],
     *,
     node: int,
+    record_batch_event: Callable[[str], None] | None = None,
 ) -> tuple[GenericRead | HomeAssistantError, ...]:
     """Read one node's poll group through Core's size-aware GetList path.
 
@@ -166,10 +234,17 @@ async def _read_objects_batched(
             ValidationError,
             ValueError,
         ) as error:
-            return HomeAssistantError(str(error))
+            error_class = _read_error_class(error)
+            return _tag_read_error(
+                HomeAssistantError(str(error)),
+                error_class,
+                _read_error_subtype(error, error_class),
+            )
         return GenericRead(node, address, raw, value)
 
     async def read_singles() -> tuple[GenericRead | HomeAssistantError, ...]:
+        if record_batch_event is not None:
+            record_batch_event("fallback")
         return tuple([await read_single(address) for address in addresses])
 
     try:
@@ -191,7 +266,19 @@ async def _read_objects_batched(
         # transport; return object-local errors so the Thin backend can fence
         # and reprepare once before retrying the original bounded batches.
         if "link lost" in str(error).casefold():
-            return tuple(HomeAssistantError(str(error)) for _ in addresses)
+            error_class = _read_error_class(error)
+            if error_class == "item":
+                error_class = "session"
+            return tuple(
+                _tag_read_error(
+                    HomeAssistantError(str(error)),
+                    error_class,
+                    _read_error_subtype(error, error_class),
+                )
+                for _ in addresses
+            )
+        if isinstance(error, CanOpenAbortError) and record_batch_event is not None:
+            record_batch_event("abort")
         # Function-8/GetList is optional on older or restricted gateways.
         # A failed batch must not make every otherwise readable entity
         # unavailable; retry each object through Core's ordinary validated
@@ -202,6 +289,8 @@ async def _read_objects_batched(
         # Do not turn a malformed/partial batch response into a permanent
         # outage for every typed entity.  Retry each requested object through
         # Core's single-object path and preserve any object-local error.
+        if record_batch_event is not None:
+            record_batch_event("malformed")
         return await read_singles()
 
     results: list[GenericRead | HomeAssistantError] = []
@@ -211,6 +300,10 @@ async def _read_objects_batched(
             # failing the whole request.  Retry only that entry, leaving
             # successful batch results untouched and avoiding duplicate
             # traffic for healthy objects.
+            if isinstance(raw_result.error, CanOpenAbortError) and record_batch_event is not None:
+                record_batch_event("abort")
+            if record_batch_event is not None:
+                record_batch_event("fallback")
             fallback = await read_single(address)
             results.append(fallback)
             continue
@@ -222,7 +315,9 @@ async def _read_objects_batched(
                 registry=_REGISTRY,
             )
         except (RegistryError, ValidationError, ValueError) as error:
-            results.append(HomeAssistantError(str(error)))
+            results.append(
+                _tag_read_error(HomeAssistantError(str(error)), "decode")
+            )
         else:
             results.append(GenericRead(node, address, raw_result.raw, value))
     return tuple(results)
@@ -585,6 +680,14 @@ def _service_names(hass: HomeAssistant) -> Mapping[str, Any]:
     return hass.services.async_services().get("esphome", {})
 
 
+def _has_esphome_service(hass: HomeAssistant, service: str) -> bool:
+    """Check a service without depending on a particular registry facade."""
+    has_service = getattr(hass.services, "has_service", None)
+    if callable(has_service):
+        return bool(has_service("esphome", service))
+    return service in _service_names(hass)
+
+
 def detect_thin_rpc_capability(
     hass: HomeAssistant,
     *,
@@ -800,12 +903,15 @@ class HomeAssistantThinGattChannel:
         frame_trace: list[dict[str, Any]] | None = None,
         target_address: str | None = None,
         target_address_type: int | None = None,
+        setup_metrics: SetupResponseMetrics | None = None,
     ) -> None:
         self.client = client
         self.capability = capability
         self.frame_trace = frame_trace
         self.target_address = target_address
         self.target_address_type = target_address_type
+        self.setup_metrics = setup_metrics
+        self._setup_handle_lookup_request_ids: set[int] = set()
         self.effective_access_levels: dict[int, int] = {}
         self._frame_trace_bytes = 0
 
@@ -884,6 +990,11 @@ class HomeAssistantThinGattChannel:
             if self.target_address_type is not None:
                 frame["payload"]["target_address_type"] = self.target_address_type
         self._record_frame("request", frame)
+        observed = self.setup_metrics if op == "HANDLE_LOOKUP" else None
+        started = asyncio.get_running_loop().time() if observed is not None else 0.0
+        if observed is not None and not _has_esphome_service(self.client.hass, name):
+            observed.record("handle_lookup", "call_not_sent", 0.0)
+            raise TransportError("Thin-RPC request service is unavailable")
         try:
             await asyncio.wait_for(
                 self.client.execute_service(
@@ -896,10 +1007,35 @@ class HomeAssistantThinGattChannel:
                 ),
                 timeout,
             )
-        except Exception as exc:
+        except asyncio.CancelledError:
+            if observed is not None:
+                elapsed = (asyncio.get_running_loop().time() - started) * 1000
+                observed.record("handle_lookup", "cancelled_before_response", elapsed)
+            raise
+        except TimeoutError as exc:
+            if observed is not None:
+                elapsed = (asyncio.get_running_loop().time() - started) * 1000
+                observed.record("handle_lookup", "timeout_no_response", elapsed)
             raise TransportError("Thin-RPC request service failed") from exc
+        except Exception as exc:
+            if observed is not None:
+                elapsed = (asyncio.get_running_loop().time() - started) * 1000
+                observed.record("handle_lookup", "error", elapsed)
+            raise TransportError("Thin-RPC request service failed") from exc
+        if observed is not None:
+            elapsed = (asyncio.get_running_loop().time() - started) * 1000
+            observed.record("handle_lookup", "call_completed", elapsed)
+            if len(self._setup_handle_lookup_request_ids) < 8:
+                self._setup_handle_lookup_request_ids.add(request_id)
 
     async def poll(self, *, timeout: float) -> Mapping[str, Any] | None:
+        observed = self.setup_metrics
+        started = asyncio.get_running_loop().time() if observed is not None else 0.0
+        if observed is not None and not _has_esphome_service(
+            self.client.hass, self.capability.poll_service
+        ):
+            observed.record("poll_request", "call_not_sent", 0.0)
+            raise TransportError("Thin-RPC poll service is unavailable")
         try:
             response = await self.client.execute_service(
                 self.capability.poll_service,
@@ -907,10 +1043,22 @@ class HomeAssistantThinGattChannel:
                 return_response=True,
                 timeout=timeout,
             )
+        except asyncio.CancelledError:
+            if observed is not None:
+                elapsed = (asyncio.get_running_loop().time() - started) * 1000
+                observed.record("poll_request", "cancelled_before_response", elapsed)
+            raise
         except TimeoutError:
+            if observed is not None:
+                elapsed = (asyncio.get_running_loop().time() - started) * 1000
+                observed.record("poll_request", "timeout_no_response", elapsed)
             return None
         except Exception as exc:
+            if observed is not None:
+                elapsed = (asyncio.get_running_loop().time() - started) * 1000
+                observed.record("poll_request", "error", elapsed)
             raise TransportError("Thin-RPC poll service failed") from exc
+        elapsed = (asyncio.get_running_loop().time() - started) * 1000
         if isinstance(response, Mapping) and response.get("success") is False:
             raise TransportError("Thin-RPC poll service failed")
         if (
@@ -923,12 +1071,32 @@ class HomeAssistantThinGattChannel:
             frame_text = body["frame"]
             frame = self._decode_json_value(frame_text)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            if observed is not None:
+                observed.record("poll_request", "error", elapsed)
             raise TransportError("invalid Thin-RPC poll response") from exc
         if frame is None:
+            if observed is not None:
+                observed.record("poll_request", "no_esp_response", elapsed)
+                if self._setup_handle_lookup_request_ids:
+                    observed.record("handle_lookup", "no_esp_response", elapsed)
             return None
         if not isinstance(frame, dict):
+            if observed is not None:
+                observed.record("poll_request", "error", elapsed)
             raise TransportError("Thin-RPC poll frame is not an object")
+        if observed is not None:
+            observed.record("poll_request", "esp_response", elapsed)
         self._record_frame("response", frame)
+        if (
+            observed is not None
+            and frame.get("op") == "HANDLE_LOOKUP"
+            and frame.get("kind") == "response"
+            and type(frame.get("request_id")) is int
+            and frame["request_id"] in self._setup_handle_lookup_request_ids
+        ):
+            self._setup_handle_lookup_request_ids.discard(frame["request_id"])
+            observed.mark_handle_lookup_response()
+            observed.record("handle_lookup", "response", elapsed)
         if frame.get("op") == "NOTIFICATION":
             self._decode_notification(frame)
         return frame
@@ -1183,10 +1351,15 @@ class ThinRpcBackend:
             preferred_prefix=effective_prefix,
         )
         self.channel = channel
+        self.setup_metrics = SetupResponseMetrics()
+        self._batch_event_counts = dict.fromkeys(
+            ("malformed", "abort", "fallback"), 0
+        )
         self.frame_trace = frame_trace
         self.target_address = target_address
         self.target_address_type = target_address_type
         self.session: ThinGattSession | None = None
+        self._session_generation = 0
         self.link: ThinGattLink | None = None
         self.authentication: GatewayAuthorizationResult | Any | None = None
         self.transport: ThinGattMessageTransport | None = None
@@ -1210,6 +1383,10 @@ class ThinRpcBackend:
         async with self._lifecycle_lock:
             if self._started:
                 return
+            # Counters deliberately aggregate over this backend object's
+            # lifetime. Keep startup-attempt count beside them so repeated
+            # failed setup attempts cannot be mistaken for one setup epoch.
+            self.setup_metrics.begin_attempt()
             if not self.capability.available and self.channel is None:
                 missing = ", ".join(self.capability.missing)
                 raise HomeAssistantError(
@@ -1230,6 +1407,7 @@ class ThinRpcBackend:
                     "Thin-RPC controller is already owned by another entry"
                 )
             self._active_controllers.add(self.controller_id)
+            setup_started = asyncio.get_running_loop().time()
             try:
                 if self.channel is None:
                     self.channel = HomeAssistantThinGattChannel(
@@ -1238,7 +1416,10 @@ class ThinRpcBackend:
                         frame_trace=self.frame_trace,
                         target_address=self.target_address,
                         target_address_type=self.target_address_type,
+                        setup_metrics=self.setup_metrics,
                     )
+                elif hasattr(self.channel, "setup_metrics"):
+                    self.channel.setup_metrics = self.setup_metrics
                 already_secure = await self._arm_pairing_if_configured()
                 if already_secure:
                     # A previous physical disconnect boundary can remain in
@@ -1273,6 +1454,12 @@ class ThinRpcBackend:
                     # remains strict and no frame is reinterpreted.
                     await self._establish_session(attach=True)
                 self._started = True
+            except asyncio.CancelledError:
+                elapsed = (asyncio.get_running_loop().time() - setup_started) * 1000
+                self.setup_metrics.record_setup_cancellation(elapsed)
+                self._active_controllers.discard(self.controller_id)
+                self._started = False
+                raise
             except Exception:
                 self._active_controllers.discard(self.controller_id)
                 if self.link is not None and self.link.is_connected:
@@ -1323,12 +1510,33 @@ class ThinRpcBackend:
             return False
         if self.passkey is None or not 0 <= self.passkey <= 999999:
             raise HomeAssistantError("Thin-RPC pairing PIN is invalid")
-        await self.hass.services.async_call(
-            "esphome",
-            self.pair_action,
-            {"passkey": self.passkey},
-            blocking=True,
-        )
+        started = asyncio.get_running_loop().time()
+        if not _has_esphome_service(self.hass, self.pair_action):
+            self.setup_metrics.record("pairing_arm", "call_not_sent", 0.0)
+            raise HomeAssistantError("Thin-RPC pairing service is unavailable")
+        try:
+            await self.hass.services.async_call(
+                "esphome",
+                self.pair_action,
+                {"passkey": self.passkey},
+                blocking=True,
+            )
+        except asyncio.CancelledError:
+            elapsed = (asyncio.get_running_loop().time() - started) * 1000
+            self.setup_metrics.record(
+                "pairing_arm", "cancelled_before_response", elapsed
+            )
+            raise
+        except TimeoutError:
+            elapsed = (asyncio.get_running_loop().time() - started) * 1000
+            self.setup_metrics.record("pairing_arm", "timeout_no_response", elapsed)
+            raise
+        except Exception:
+            elapsed = (asyncio.get_running_loop().time() - started) * 1000
+            self.setup_metrics.record("pairing_arm", "error", elapsed)
+            raise
+        elapsed = (asyncio.get_running_loop().time() - started) * 1000
+        self.setup_metrics.record("pairing_arm", "response", elapsed)
         if self.channel is None:
             return False
         deadline = asyncio.get_running_loop().time() + _THIN_DISCONNECT_TIMEOUT
@@ -1339,19 +1547,11 @@ class ThinRpcBackend:
                 and snapshot.get("parent_connected") is False
             ):
                 return False
-            # An already bonded target is a valid idempotent pairing result.
-            # The ESPHome service deliberately keeps the existing secure link
-            # in this case, so no disconnect boundary can be observed.  Only
-            # accept this path only when the pairing service reported the
-            # explicit idempotent terminal status and the secure link remains
-            # live.  The firmware intentionally does not increment its pair
-            # request counter for a no-op on an already-secure link.
-            if (
-                snapshot.get("pair_terminal_status") == "already_secure_success"
-                and snapshot.get("link_active") is True
-                and snapshot.get("parent_connected") is True
-            ):
-                return True
+            # The RPC already-secure terminal belongs to PAIR_ENCRYPT, which
+            # is issued only after this pairing-arm boundary. It cannot prove
+            # that the ESPHome pairing action just completed: diagnostics may
+            # still contain that terminal from an earlier session. Keep the
+            # arm boundary physical and current to this operation.
             if asyncio.get_running_loop().time() >= deadline:
                 raise HomeAssistantError(
                     "Thin-RPC pairing arm did not reach the disconnect boundary"
@@ -1421,7 +1621,15 @@ class ThinRpcBackend:
     ) -> GenericRead:
         async with self._read_lock:
             await self._ensure_session_ready()
-            raw = await self.client.read_raw(node, address)
+            try:
+                raw = await self.client.read_raw(node, address)
+            except TransportError:
+                # A read is idempotent.  If the secure link disappears after
+                # the readiness check, fence that generation and retry this
+                # one object once on a fully re-prepared session.  Do not
+                # turn this into an unbounded reconnect loop.
+                await self._recover_after_transport_loss()
+                raw = await self.client.read_raw(node, address)
             definition = _REGISTRY.get(address)
             value = decode_value(definition, address, raw, registry=_REGISTRY)
             return GenericRead(node, address, raw, value)
@@ -1463,35 +1671,33 @@ class ThinRpcBackend:
     ) -> tuple[GenericRead | HomeAssistantError, ...]:
         async with self._read_lock:
             await self._ensure_session_ready()
-            values = await _read_objects_batched(self.client, addresses, node=node)
-            # A link can drop after the initial readiness check.  Retry only
-            # the object-local link-loss failures once after Core/Thin-RPC
-            # re-prepares the secure session; unsupported objects remain
-            # object-local errors and are not retried indefinitely.
+            values = await _read_objects_batched(
+                self.client,
+                addresses,
+                node=node,
+                record_batch_event=self._record_batch_event,
+            )
+            # A transport/session failure can occur after the initial
+            # readiness check. Retry only those object-local failures once
+            # after Core/Thin-RPC re-prepares the secure session; protocol,
+            # decode, and unsupported-object errors remain object-local.
             failed = tuple(
                 address
                 for address, value in zip(addresses, values, strict=True)
                 if isinstance(value, HomeAssistantError)
-                and "link lost" in str(value).casefold()
+                and (
+                    _read_error_class(value) == "session"
+                    or "link lost" in str(value).casefold()
+                )
             )
             if failed:
-                # A transport loss can occur after Core's request loop has
-                # returned its object-local error but before the session
-                # consumes the physical disconnect callback.  In that
-                # window ``session.connected`` is still true, so merely
-                # calling _ensure_session_ready() would incorrectly reuse a
-                # dead prepared transport.  Fence the current generation
-                # and build one fresh session before retrying the failed
-                # objects; successful batch values remain untouched.
-                with contextlib.suppress(Exception):
-                    await self._force_disconnect_current_session()
-                if self.session is not None:
-                    retire = getattr(self.session, "retire", None)
-                    if callable(retire):
-                        retire()
-                    await self._ensure_session_ready()
-                else:
-                    await self._establish_session(attach=True)
+                # A transport failure can occur after Core's request loop
+                # returns its object-local error while the session still
+                # appears connected (including a request timeout). Fence the
+                # current generation and build one fresh session before
+                # retrying only failed objects; successful batch values
+                # remain untouched.
+                await self._recover_after_transport_loss()
                 # Re-run the same Core-partitioned batches on the fresh
                 # session.  ``read_many_raw`` already bounds each GetList;
                 # single-object fallback remains available for gateways that
@@ -1504,13 +1710,28 @@ class ThinRpcBackend:
                 )
             return values
 
+    async def _recover_after_transport_loss(self) -> None:
+        """Fence one failed transport generation and prepare exactly one replacement."""
+
+        # The disconnect callback can lag behind an object-local failure.
+        # Retire locally even when the best-effort remote fence cannot be
+        # delivered, so no old identity, handles, or authorization proof can
+        # be reused by the replacement session.
+        with contextlib.suppress(Exception):
+            await self._force_disconnect_current_session()
+        if self.session is not None:
+            retire = getattr(self.session, "retire", None)
+            if callable(retire):
+                retire()
+        await self._ensure_session_ready()
+
     async def _ensure_session_ready(self) -> None:
         """Start or reprepare the Thin-RPC session before a read."""
 
         await self.async_start()
         if self.client is None:
             raise HomeAssistantError("Thin-RPC backend is not started")
-        if self.session is None or self.session.connected:
+        if self.session is not None and self.session.connected:
             return
         try:
             await self._establish_session(attach=True)
@@ -1518,6 +1739,13 @@ class ThinRpcBackend:
             if self.session is not None and self.session.connected:
                 with contextlib.suppress(Exception):
                     await self.session.disconnect()
+            # A failed reprepare has torn down the usable client.  Release the
+            # lifecycle ownership as well; otherwise ``async_start`` would
+            # short-circuit on this stale started flag and every later poll
+            # would fail permanently instead of making a fresh bounded setup
+            # attempt.
+            self._started = False
+            self._active_controllers.discard(self.controller_id)
             self.session = None
             self.link = None
             self.authentication = None
@@ -1537,11 +1765,14 @@ class ThinRpcBackend:
         if not self.write_enabled:
             raise HomeAssistantError("OpenRBus write access is disabled")
         async with self._read_lock:
-            await self.async_start()
+            # Writes deliberately share the same recovered-session gate as
+            # reads, but are never automatically retried: a lost response can
+            # mean the device already applied the first write.  The caller
+            # receives that failure and can inspect/read back before deciding
+            # whether another explicit write is appropriate.
+            await self._ensure_session_ready()
             if self.client is None:
                 raise HomeAssistantError("Thin-RPC backend is not started")
-            if self.session is not None and not self.session.connected:
-                await self._establish_session(attach=True)
             return await OpenRBusClient(
                 self.client,
                 enable_writes=True,
@@ -1561,6 +1792,12 @@ class ThinRpcBackend:
         if self.channel is None:
             raise HomeAssistantError("Thin-RPC channel is not configured")
         firmware_diagnostics = await self.channel.diagnostics()
+        compatibility = check_proxy_compatibility(firmware_diagnostics)
+        if not compatibility.compatible:
+            raise HomeAssistantError(
+                "ESPHome Thin-RPC proxy is incompatible; update it from the "
+                "matching OpenRBus ESPHome source release"
+            )
         # Firmware diagnostics are a liveness sample only. Never retain a
         # vendor identity, boot token, credential, or readiness assertion in
         # the HA backend; Core's link/auth proof is authoritative.
@@ -1568,6 +1805,7 @@ class ThinRpcBackend:
             "available": True,
             "liveness": firmware_diagnostics.get("parent_connected") is True
             or firmware_diagnostics.get("link_active") is True,
+            "compatibility": compatibility.reason,
         }
         services = ThinGattRpcServices(
             request=self.capability.request_service,
@@ -1579,6 +1817,9 @@ class ThinRpcBackend:
             services=services,
             profile=self.profile,
             poll_timeout=min(1.0, self.timeout),
+        )
+        self._session_generation = min(
+            2_147_483_647, getattr(self, "_session_generation", 0) + 1
         )
         self.session = session
         link = (
@@ -1676,12 +1917,36 @@ class ThinRpcBackend:
 
     def diagnostics(self) -> dict[str, Any]:
         """Return a safe snapshot; never expose credentials or private identity."""
+        # Keep the output safe even if a future code path stores raw proxy
+        # diagnostics here.  _establish_session currently stores only these
+        # fields, but the public diagnostics boundary should enforce that.
+        proxy = {
+            key: self._diagnostics[key]
+            for key in ("available", "liveness", "compatibility")
+            if key in self._diagnostics
+        }
         return {
             "backend": self.name,
             "started": self._started,
             "capability": self.capability.as_dict(),
             "session_connected": bool(self.session and self.session.connected),
+            "session_generation": getattr(self, "_session_generation", 0),
+            "session_epoch": (
+                self.session.epoch
+                if self.session is not None and type(self.session.epoch) is int
+                else None
+            ),
+            "proxy": proxy,
+            "setup_response": self.setup_metrics.diagnostics(),
+            "batch_events": dict(self._batch_event_counts),
         }
+
+    def _record_batch_event(self, event: str) -> None:
+        """Keep a bounded, backend-lifetime count of batch recovery events."""
+        if event in self._batch_event_counts:
+            self._batch_event_counts[event] = min(
+                2_147_483_647, self._batch_event_counts[event] + 1
+            )
 
     def _resolve_handles(
         self, snapshot: Mapping[str, Any], handles: GattHandles | None = None

@@ -16,18 +16,26 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from openrbus.catalog import RegisterCatalogEntry
 from openrbus.discovery import DeviceIdentity
 from openrbus.registry import Registry
+from openrbus.value_codec import CanOpenTimeOfDay
 
 from .bridge import GenericRead
 from .const import CONF_ACCESS_LEVEL, DOMAIN
 from .coordinator import OpenRBusCoordinator, OpenRBusPollingCoordinator
 from .register_entities import (
+    async_apply_diagnostic_visibility,
+    async_apply_entity_overrides,
     cleanup_legacy_sensor_entities,
     control_kind,
+    diagnostics_enabled,
     ensure_polling_coordinators,
+    entity_enabled_by_default,
     entity_unique_id,
+    entity_zone_label,
+    register_name,
     restore_migrated_sensor_entities,
     rows_for_parent,
 )
+from .zones import profile_for, zone_device_name, zone_enabled, zone_subindex
 
 _CATALOG_REGISTRY = Registry.load_default()
 
@@ -40,7 +48,12 @@ async def async_setup_entry(
     """Set up verified gateway and discovered-node entities."""
 
     coordinator = entry.runtime_data
-    entities: list[SensorEntity] = [OpenRBusDeviceTypeSensor(coordinator)]
+    async_apply_diagnostic_visibility(hass, coordinator)
+    async_apply_entity_overrides(hass, coordinator)
+    show_diagnostics = diagnostics_enabled(coordinator)
+    entities: list[SensorEntity] = (
+        [OpenRBusDeviceTypeSensor(coordinator)] if show_diagnostics else []
+    )
     configured = dict(entry.data)
     configured.update(getattr(entry, "options", {}))
     try:
@@ -54,13 +67,13 @@ async def async_setup_entry(
     entity_registry = er.async_get(hass)
     for runtime_node in runtime_nodes:
         identity = getattr(runtime_node, "identity", runtime_node)
-        if identity.device_code is not None:
+        if show_diagnostics and identity.device_code is not None:
             entities.append(
                 OpenRBusIdentitySensor(
                     coordinator, identity, "device_code", language=coordinator.language
                 )
             )
-        if identity.parameter_number is not None:
+        if show_diagnostics and identity.parameter_number is not None:
             entities.append(
                 OpenRBusIdentitySensor(
                     coordinator,
@@ -84,7 +97,6 @@ async def async_setup_entry(
             for platform in ("number", "select", "switch")
         ):
             continue
-        recommended = _recommended_addresses(identity)
         entities.append(
             OpenRBusRegisterSensor(
                 coordinator,
@@ -92,7 +104,9 @@ async def async_setup_entry(
                 identity,
                 register,
                 language=coordinator.language,
-                enabled_by_default=_entity_enabled_by_default(register, recommended),
+                enabled_by_default=entity_enabled_by_default(
+                    coordinator, identity, register
+                ),
                 effective_access_level=(
                     coordinator.effective_access_levels.get(identity.node)
                     if coordinator.effective_access_levels.get(identity.node)
@@ -321,12 +335,16 @@ class OpenRBusRegisterSensor(
         self._attr_entity_registry_enabled_default = enabled_by_default
         self._language = language
         self._effective_access_level = effective_access_level
-        self._attr_name = (
-            (register.name_en if language == "en" else register.name_de)
-            or register.name_en
-            or register.name_de
-        )
-        self._attr_native_unit_of_measurement = register.unit
+        self._attr_name = register_name(register, language)
+        if zone_label := entity_zone_label(parent, identity, register):
+            self._attr_name = f"{zone_label} {self._attr_name}"
+        if register.datatype == "TIME_OF_DAY":
+            # HA has no time-only sensor device class/native value, so publish
+            # a stable clock string. Keep the standardized protocol date
+            # separately; it has no timezone semantics and is not a timestamp.
+            self._attr_native_unit_of_measurement = None
+        else:
+            self._attr_native_unit_of_measurement = register.unit
         address = register.address
         # Node number is a stable protocol identity.  Include the concrete
         # object address, never a localized/display name, in the unique ID.
@@ -338,14 +356,20 @@ class OpenRBusRegisterSensor(
     @property
     def native_value(self) -> Any:
         result = self._result
-        return result.value if isinstance(result, GenericRead) else None
+        if not isinstance(result, GenericRead):
+            return None
+        if isinstance(result.value, CanOpenTimeOfDay):
+            return _time_of_day_native_value(result.value)
+        return result.value
 
     @property
     def available(self) -> bool:
         return (
             self._effective_access_level is not None
             and _catalog_visible(self._register, self._effective_access_level)
-            and isinstance(self._result, GenericRead)
+            and self.coordinator.is_value_available(
+                self._identity.node, self._register.address
+            )
         )
 
     @property
@@ -356,6 +380,24 @@ class OpenRBusRegisterSensor(
 
     @property
     def device_info(self) -> DeviceInfo:
+        slot = zone_subindex(self._register)
+        profile = (
+            profile_for(self._parent, self._identity.node, slot)
+            if slot is not None
+            else None
+        )
+        if profile is not None and zone_enabled(self._parent, profile.node, profile.subindex):
+            node_identifier = f"{self._parent.config_entry.entry_id}:node:{self._identity.node}"
+            return DeviceInfo(
+                identifiers={
+                    ("openrbus", f"{node_identifier}:zone:{profile.subindex}")
+                },
+                name=zone_device_name(profile),
+                manufacturer=getattr(self._identity, "manufacturer", None) or "OpenRBus",
+                model=getattr(self._identity, "model", None)
+                or getattr(self._identity, "family", None),
+                via_device=("openrbus", node_identifier),
+            )
         return DeviceInfo(
             identifiers={
                 (
@@ -397,6 +439,14 @@ class OpenRBusRegisterSensor(
             "raw_value": self._result.raw_value.hex()
             if isinstance(self._result, GenericRead)
             else "",
+            "protocol_day_counter": self._result.value.days
+            if isinstance(self._result, GenericRead)
+            and isinstance(self._result.value, CanOpenTimeOfDay)
+            else None,
+            "protocol_date": self._result.value.protocol_date.isoformat()
+            if isinstance(self._result, GenericRead)
+            and isinstance(self._result.value, CanOpenTimeOfDay)
+            else None,
             "poll_group": self.coordinator.group,
             "write_enabled": self._parent.write_enabled,
             "effective_access_level": self._effective_access_level,
@@ -405,6 +455,15 @@ class OpenRBusRegisterSensor(
                 and _catalog_visible(self._register, self._effective_access_level)
             ),
         }
+
+
+def _time_of_day_native_value(value: CanOpenTimeOfDay) -> str:
+    """Format a time-only value without inventing date or timezone meaning."""
+
+    seconds, milliseconds = divmod(value.milliseconds, 1000)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
 
 
 def _identity_display_name(identity: DeviceIdentity) -> str:

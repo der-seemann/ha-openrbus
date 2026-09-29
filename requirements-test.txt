@@ -1,0 +1,10 @@
+# Reproducible Home Assistant integration test environment (Python 3.13+).
+# Install the matching OpenRBus Core wheel separately; for RC validation use
+# the wheel built from the companion openrbus checkout.
+aiohasupervisor==0.6.0
+aiousbwatcher==1.1.2
+homeassistant==2026.9.1
+pytest==9.1.1
+pytest-asyncio==1.4.0
+ruff==0.16.6
+serialx==1.10.0

@@ -39,6 +39,11 @@ The config flow collects only the transport and access settings needed for the s
 
 If the proxy is unavailable, the flow aborts with a localized error instead of inventing a target or silently using a stale scan result.
 
+For local setup, the `openrbus.prepare_proxy_yaml` service returns the generic
+reference YAML without collecting or storing credentials. See
+[`docs/esphome-proxy.md`](docs/esphome-proxy.md) for version compatibility and
+operator-managed OTA and rollback guidance.
+
 ## Access levels and write safety
 
 Access level 1 is the safe default and is intended for read-only operation. Higher levels require the configured gateway credentials and a confirmation warning. Enabling **write access** is separate from selecting a level.
@@ -79,7 +84,7 @@ Config-entry diagnostics are intentionally aggregate and secret-free. They omit 
 
 ## Privacy and security
 
-All communication is local. Configuration data such as a Bluetooth address, PIN, or protocol key belongs in Home Assistant's protected config storage and must not be copied into issues, screenshots, README files, or test fixtures. Use synthetic values such as `BLE_TARGET_ADDRESS` in examples. Debug logs can contain transport metadata; enable debug logging only while reproducing a problem and redact the resulting log before sharing it.
+All communication is local. Configuration data such as a Bluetooth address, PIN, or protocol key belongs in Home Assistant's protected config storage and must not be copied into issues, screenshots, README files, or test fixtures. Use synthetic values such as `02:00:00:00:00:01` in examples. Debug logs can contain transport metadata; enable debug logging only while reproducing a problem and redact the resulting log before sharing it.
 
 The integration does not upload telemetry. The ESPHome proxy is optional and does not receive OpenRBus register policy. For a security report, use the repository's private GitHub security/contact channel rather than posting credentials or captures in a public issue.
 
@@ -107,14 +112,15 @@ Remove the OpenRBus config entry from **Settings → Devices & services**, then 
 
 ## Development and release validation
 
-The release candidate is version `0.4.0`. The HA integration and the `openrbus` protocol core are versioned independently but the HA manifest pins the compatible Core release exactly. Run the test suite in a Home Assistant development environment with:
+The release candidate is version `0.4.1`. The HA integration and the `openrbus` protocol core are versioned independently but the HA manifest pins the compatible Core release exactly. Run the test suite in a Home Assistant development environment with the pinned dependencies in `requirements-test.txt`:
 
 ```console
+python -m pip install -r requirements-test.txt
 python -m pytest -q
 python -m compileall -q custom_components
 ```
 
-The repository also runs HACS validation and Home Assistant Hassfest in GitHub Actions. See [CHANGELOG.md](CHANGELOG.md) and [RELEASE_HA_OPENRBUS_0.4.0.md](RELEASE_HA_OPENRBUS_0.4.0.md) for the release scope, quality-scale matrix, privacy review, and remaining external release actions.
+The repository also runs HACS validation and Home Assistant Hassfest in GitHub Actions. See [CHANGELOG.md](CHANGELOG.md) and [RELEASE_HA_OPENRBUS_0.4.1.md](RELEASE_HA_OPENRBUS_0.4.1.md) for the release scope, quality-scale matrix, privacy review, and remaining external release actions.
 
 ## License
 

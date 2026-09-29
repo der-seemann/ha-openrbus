@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from types import SimpleNamespace
 
 import voluptuous as vol
 from annotatedyaml import YAMLException
@@ -30,18 +31,22 @@ from openrbus.transport.ble import (
 )
 from openrbus.transport.thin_gatt import ThinGattProfile
 
+from .access_storage import async_load_access_profile, async_save_access_profile
 from .const import (
     BACKEND_NATIVE,
     BACKEND_THIN_RPC,
     CONF_AUTH_KEY,
     CONF_BACKEND,
+    CONF_BLE_DEVICE,
     CONF_THIN_KEY_SECRET,
     CONF_THIN_PROFILE,
+    CONF_TRANSPORT_MIGRATION,
     DOMAIN,
 )
 from .coordinator import OpenRBusCoordinator
+from .proxy_provisioning import PROXY_SOURCE_VERSION, read_proxy_yaml
 
-PLATFORMS = ["sensor", "number", "select", "switch"]
+PLATFORMS = ["sensor", "binary_sensor", "number", "select", "switch"]
 
 # The opt-in ESPHome Thin-RPC firmware exposes the same canonical EHC
 # characteristics as the native Core transport.  Keep these implementation
@@ -189,10 +194,14 @@ def _auth_key_provider(value: object) -> Callable[[bytes], TeaKeyComponent] | No
 
 
 def _thin_runtime(
-    hass: HomeAssistant, entry: ConfigEntry
+    hass: HomeAssistant, configured: Mapping[str, object] | ConfigEntry
 ) -> tuple[ThinGattProfile | None, Callable[[bytes], TeaKeyComponent] | None]:
-    configured = dict(entry.data)
-    configured.update(getattr(entry, "options", {}))
+    # Keep the small helper compatible with existing callers/tests while
+    # setup passes the MAC-profile-merged mapping.
+    if not isinstance(configured, Mapping):
+        entry = configured
+        configured = dict(entry.data)
+        configured.update(getattr(entry, "options", {}))
     configured_profile = _thin_profile(configured.get(CONF_THIN_PROFILE))
     if configured.get(CONF_BACKEND) == BACKEND_THIN_RPC:
         profile = configured_profile or _default_thin_profile()
@@ -220,12 +229,64 @@ async def _cancel_task(task: asyncio.Task[object]) -> None:
         pass
 
 
+async def _async_validate_transport_migration(
+    hass: HomeAssistant, entry: ConfigEntry, configured: Mapping[str, object]
+) -> None:
+    """Prove a newly selected route can connect and discover without writes.
+
+    Options updates unload the old backend before setup starts the candidate.
+    A disposable coordinator gives the candidate route a complete, read-only
+    lifecycle (connect, authorize where configured, and discovery) before
+    platforms or registries are touched.  The actual config entry is never
+    used for this probe, so a failed candidate cannot replace ``runtime_data``.
+    """
+
+    candidate_entry = SimpleNamespace(
+        entry_id=entry.entry_id,
+        data=dict(configured),
+        options={},
+    )
+    profile, key_provider = _thin_runtime(hass, configured)
+    candidate = OpenRBusCoordinator(
+        hass,
+        candidate_entry,
+        thin_key_provider=key_provider,
+        thin_profile=profile,
+    )
+    try:
+        await candidate.async_start()
+    finally:
+        await candidate.async_shutdown()
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up OpenRBus from a config entry."""
     configured = dict(entry.data)
     configured.update(getattr(entry, "options", {}))
+    migration = configured.pop(CONF_TRANSPORT_MIGRATION, None)
+    if isinstance(migration, Mapping):
+        try:
+            await _async_validate_transport_migration(hass, entry, configured)
+        except Exception:
+            previous_options = migration.get("previous_options")
+            if not isinstance(previous_options, Mapping):
+                raise
+            # This is a config-entry-local rollback, not a new entry.  HA's
+            # device/entity registries therefore retain their entry ID,
+            # unique IDs, history and automation/dashboard references.
+            hass.config_entries.async_update_entry(
+                entry, options=dict(previous_options)
+            )
+            return await async_setup_entry(hass, entry)
+    # This profile deliberately remains when a config entry is deleted.  It
+    # is keyed only by a validated BLE MAC, so changing the ESP/native route
+    # does not lose the local PIN/key or explicit access policy.
+    configured.update(
+        await async_load_access_profile(hass, configured.get(CONF_BLE_DEVICE))
+    )
+    await async_save_access_profile(hass, configured)
     backend = configured.get(CONF_BACKEND)
-    profile, key_provider = _thin_runtime(hass, entry)
+    profile, key_provider = _thin_runtime(hass, configured)
     if backend not in {BACKEND_NATIVE, BACKEND_THIN_RPC}:
         raise HomeAssistantError(
             "Unsupported OpenRBus transport; choose Local Bluetooth or ESPHome Thin-RPC"
@@ -417,6 +478,51 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             ),
             supports_response=SupportsResponse.OPTIONAL,
         )
+
+        async def reactivate_register(call: ServiceCall) -> None:
+            selected = hass.config_entries.async_get_entry(call.data["entry_id"])
+            if selected is None or selected.domain != DOMAIN:
+                raise HomeAssistantError("Unknown OpenRBus config entry")
+            try:
+                address = ObjectAddress.parse(call.data["object"])
+            except ValueError as error:
+                raise HomeAssistantError("object must use hhhh:ss notation") from error
+            target: OpenRBusCoordinator = selected.runtime_data
+            await target.async_reactivate_register(call.data["node"], address)
+
+        hass.services.async_register(
+            DOMAIN,
+            "reactivate_register",
+            reactivate_register,
+            schema=vol.Schema(
+                {
+                    vol.Required("entry_id"): str,
+                    vol.Required("object"): str,
+                    vol.Required("node"): vol.All(
+                        vol.Coerce(int), vol.Range(min=1, max=255)
+                    ),
+                }
+            ),
+        )
+
+        async def prepare_proxy_yaml(_call: ServiceCall) -> dict[str, str]:
+            """Return the generic ESPHome source template without secrets."""
+            return {
+                "source_version": PROXY_SOURCE_VERSION,
+                "yaml": read_proxy_yaml(),
+                "secrets_example": (
+                    "Copy the companion secrets.yaml.example from the matching "
+                    "OpenRBus source release and fill it locally."
+                ),
+            }
+
+        hass.services.async_register(
+            DOMAIN,
+            "prepare_proxy_yaml",
+            prepare_proxy_yaml,
+            schema=vol.Schema({}),
+            supports_response=SupportsResponse.OPTIONAL,
+        )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     first_refresh = hass.async_create_task(
         coordinator.async_config_entry_first_refresh()
@@ -424,6 +530,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     entry.async_on_unload(lambda: _cancel_task(first_refresh))
     entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
+    if isinstance(migration, Mapping):
+        # Remove old-route material only after the full candidate setup
+        # succeeded.  The update listener performs one harmless clean reload;
+        # later restarts consequently use the committed route directly.
+        committed_options = dict(entry.options)
+        committed_options.pop(CONF_TRANSPORT_MIGRATION, None)
+        hass.config_entries.async_update_entry(entry, options=committed_options)
     return True
 
 
@@ -438,6 +551,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.services.async_remove(DOMAIN, "read_group")
         hass.services.async_remove(DOMAIN, "catalog")
         hass.services.async_remove(DOMAIN, "write_object")
+        hass.services.async_remove(DOMAIN, "reactivate_register")
+        hass.services.async_remove(DOMAIN, "prepare_proxy_yaml")
     return unloaded
 
 

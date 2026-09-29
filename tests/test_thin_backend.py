@@ -33,6 +33,7 @@ from custom_components.openrbus.const import (
     CONF_THIN_PROFILE,
 )
 from custom_components.openrbus.coordinator import _configured_entry_data
+from custom_components.openrbus.setup_observability import SetupResponseMetrics
 from custom_components.openrbus.transport import (
     _THIN_SECURE_TIMEOUT,
     _THIN_SUBSCRIPTIONS,
@@ -89,7 +90,7 @@ async def test_thin_batch_reprepares_after_link_loss(monkeypatch) -> None:
         calls += 1
         backend.session.connected = True
 
-    async def read_batch(_client, addresses, *, node):
+    async def read_batch(_client, addresses, *, node, **_kwargs):
         assert addresses == (address,)
         assert node == 5
         if calls == 1:
@@ -106,6 +107,208 @@ async def test_thin_batch_reprepares_after_link_loss(monkeypatch) -> None:
 
     assert calls == 2
     assert result == (recovered,)
+
+
+@pytest.mark.asyncio
+async def test_thin_batch_reprepares_after_session_error_without_link_text(
+    monkeypatch,
+) -> None:
+    """Bounded recovery must not depend on parsing a transport error message."""
+
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    backend._read_lock = asyncio.Lock()
+    backend.client = object()
+    backend.session = SimpleNamespace(connected=True)
+    address = ObjectAddress(0x500F, 0x00)
+    recovered = GenericRead(5, address, b"\x00", 0)
+    values = 0
+    recoveries = 0
+
+    async def ensure_session_ready() -> None:
+        return None
+
+    async def recover_after_transport_loss() -> None:
+        nonlocal recoveries
+        recoveries += 1
+
+    async def read_batch(_client, addresses, *, node, **_kwargs):
+        nonlocal values
+        assert addresses == (address,)
+        assert node == 5
+        values += 1
+        if values == 1:
+            failure = HomeAssistantError("request timed out")
+            failure._openrbus_error_class = "session"
+            return (failure,)
+        return (recovered,)
+
+    backend._ensure_session_ready = ensure_session_ready
+    backend._recover_after_transport_loss = recover_after_transport_loss
+    monkeypatch.setattr(
+        "custom_components.openrbus.transport._read_objects_batched", read_batch
+    )
+
+    result = await backend.async_read_objects((address,), node=5)
+
+    assert result == (recovered,)
+    assert values == 2
+    assert recoveries == 1
+
+
+@pytest.mark.asyncio
+async def test_thin_batch_preserves_session_error_after_one_retry(monkeypatch) -> None:
+    """A failed bounded retry stays visible as an object-local session error."""
+
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    backend._read_lock = asyncio.Lock()
+    backend.client = object()
+    backend.session = SimpleNamespace(connected=True)
+    address = ObjectAddress(0x500F, 0x00)
+    attempts = 0
+    recoveries = 0
+
+    async def ensure_session_ready() -> None:
+        return None
+
+    async def recover_after_transport_loss() -> None:
+        nonlocal recoveries
+        recoveries += 1
+
+    async def read_batch(_client, addresses, *, node, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        failure = HomeAssistantError("request timed out")
+        failure._openrbus_error_class = "session"
+        return (failure,)
+
+    backend._ensure_session_ready = ensure_session_ready
+    backend._recover_after_transport_loss = recover_after_transport_loss
+    monkeypatch.setattr(
+        "custom_components.openrbus.transport._read_objects_batched", read_batch
+    )
+
+    result = await backend.async_read_objects((address,), node=5)
+
+    assert attempts == 2
+    assert recoveries == 1
+    assert isinstance(result[0], HomeAssistantError)
+    assert result[0]._openrbus_error_class == "session"
+
+
+@pytest.mark.asyncio
+async def test_thin_single_read_retries_once_after_transport_loss() -> None:
+    """An idempotent single read gets one fresh secure-session attempt."""
+
+    address = ObjectAddress(0x500F, 0x00)
+
+    class _Client:
+        calls = 0
+
+        async def read_raw(self, _node, _address):
+            self.calls += 1
+            if self.calls == 1:
+                raise TransportError("link lost during read")
+            return b"\x00"
+
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    backend._read_lock = asyncio.Lock()
+    backend.client = _Client()
+    ready_calls = 0
+    recoveries = 0
+
+    async def ensure_session_ready() -> None:
+        nonlocal ready_calls
+        ready_calls += 1
+
+    async def recover_after_transport_loss() -> None:
+        nonlocal recoveries
+        recoveries += 1
+
+    backend._ensure_session_ready = ensure_session_ready
+    backend._recover_after_transport_loss = recover_after_transport_loss
+
+    result = await backend.async_read_object(address, node=5)
+
+    assert result.raw_value == b"\x00"
+    assert backend.client.calls == 2
+    assert ready_calls == 1
+    assert recoveries == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_thin_reprepare_releases_backend_lifecycle_for_next_poll() -> None:
+    """A failed reconnect must not strand the backend in a false started state."""
+
+    controller_id = "test-thin-reprepare-lifecycle"
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    backend._started = True
+    backend.controller_id = controller_id
+    backend._active_controllers.add(controller_id)
+    backend.session = SimpleNamespace(connected=False)
+    backend.link = object()
+    backend.authentication = object()
+    backend.transport = object()
+    backend.client = object()
+
+    async def async_start() -> None:
+        return None
+
+    async def establish_session(*, attach: bool) -> None:
+        assert attach is True
+        raise TransportError("reconnect failed")
+
+    backend.async_start = async_start
+    backend._establish_session = establish_session
+
+    with pytest.raises(TransportError, match="reconnect failed"):
+        await backend._ensure_session_ready()
+
+    assert backend._started is False
+    assert controller_id not in backend._active_controllers
+    assert backend.session is None
+    assert backend.link is None
+    assert backend.authentication is None
+    assert backend.transport is None
+    assert backend.client is None
+
+
+@pytest.mark.asyncio
+async def test_thin_write_reprepares_before_first_attempt_but_never_retries(
+    monkeypatch,
+) -> None:
+    """A write after a disconnect is safe to start, not safe to duplicate."""
+
+    address = ObjectAddress(0x500F, 0x00)
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    backend._read_lock = asyncio.Lock()
+    backend.write_enabled = True
+    backend.access_level = 1
+    backend.client = object()
+    ensured = 0
+
+    async def ensure_session_ready() -> None:
+        nonlocal ensured
+        ensured += 1
+
+    backend._ensure_session_ready = ensure_session_ready
+    writes = 0
+
+    class _Writer:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        async def write(self, *_args, **_kwargs):
+            nonlocal writes
+            writes += 1
+            raise TransportError("response lost after write")
+
+    monkeypatch.setattr("custom_components.openrbus.transport.OpenRBusClient", _Writer)
+
+    with pytest.raises(TransportError, match="response lost"):
+        await backend.async_write_object(5, address, 0)
+
+    assert ensured == 1
+    assert writes == 1
 
 
 def test_options_flow_pairing_pin_overrides_original_entry_data() -> None:
@@ -450,7 +653,12 @@ async def test_backend_uses_fresh_baseline_when_liveness_is_not_active() -> None
             return self.frames.pop(0) if self.frames else None
 
         async def diagnostics(self):
-            return {"parent_connected": False, "link_active": False}
+            return {
+                "rpc_schema_version": 3,
+                "pair_contract": "pair_terminal_v3",
+                "parent_connected": False,
+                "link_active": False,
+            }
 
     class _Link:
         def __init__(self, session):
@@ -517,10 +725,10 @@ async def test_thin_setup_arms_existing_pairing_wrapper_before_rpc_pair() -> Non
 
 
 @pytest.mark.asyncio
-async def test_thin_setup_accepts_fresh_already_secure_pair_without_disconnect() -> (
-    None
-):
-    """A bonded ESP target can complete pairing while keeping its secure link."""
+async def test_thin_setup_does_not_accept_stale_already_secure_terminal(
+    monkeypatch,
+) -> None:
+    """An old RPC pair terminal is not proof of this arm's disconnect boundary."""
 
     calls: list[tuple[str, dict[str, object]]] = []
 
@@ -531,21 +739,12 @@ async def test_thin_setup_accepts_fresh_already_secure_pair_without_disconnect()
             calls.append((service, data))
 
     class _Channel:
-        samples = iter(
-            (
-                {"pair_requests": 4, "link_active": True, "parent_connected": True},
-                {
-                    "pair_requests": 5,
-                    "pair_last_status": "terminal_success",
-                    "pair_terminal_status": "already_secure_success",
-                    "link_active": True,
-                    "parent_connected": True,
-                },
-            )
-        )
-
         async def diagnostics(self):
-            return next(self.samples)
+            return {
+                "pair_terminal_status": "already_secure_success",
+                "link_active": True,
+                "parent_connected": True,
+            }
 
     hass = SimpleNamespace(services=_ServiceRegistry("openrbus_pair"))
     backend = ThinRpcBackend(
@@ -556,8 +755,51 @@ async def test_thin_setup_accepts_fresh_already_secure_pair_without_disconnect()
         passkey=123456,
     )
 
-    await backend._arm_pairing_if_configured()
+    monkeypatch.setattr(
+        "custom_components.openrbus.transport._THIN_DISCONNECT_TIMEOUT", 0.01
+    )
+    with pytest.raises(
+        HomeAssistantError,
+        match="pairing arm did not reach the disconnect boundary",
+    ):
+        await backend._arm_pairing_if_configured()
     assert calls == [("openrbus_pair", {"passkey": 123456})]
+
+
+@pytest.mark.asyncio
+async def test_setup_response_metrics_distinguish_empty_poll_and_lookup_frame() -> None:
+    metrics = SetupResponseMetrics()
+    lookup = {"kind": "response", "op": "HANDLE_LOOKUP", "request_id": 7}
+
+    class _Client:
+        hass = _hass("openrbus_gatt_rpc_poll")
+
+        def __init__(self):
+            self.responses = iter(({"frame": ""}, {"frame": json.dumps(lookup)}))
+
+        async def execute_service(self, *_args, **_kwargs):
+            return next(self.responses)
+
+    channel = HomeAssistantThinGattChannel(
+        _Client(),
+        ThinRpcCapability(
+            "openrbus_gatt_rpc_request",
+            "openrbus_gatt_rpc_poll",
+            "openrbus_gatt_rpc_diagnostics",
+        ),
+        setup_metrics=metrics,
+    )
+    channel._setup_handle_lookup_request_ids.add(7)
+
+    assert await channel.poll(timeout=1) is None
+    assert (await channel.poll(timeout=1))["op"] == "HANDLE_LOOKUP"
+    snapshot = metrics.diagnostics()
+    assert snapshot["poll_request"]["outcomes"]["no_esp_response"] == 1
+    assert snapshot["poll_request"]["outcomes"]["esp_response"] == 1
+    assert snapshot["handle_lookup"]["outcomes"]["no_esp_response"] == 1
+    assert snapshot["handle_lookup"]["outcomes"]["response"] == 1
+    assert snapshot["handle_lookup"]["outcomes"]["call_not_sent"] == 0
+    assert "request_id" not in repr(snapshot)
 
 
 @pytest.mark.asyncio
@@ -596,7 +838,12 @@ async def test_secure_link_deadline_exceeds_firmware_pair_watchdog() -> None:
             ]
 
         async def diagnostics(self):
-            return {"parent_connected": False, "link_active": False}
+            return {
+                "parent_connected": False,
+                "link_active": False,
+                "rpc_schema_version": 3,
+                "pair_contract": "pair_terminal_v3",
+            }
 
         async def action(self, _name, _payload, *, timeout):
             del timeout

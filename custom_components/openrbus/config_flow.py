@@ -15,6 +15,11 @@ from homeassistant.helpers import selector, translation
 from openrbus.transport import discover_ble_devices
 from openrbus.transport.ble import TRANSPARENT_SERVICE
 
+from .access_storage import (
+    async_load_access_profile,
+    async_save_access_profile,
+    normalize_mac,
+)
 from .const import (
     ACCESS_LEVEL_CHOICES,
     ACCESS_LEVEL_LABELS,
@@ -28,13 +33,18 @@ from .const import (
     CONF_BACKEND,
     CONF_BLE_DEVICE,
     CONF_BLE_SOURCE,
+    CONF_DIAGNOSTICS_ENABLED,
+    CONF_ENTITY_OVERRIDES,
     CONF_FLOW_ACTION,
+    CONF_INVALID_VALUE_DISABLE_AFTER,
     CONF_LANGUAGE,
     CONF_PAIR_ACTION,
     CONF_PASSKEY,
     CONF_POLL_FAST,
     CONF_POLL_SLOW,
     CONF_POLL_STANDARD,
+    CONF_READ_ACCESS_LEVEL,
+    CONF_SCREED_DRYING_ENABLED,
     CONF_THIN_CONTROLLER,
     CONF_THIN_DIAGNOSTICS_SERVICE,
     CONF_THIN_KEY_SECRET,
@@ -44,14 +54,30 @@ from .const import (
     CONF_THIN_REQUEST_SERVICE,
     CONF_THIN_RESPONSE_HANDLE,
     CONF_THIN_TARGET_ADDRESS_TYPE,
+    CONF_TRANSPORT_MIGRATION,
+    CONF_WRITE_ACCESS_LEVEL,
     CONF_WRITE_ENABLED,
+    CONF_ZONE_OVERRIDES,
+    DEFAULT_DIAGNOSTICS_ENABLED,
+    DEFAULT_INVALID_VALUE_DISABLE_AFTER,
     DEFAULT_LANGUAGE,
     DEFAULT_POLL_INTERVALS,
+    DEFAULT_SCREED_DRYING_ENABLED,
     DOMAIN,
     FLOW_ACTION_BACK,
     FLOW_ACTION_NEXT,
     FLOW_ACTION_OPTIONS,
     LANGUAGE_OPTIONS,
+)
+from .register_entities import (
+    bitfield_structure,
+    control_kind,
+    entity_enabled_by_default,
+    entity_unique_id,
+    register_name,
+    rows_for_parent,
+    write_access_allowed,
+    zone_row_enabled,
 )
 from .transport import (
     async_scan_thin_rpc_devices,
@@ -59,6 +85,7 @@ from .transport import (
     resolve_thin_rpc_capability,
     thin_rpc_controller_choices,
 )
+from .zones import override_key, zone_device_name
 
 _WARNING_TRANSLATION_PREFIX = f"component.{DOMAIN}.common."
 _ACCESS_WARNING_KEY = f"{_WARNING_TRANSLATION_PREFIX}access_level_warning"
@@ -106,6 +133,37 @@ def _without_flow_action(user_input: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in user_input.items() if key != CONF_FLOW_ACTION}
 
 
+def _transport_route(values: Mapping[str, Any]) -> tuple[object, ...]:
+    """Return only the settings which identify a physical transport route."""
+
+    backend = values.get(CONF_BACKEND, BACKEND_NATIVE)
+    if backend == BACKEND_NATIVE:
+        return (backend, values.get(CONF_BLE_SOURCE))
+    return (
+        backend,
+        values.get(CONF_THIN_CONTROLLER),
+        values.get(CONF_THIN_REQUEST_SERVICE),
+        values.get(CONF_THIN_POLL_SERVICE),
+        values.get(CONF_THIN_DIAGNOSTICS_SERVICE),
+    )
+
+
+def _transport_switch_is_safe(
+    current: Mapping[str, Any], candidate: Mapping[str, Any]
+) -> bool:
+    """Allow a retained-identity switch only for the same canonical BLE MAC.
+
+    Entity IDs and HA history are intentionally retained by keeping the same
+    config entry.  That is correct only when both routes terminate at the
+    same heating gateway.  Unknown/non-MAC targets fail closed instead of
+    accidentally rebinding an existing entry to another installation.
+    """
+
+    old_mac = normalize_mac(current.get(CONF_BLE_DEVICE))
+    new_mac = normalize_mac(candidate.get(CONF_BLE_DEVICE))
+    return old_mac is not None and old_mac == new_mac
+
+
 def _normalize_access_level(value: object) -> int:
     """Convert the translated flow value to Core's numeric access level."""
     selected = ACCESS_LEVEL_LABELS.get(value, value)
@@ -126,6 +184,41 @@ def _safe_access_level(value: object, *, default: int = 1) -> int:
     except (TypeError, ValueError):
         return default
     return level if level in ACCESS_LEVEL_OPTIONS else default
+
+
+def _read_access_level(values: Mapping[str, Any]) -> int:
+    """Read the new independent policy with the legacy read-level fallback."""
+
+    return _safe_access_level(
+        values.get(CONF_READ_ACCESS_LEVEL, values.get(CONF_ACCESS_LEVEL, 1))
+    )
+
+
+def _write_access_level(values: Mapping[str, Any]) -> int:
+    """Read the explicit write policy; old entries retain their old behavior."""
+
+    return _safe_access_level(
+        values.get(CONF_WRITE_ACCESS_LEVEL, values.get(CONF_ACCESS_LEVEL, 1))
+    )
+
+
+def _normalize_access_policies(values: dict[str, Any]) -> None:
+    """Canonicalize independent policies while retaining the legacy read alias."""
+
+    read_level = _read_access_level(values)
+    values[CONF_READ_ACCESS_LEVEL] = read_level
+    values[CONF_WRITE_ACCESS_LEVEL] = _write_access_level(values)
+    values[CONF_ACCESS_LEVEL] = read_level
+
+
+async def _async_apply_mac_profile(hass, values: dict[str, Any]) -> None:
+    """Prefill only missing setup values from the selected gateway's profile."""
+
+    profile = await async_load_access_profile(hass, values.get(CONF_BLE_DEVICE))
+    for key, value in profile.items():
+        if values.get(key) in (None, ""):
+            values[key] = value
+    _normalize_access_policies(values)
 
 
 def _warning_required(access_level: object, write_enabled: object) -> bool:
@@ -161,7 +254,13 @@ def _compose_warning(
 async def _async_warning_text(
     hass, *, access_level: object, write_enabled: object
 ) -> str:
-    """Load and compose warning fragments in the Home Assistant UI locale."""
+    """Load warning fragments in the HA locale, with an English fallback.
+
+    Home Assistant's integration translations are allowed to be incomplete
+    while a locale is being introduced.  Permission warnings must never turn
+    into an empty acknowledgement page in that case, so fill only missing
+    fragments from the canonical English strings.
+    """
 
     if not _warning_required(access_level, write_enabled):
         return ""
@@ -175,6 +274,22 @@ async def _async_warning_text(
         )
     except Exception:  # noqa: BLE001 - a warning must not break setup
         localized = {}
+    required = (
+        {_ACCESS_WARNING_KEY}
+        if _safe_access_level(access_level) >= 2
+        else set()
+    )
+    if bool(write_enabled):
+        required.update({_WRITE_WARNING_KEY, _OPTIMIZATION_NOTE_KEY})
+    missing = required.difference(localized)
+    if missing and language != "en":
+        try:
+            english = await translation.async_get_translations(
+                hass, "en", "common", integrations=(DOMAIN,)
+            )
+        except Exception:  # noqa: BLE001 - warnings must not break setup
+            english = {}
+        localized = {**english, **localized}
     return _compose_warning(
         localized, access_level=access_level, write_enabled=write_enabled
     )
@@ -474,6 +589,7 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                 pending[CONF_THIN_TARGET_ADDRESS_TYPE] = scan_devices[selected].get(
                     "address_type", 0
                 )
+            await _async_apply_mac_profile(self.hass, pending)
             self._pending_user_input = pending
             return await self.async_step_access_level()
         backend = pending.get(CONF_BACKEND, BACKEND_NATIVE)
@@ -519,6 +635,7 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                 pending[CONF_THIN_TARGET_ADDRESS_TYPE] = scan_devices[selected].get(
                     "address_type", 0
                 )
+            await _async_apply_mac_profile(self.hass, pending)
             self._pending_user_input = pending
             return await self.async_step_access_level()
         capability = resolve_thin_rpc_capability(
@@ -553,12 +670,30 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                 data_schema=_flow_schema(
                     {
                         vol.Required(
-                            CONF_ACCESS_LEVEL,
-                            default=pending.get(CONF_ACCESS_LEVEL, 1),
+                            CONF_READ_ACCESS_LEVEL,
+                            default=_read_access_level(pending),
+                        ): vol.In(ACCESS_LEVEL_CHOICES),
+                        vol.Required(
+                            CONF_WRITE_ACCESS_LEVEL,
+                            default=_write_access_level(pending),
                         ): vol.In(ACCESS_LEVEL_CHOICES),
                         vol.Required(
                             CONF_WRITE_ENABLED,
                             default=pending.get(CONF_WRITE_ENABLED, False),
+                        ): cv.boolean,
+                        vol.Required(
+                            CONF_DIAGNOSTICS_ENABLED,
+                            default=pending.get(
+                                CONF_DIAGNOSTICS_ENABLED,
+                                DEFAULT_DIAGNOSTICS_ENABLED,
+                            ),
+                        ): cv.boolean,
+                        vol.Required(
+                            CONF_SCREED_DRYING_ENABLED,
+                            default=pending.get(
+                                CONF_SCREED_DRYING_ENABLED,
+                                DEFAULT_SCREED_DRYING_ENABLED,
+                            ),
                         ): cv.boolean,
                     }
                 ),
@@ -572,12 +707,11 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
         pending.update(_without_flow_action(user_input))
         # ``vol.In`` accepts the translated labels above.  Normalize the
         # label before persisting the numeric level used by Core/coordinator.
-        pending[CONF_ACCESS_LEVEL] = _normalize_access_level(
-            pending.get(CONF_ACCESS_LEVEL, 1)
-        )
+        _normalize_access_policies(pending)
         self._pending_user_input = pending
         if not _warning_required(
-            pending[CONF_ACCESS_LEVEL], pending.get(CONF_WRITE_ENABLED, False)
+            max(_read_access_level(pending), _write_access_level(pending)),
+            pending.get(CONF_WRITE_ENABLED, False),
         ):
             return await self.async_step_credentials()
         return await self.async_step_access_warning()
@@ -614,7 +748,7 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_credentials(self, user_input=None) -> ConfigFlowResult:
         pending = dict(getattr(self, "_pending_user_input", {}))
         if user_input is None:
-            level = int(pending.get(CONF_ACCESS_LEVEL, 1))
+            level = max(_read_access_level(pending), _write_access_level(pending))
             # Transport/profile/service metadata is deliberately not part of
             # the public flow.  It is selected from the discovered proxy
             # capability below and persisted internally.
@@ -622,12 +756,16 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                 # Keep the schema JSON-serializable for HA's REST flow API.
                 # Numeric/PIN validation is performed by the transport/core
                 # boundary after the form is submitted.
-                vol.Required(CONF_PASSKEY, default=""): cv.string,
+                vol.Required(
+                    CONF_PASSKEY, default=pending.get(CONF_PASSKEY, "")
+                ): cv.string,
                 # The role was selected and acknowledged in the preceding
                 # steps.  Level 1 intentionally has no auth-key field.
             }
             if level >= 2:
-                schema[vol.Required(CONF_AUTH_KEY, default="")] = cv.string
+                schema[vol.Required(
+                    CONF_AUTH_KEY, default=pending.get(CONF_AUTH_KEY, "")
+                )] = cv.string
             return self.async_show_form(
                 step_id="credentials", data_schema=_flow_schema(schema)
             )
@@ -641,7 +779,7 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
             ):
                 return await self.async_step_access_warning()
             return await self.async_step_access_level()
-        level = int(pending.get(CONF_ACCESS_LEVEL, 1))
+        level = max(_read_access_level(pending), _write_access_level(pending))
         if level >= 2 and not _valid_auth_key(pending.get(CONF_AUTH_KEY)):
             return self.async_show_form(
                 step_id="credentials",
@@ -650,7 +788,9 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                         vol.Required(
                             CONF_PASSKEY, default=pending.get(CONF_PASSKEY, "")
                         ): cv.string,
-                        vol.Required(CONF_AUTH_KEY): cv.string,
+                        vol.Required(
+                            CONF_AUTH_KEY, default=pending.get(CONF_AUTH_KEY, "")
+                        ): cv.string,
                     }
                 ),
                 errors={"base": "auth_key_required"},
@@ -730,6 +870,8 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
             )
             await self.async_set_unique_id(f"esphome_bridge:{identity}")
             self._abort_if_unique_id_configured()
+            _normalize_access_policies(user_input)
+            await async_save_access_profile(self.hass, user_input)
             return self.async_create_entry(
                 title=(
                     "OpenRBus Local Bluetooth"
@@ -764,9 +906,22 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_THIN_KEY_SECRET: user_input.get(CONF_THIN_KEY_SECRET) or None,
                     CONF_AUTH_KEY: user_input.get(CONF_AUTH_KEY) or None,
                     CONF_ACCESS_ACK: bool(user_input.get(CONF_ACCESS_ACK, False)),
-                    CONF_ACCESS_LEVEL: int(user_input.get(CONF_ACCESS_LEVEL, 1)),
+                    CONF_ACCESS_LEVEL: _read_access_level(user_input),
+                    CONF_READ_ACCESS_LEVEL: _read_access_level(user_input),
+                    CONF_WRITE_ACCESS_LEVEL: _write_access_level(user_input),
                     CONF_LANGUAGE: user_input.get(CONF_LANGUAGE, DEFAULT_LANGUAGE),
                     CONF_WRITE_ENABLED: bool(user_input.get(CONF_WRITE_ENABLED, False)),
+                    CONF_DIAGNOSTICS_ENABLED: bool(
+                        user_input.get(
+                            CONF_DIAGNOSTICS_ENABLED, DEFAULT_DIAGNOSTICS_ENABLED
+                        )
+                    ),
+                    CONF_SCREED_DRYING_ENABLED: bool(
+                        user_input.get(
+                            CONF_SCREED_DRYING_ENABLED,
+                            DEFAULT_SCREED_DRYING_ENABLED,
+                        )
+                    ),
                     CONF_POLL_FAST: int(
                         user_input.get(
                             CONF_POLL_FAST, DEFAULT_POLL_INTERVALS[CONF_POLL_FAST]
@@ -783,6 +938,10 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                             CONF_POLL_SLOW, DEFAULT_POLL_INTERVALS[CONF_POLL_SLOW]
                         )
                     ),
+                    CONF_INVALID_VALUE_DISABLE_AFTER: int(user_input.get(
+                        CONF_INVALID_VALUE_DISABLE_AFTER,
+                        DEFAULT_INVALID_VALUE_DISABLE_AFTER,
+                    )),
                 },
             )
 
@@ -802,6 +961,10 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
             vol.Optional(
                 CONF_POLL_SLOW, default=DEFAULT_POLL_INTERVALS[CONF_POLL_SLOW]
             ): vol.All(vol.Coerce(int), vol.Range(min=5, max=86400)),
+            vol.Optional(
+                CONF_INVALID_VALUE_DISABLE_AFTER,
+                default=DEFAULT_INVALID_VALUE_DISABLE_AFTER,
+            ): vol.All(vol.Coerce(int), vol.Range(min=60, max=31536000)),
             vol.Optional(CONF_BLE_DEVICE, default=""): str,
             vol.Optional(CONF_PASSKEY, default=""): cv.string,
         }
@@ -869,13 +1032,116 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             return vol.In(choices)
         return str
 
+    def _zone_choices(self) -> dict[str, str]:
+        """Build an explicit, persisted selection only from discovered slots."""
+
+        runtime = getattr(self._config_entry, "runtime_data", None)
+        profiles = getattr(runtime, "zone_profiles", {}) or {}
+        return {
+            override_key(profile.node, profile.subindex): zone_device_name(profile)
+            for _key, profile in sorted(profiles.items())
+        }
+
+    def _entity_choices(self) -> dict[str, str]:
+        """Return only currently discovered, readable, safe scalar projections."""
+        runtime = getattr(self._config_entry, "runtime_data", None)
+        if runtime is None:
+            return {}
+        choices: dict[str, str] = {}
+        for identity, register, _group, allowed in rows_for_parent(runtime):
+            if not allowed or not register.readable or not zone_row_enabled(runtime, identity, register):
+                continue
+            effective = runtime.effective_access_levels.get(identity.node)
+            if control_kind(register, runtime.language) is not None and not write_access_allowed(runtime, register, effective):
+                continue
+            uid = entity_unique_id(runtime, identity, register)
+            base_label = f"{identity.node}: {register_name(register, runtime.language)}"
+            structure = bitfield_structure(register)
+            bit_fields = tuple(
+                field for field in structure.fields if field.bit_length == 1
+            ) if structure is not None else ()
+            if bit_fields:
+                for field in bit_fields:
+                    choices[f"{uid}:bit:{field.name}"] = f"{base_label} — {field.label(runtime.language)}"
+            else:
+                choices[uid] = base_label
+        return choices
+
+    def _entity_default_selection(self) -> list[str]:
+        """Return enabled-by-default/currently-selected entity identities."""
+        runtime = getattr(self._config_entry, "runtime_data", None)
+        if runtime is None:
+            return []
+        stored = dict(getattr(runtime, "entity_overrides", {}) or {})
+        current = {**self._config_entry.data, **self._config_entry.options}
+        overrides = current.get(CONF_ENTITY_OVERRIDES, {})
+        if isinstance(overrides, Mapping):
+            stored.update({str(key): bool(value) for key, value in overrides.items()})
+        selected: list[str] = []
+        for identity, register, _group, allowed in rows_for_parent(runtime):
+            if not allowed or not register.readable or not zone_row_enabled(runtime, identity, register):
+                continue
+            effective = runtime.effective_access_levels.get(identity.node)
+            if control_kind(register, runtime.language) is not None and not write_access_allowed(runtime, register, effective):
+                continue
+            base_uid = entity_unique_id(runtime, identity, register)
+            structure = bitfield_structure(register)
+            bit_fields = tuple(field for field in structure.fields if field.bit_length == 1) if structure is not None else ()
+            uids = (
+                tuple(f"{base_uid}:bit:{field.name}" for field in bit_fields)
+                if bit_fields else (base_uid,)
+            )
+            default = entity_enabled_by_default(runtime, identity, register)
+            if control_kind(register, runtime.language) is not None:
+                default = default and write_access_allowed(runtime, register, effective)
+            selected.extend(uid for uid in uids if stored.get(uid, default))
+        return selected
+
     async def async_step_init(self, user_input=None):
         if user_input is not None:
+            # If the ordinary full form exactly matches its initial values
+            # except for diagnostics, update only that option and skip all
+            # rediscovery. This is useful for local diagnosis without making
+            # unrelated settings or transport state part of the operation.
+            baseline = getattr(self, "_diagnostic_toggle_baseline", None)
+            only_diagnostics_changed = (
+                CONF_DIAGNOSTICS_ENABLED in user_input
+                and isinstance(baseline, dict)
+                and set(user_input) == set(baseline) | {CONF_DIAGNOSTICS_ENABLED}
+                and all(user_input.get(key) == value for key, value in baseline.items())
+            )
+            if only_diagnostics_changed:
+                options = dict(self._config_entry.options)
+                options[CONF_DIAGNOSTICS_ENABLED] = bool(
+                    user_input[CONF_DIAGNOSTICS_ENABLED]
+                )
+                return self.async_create_entry(title="", data=options)
             user_input = _without_flow_action(user_input)
-            level = _safe_access_level(user_input.get(CONF_ACCESS_LEVEL, 1))
-            # Keep the persisted payload canonical even when an older
-            # frontend submits a string/translated access-level value.
-            user_input[CONF_ACCESS_LEVEL] = level
+            previous = {**self._config_entry.data, **self._config_entry.options}
+            zone_choices = self._zone_choices()
+            selected_zones = user_input.get(CONF_ZONE_OVERRIDES)
+            if isinstance(selected_zones, (list, tuple, set)):
+                # Store both explicit enable and disable choices.  A later
+                # rediscovery can add new slots without changing an existing
+                # manual override, and an inactive user-enabled slot survives
+                # a reload as an intentional selection.
+                user_input[CONF_ZONE_OVERRIDES] = {
+                    key: key in selected_zones for key in zone_choices
+                }
+            entity_choices = self._entity_choices()
+            selected_entities = user_input.get(CONF_ENTITY_OVERRIDES)
+            stored_entities = previous.get(CONF_ENTITY_OVERRIDES, {})
+            merged_entities = dict(stored_entities) if isinstance(stored_entities, Mapping) else {}
+            if isinstance(selected_entities, (list, tuple, set)):
+                # Retain overrides for temporarily undiscovered identities;
+                # they have no effect until a safe matching row returns.
+                merged_entities.update({key: key in selected_entities for key in entity_choices})
+            user_input[CONF_ENTITY_OVERRIDES] = merged_entities
+            await _async_apply_mac_profile(self.hass, user_input)
+            # Read and write policy are independently persisted.  A higher
+            # read policy must not silently become write permission.
+            _normalize_access_policies(user_input)
+            level = max(_read_access_level(user_input), _write_access_level(user_input))
             if user_input.get(CONF_BACKEND, BACKEND_NATIVE) == BACKEND_NATIVE:
                 # The source is intentionally hidden from the public options
                 # form.  Preserve an already persisted source if the current
@@ -887,10 +1153,6 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                     user_input[CONF_BLE_SOURCE] = existing
             self._remember_native_source(user_input)
             user_input.pop("_options_scan_complete", None)
-            # Level 1 deliberately has no authorization key.  Remove a stale
-            # value from an older entry when downgrading in Options.
-            if level == 1:
-                user_input.pop(CONF_AUTH_KEY, None)
             if _warning_required(
                 level, user_input.get(CONF_WRITE_ENABLED, False)
             ) and not user_input.get(CONF_ACCESS_ACK):
@@ -988,6 +1250,20 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                     data_schema=_flow_schema({vol.Required(CONF_AUTH_KEY): cv.string}),
                     errors={"base": "auth_key_required"},
                 )
+            # An options entry reloads only this existing entry.  Preserve
+            # its old options for setup-time, read-only validation and
+            # rollback; a second config entry would change device/entity IDs
+            # and break history, dashboards and automations.
+            if _transport_route(previous) != _transport_route(user_input):
+                if not _transport_switch_is_safe(previous, user_input):
+                    return self.async_show_form(
+                        step_id="init", errors={"base": "transport_mac_mismatch"}
+                    )
+                user_input[CONF_TRANSPORT_MIGRATION] = {
+                    "previous_options": dict(self._config_entry.options),
+                    "previous_route": _transport_route(previous),
+                }
+            await async_save_access_profile(self.hass, user_input)
             return self.async_create_entry(title="", data=user_input)
         # Options are the current source of truth; entry data is the legacy
         # fallback for entries created before this setting was moved to
@@ -996,57 +1272,104 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
         current = {**self._config_entry.data, **self._config_entry.options}
         current.update(getattr(self, "_pending_options_input", {}) or {})
         current.pop(CONF_FLOW_ACTION, None)
-        access_level = _safe_access_level(current.get(CONF_ACCESS_LEVEL, 1))
+        stored_profile = await async_load_access_profile(
+            self.hass, current.get(CONF_BLE_DEVICE)
+        )
+        for key, value in stored_profile.items():
+            current.setdefault(key, value)
+        _normalize_access_policies(current)
+        runtime = getattr(self._config_entry, "runtime_data", None)
+        observed = getattr(runtime, "effective_access_level", None)
+        # The coordinator has already read the authoritative access object
+        # during normal setup.  Prefer this cached observation for the read
+        # default, but never probe/write from the options form itself.
+        if observed in ACCESS_LEVEL_OPTIONS:
+            current[CONF_READ_ACCESS_LEVEL] = observed
+            current[CONF_ACCESS_LEVEL] = observed
         self._native_ble_sources = _native_ble_source_map(self.hass)
+        fields = {
+            vol.Required(
+                CONF_BACKEND,
+                default=current.get(CONF_BACKEND, BACKEND_NATIVE),
+            ): vol.In(BACKEND_OPTIONS),
+            vol.Required(
+                CONF_READ_ACCESS_LEVEL,
+                default=_read_access_level(current),
+            ): vol.In(ACCESS_LEVEL_OPTIONS),
+            vol.Required(
+                CONF_WRITE_ACCESS_LEVEL,
+                default=_write_access_level(current),
+            ): vol.In(ACCESS_LEVEL_OPTIONS),
+            vol.Required(
+                CONF_LANGUAGE,
+                default=current.get(CONF_LANGUAGE, DEFAULT_LANGUAGE),
+            ): vol.In(LANGUAGE_OPTIONS),
+            vol.Required(
+                CONF_WRITE_ENABLED,
+                default=current.get(CONF_WRITE_ENABLED, False),
+            ): cv.boolean,
+            vol.Required(
+                CONF_DIAGNOSTICS_ENABLED,
+                default=current.get(
+                    CONF_DIAGNOSTICS_ENABLED, DEFAULT_DIAGNOSTICS_ENABLED
+                ),
+            ): cv.boolean,
+            vol.Required(
+                CONF_SCREED_DRYING_ENABLED,
+                default=current.get(
+                    CONF_SCREED_DRYING_ENABLED, DEFAULT_SCREED_DRYING_ENABLED
+                ),
+            ): cv.boolean,
+            vol.Required(
+                CONF_BLE_DEVICE,
+                default=current.get(CONF_BLE_DEVICE, ""),
+            ): self._native_ble_schema(current),
+            vol.Required(
+                CONF_PASSKEY,
+                default=current.get(CONF_PASSKEY, ""),
+            ): cv.string,
+            vol.Required(
+                CONF_POLL_FAST,
+                default=current.get(CONF_POLL_FAST, DEFAULT_POLL_INTERVALS[CONF_POLL_FAST]),
+            ): vol.All(vol.Coerce(int), vol.Range(min=5, max=86400)),
+            vol.Required(
+                CONF_POLL_STANDARD,
+                default=current.get(CONF_POLL_STANDARD, DEFAULT_POLL_INTERVALS[CONF_POLL_STANDARD]),
+            ): vol.All(vol.Coerce(int), vol.Range(min=5, max=86400)),
+            vol.Required(
+                CONF_POLL_SLOW,
+                default=current.get(CONF_POLL_SLOW, DEFAULT_POLL_INTERVALS[CONF_POLL_SLOW]),
+            ): vol.All(vol.Coerce(int), vol.Range(min=5, max=86400)),
+            vol.Required(
+                CONF_INVALID_VALUE_DISABLE_AFTER,
+                default=current.get(CONF_INVALID_VALUE_DISABLE_AFTER, DEFAULT_INVALID_VALUE_DISABLE_AFTER),
+            ): vol.All(vol.Coerce(int), vol.Range(min=60, max=31536000)),
+        }
+        zone_choices = self._zone_choices()
+        if zone_choices:
+            stored = current.get(CONF_ZONE_OVERRIDES, {})
+            selected = [key for key in zone_choices if not isinstance(stored, Mapping) or stored.get(key, False)]
+            # No old value means "use automatic active-zone defaults".  The
+            # initial selection mirrors that visible state, then becomes an
+            # explicit durable override only when the form is saved.
+            if not isinstance(stored, Mapping):
+                selected = [
+                    key for key, profile in getattr(self._config_entry.runtime_data, "zone_profiles", {}).items()
+                    if profile.active
+                ]
+            fields[vol.Optional(CONF_ZONE_OVERRIDES, default=selected)] = cv.multi_select(zone_choices)
+        entity_choices = self._entity_choices()
+        if entity_choices:
+            selected_entities = self._entity_default_selection()
+            fields[vol.Optional(CONF_ENTITY_OVERRIDES, default=selected_entities)] = cv.multi_select(entity_choices)
+        self._diagnostic_toggle_baseline = {
+            marker.schema: marker.default()
+            for marker in fields
+            if getattr(marker, "schema", None) != CONF_DIAGNOSTICS_ENABLED
+        }
         return self.async_show_form(
             step_id="init",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(
-                        CONF_BACKEND,
-                        default=current.get(CONF_BACKEND, BACKEND_NATIVE),
-                    ): vol.In(BACKEND_OPTIONS),
-                    vol.Required(
-                        CONF_ACCESS_LEVEL,
-                        default=access_level,
-                    ): vol.In(ACCESS_LEVEL_OPTIONS),
-                    vol.Required(
-                        CONF_LANGUAGE,
-                        default=current.get(CONF_LANGUAGE, DEFAULT_LANGUAGE),
-                    ): vol.In(LANGUAGE_OPTIONS),
-                    vol.Required(
-                        CONF_WRITE_ENABLED,
-                        default=current.get(CONF_WRITE_ENABLED, False),
-                    ): cv.boolean,
-                    vol.Required(
-                        CONF_BLE_DEVICE,
-                        default=current.get(CONF_BLE_DEVICE, ""),
-                    ): self._native_ble_schema(current),
-                    vol.Required(
-                        CONF_PASSKEY,
-                        default=current.get(CONF_PASSKEY, ""),
-                    ): cv.string,
-                    vol.Required(
-                        CONF_POLL_FAST,
-                        default=current.get(
-                            CONF_POLL_FAST, DEFAULT_POLL_INTERVALS[CONF_POLL_FAST]
-                        ),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=5, max=86400)),
-                    vol.Required(
-                        CONF_POLL_STANDARD,
-                        default=current.get(
-                            CONF_POLL_STANDARD,
-                            DEFAULT_POLL_INTERVALS[CONF_POLL_STANDARD],
-                        ),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=5, max=86400)),
-                    vol.Required(
-                        CONF_POLL_SLOW,
-                        default=current.get(
-                            CONF_POLL_SLOW, DEFAULT_POLL_INTERVALS[CONF_POLL_SLOW]
-                        ),
-                    ): vol.All(vol.Coerce(int), vol.Range(min=5, max=86400)),
-                }
-            ),
+            data_schema=vol.Schema(fields),
         )
 
     async def async_step_access_warning(self, user_input=None):

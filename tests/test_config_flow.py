@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import openrbus.authorization as core_authorization
 import pytest
@@ -21,6 +21,8 @@ from custom_components.openrbus.config_flow import (
     _normalize_access_level,
     _safe_access_level,
     _stable_scan_records,
+    _transport_route,
+    _transport_switch_is_safe,
     _warning_required,
 )
 from custom_components.openrbus.const import (
@@ -32,11 +34,16 @@ from custom_components.openrbus.const import (
     CONF_AUTH_KEY,
     CONF_BACKEND,
     CONF_BLE_DEVICE,
+    CONF_DIAGNOSTICS_ENABLED,
     CONF_FLOW_ACTION,
     CONF_PASSKEY,
+    CONF_READ_ACCESS_LEVEL,
+    CONF_SCREED_DRYING_ENABLED,
+    CONF_WRITE_ACCESS_LEVEL,
     CONF_WRITE_ENABLED,
     DOMAIN,
     FLOW_ACTION_BACK,
+    LANGUAGE_OPTIONS,
 )
 
 _WARNING_TRANSLATIONS = {
@@ -52,6 +59,11 @@ def test_config_flow_exposes_only_supported_transports() -> None:
         BACKEND_NATIVE,
         BACKEND_THIN_RPC,
     }
+
+
+def test_entity_language_options_match_the_manufacturer_locale_catalog() -> None:
+    assert len(LANGUAGE_OPTIONS) == 28
+    assert {"de", "en", "fr", "nl", "tr", "zh"}.issubset(LANGUAGE_OPTIONS)
 
 
 def test_access_level_labels_are_numeric_after_flow_normalization() -> None:
@@ -95,7 +107,7 @@ async def test_options_form_uses_normalized_current_access_level_default(
     access_marker = next(
         marker
         for marker in result["data_schema"].schema
-        if getattr(marker, "schema", None) == CONF_ACCESS_LEVEL
+        if getattr(marker, "schema", None) == CONF_READ_ACCESS_LEVEL
     )
     assert access_marker.default() == expected
 
@@ -115,10 +127,141 @@ async def test_options_form_prefers_options_over_entry_data_without_saving(
     access_marker = next(
         marker
         for marker in result["data_schema"].schema
-        if getattr(marker, "schema", None) == CONF_ACCESS_LEVEL
+        if getattr(marker, "schema", None) == CONF_READ_ACCESS_LEVEL
     )
     assert access_marker.default() == 3
     assert result["type"].value == "form"
+
+
+@pytest.mark.asyncio
+async def test_options_form_keeps_read_and_write_policies_independent(monkeypatch) -> None:
+    entry = SimpleNamespace(
+        data={CONF_ACCESS_LEVEL: 1, CONF_BLE_DEVICE: "AA:BB:CC:DD:EE:FF"},
+        options={CONF_READ_ACCESS_LEVEL: 3, CONF_WRITE_ACCESS_LEVEL: 1},
+    )
+    flow = OpenRBusOptionsFlowHandler(entry)
+    monkeypatch.setattr(
+        OpenRBusConfigFlow,
+        "_ble_target_choices",
+        staticmethod(lambda hass, include_thin=True: {}),
+    )
+    monkeypatch.setattr(
+        "custom_components.openrbus.config_flow.async_load_access_profile",
+        AsyncMock(return_value={}),
+    )
+    result = await flow.async_step_init()
+    defaults = {
+        marker.schema: marker.default()
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None)
+        in {CONF_READ_ACCESS_LEVEL, CONF_WRITE_ACCESS_LEVEL}
+    }
+    assert defaults == {CONF_READ_ACCESS_LEVEL: 3, CONF_WRITE_ACCESS_LEVEL: 1}
+
+
+@pytest.mark.asyncio
+async def test_options_form_defaults_diagnostics_to_off_and_preserves_it(monkeypatch) -> None:
+    entry = SimpleNamespace(data={CONF_ACCESS_LEVEL: 1}, options={})
+    flow = OpenRBusOptionsFlowHandler(entry)
+    monkeypatch.setattr(
+        OpenRBusConfigFlow,
+        "_ble_target_choices",
+        staticmethod(lambda hass, include_thin=True: {}),
+    )
+
+    result = await flow.async_step_init()
+    marker = next(
+        marker
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None) == CONF_DIAGNOSTICS_ENABLED
+    )
+    assert marker.default() is False
+
+    entry.options = {CONF_DIAGNOSTICS_ENABLED: True}
+    result = await OpenRBusOptionsFlowHandler(entry).async_step_init()
+    marker = next(
+        marker
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None) == CONF_DIAGNOSTICS_ENABLED
+    )
+    assert marker.default() is True
+
+
+@pytest.mark.asyncio
+async def test_options_diagnostic_toggle_updates_only_that_option(monkeypatch) -> None:
+    entry = SimpleNamespace(data={"backend": "esphome_thin_rpc"}, options={"keep": 3})
+    flow = OpenRBusOptionsFlowHandler(entry)
+    flow._diagnostic_toggle_baseline = {
+        "backend": "esphome_thin_rpc",
+        "read_access_level": 1,
+        "write_access_level": 1,
+        "language": "de",
+        "write_enabled": False,
+        "ble_device": "target",
+        "passkey": "",
+        "poll_interval_fast": 30,
+        "poll_interval_standard": 120,
+        "poll_interval_slow": 900,
+    }
+    monkeypatch.setattr(
+        OpenRBusOptionsFlowHandler,
+        "async_create_entry",
+        lambda _self, *, title, data: {"title": title, "data": data},
+    )
+
+    result = await flow.async_step_init(
+        {**flow._diagnostic_toggle_baseline, CONF_DIAGNOSTICS_ENABLED: True}
+    )
+
+    assert result == {
+        "title": "",
+        "data": {"keep": 3, CONF_DIAGNOSTICS_ENABLED: True},
+    }
+
+
+@pytest.mark.asyncio
+async def test_options_form_defaults_screed_drying_to_off_and_preserves_it(monkeypatch) -> None:
+    entry = SimpleNamespace(data={CONF_ACCESS_LEVEL: 1}, options={})
+    monkeypatch.setattr(
+        OpenRBusConfigFlow,
+        "_ble_target_choices",
+        staticmethod(lambda hass, include_thin=True: {}),
+    )
+
+    result = await OpenRBusOptionsFlowHandler(entry).async_step_init()
+    marker = next(
+        marker
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None) == CONF_SCREED_DRYING_ENABLED
+    )
+    assert marker.default() is False
+
+    entry.options = {CONF_SCREED_DRYING_ENABLED: True}
+    result = await OpenRBusOptionsFlowHandler(entry).async_step_init()
+    marker = next(
+        marker
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None) == CONF_SCREED_DRYING_ENABLED
+    )
+    assert marker.default() is True
+
+
+@pytest.mark.asyncio
+async def test_recreated_setup_prefills_mac_bound_pin_and_key() -> None:
+    flow = OpenRBusConfigFlow()
+    flow._pending_user_input = {
+        CONF_PASSKEY: "123456",
+        CONF_AUTH_KEY: "abcdef12",
+        CONF_READ_ACCESS_LEVEL: 2,
+        CONF_WRITE_ACCESS_LEVEL: 1,
+    }
+    result = await flow.async_step_credentials()
+    defaults = {
+        marker.schema: marker.default()
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None) in {CONF_PASSKEY, CONF_AUTH_KEY}
+    }
+    assert defaults == {CONF_PASSKEY: "123456", CONF_AUTH_KEY: "abcdef12"}
 
 
 def test_integration_uses_current_core_authorization_contract() -> None:
@@ -206,6 +349,41 @@ def test_empty_remote_scan_has_no_choices_and_manual_native_fallback_remains_pos
     assert _choices_from_ble_items(()) == {}
 
 
+def test_transport_route_changes_for_adapter_or_proxy_but_not_policy() -> None:
+    native = {
+        CONF_BACKEND: BACKEND_NATIVE,
+        CONF_BLE_DEVICE: "AA:BB:CC:DD:EE:FF",
+        "ble_source": "hci0",
+        CONF_READ_ACCESS_LEVEL: 1,
+    }
+    assert _transport_route(native) == _transport_route(
+        {**native, CONF_READ_ACCESS_LEVEL: 3}
+    )
+    assert _transport_route(native) != _transport_route(
+        {**native, "ble_source": "hci1"}
+    )
+    assert _transport_route(native) != _transport_route(
+        {**native, CONF_BACKEND: BACKEND_THIN_RPC, "thin_rpc_controller": "proxy"}
+    )
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "expected"),
+    [
+        ("AA:BB:CC:DD:EE:FF", "aa:bb:cc:dd:ee:ff", True),
+        ("AA:BB:CC:DD:EE:FF", "AA:BB:CC:DD:EE:00", False),
+        ("not-a-mac", "not-a-mac", False),
+        (None, "AA:BB:CC:DD:EE:FF", False),
+    ],
+)
+def test_retained_entry_transport_switch_requires_same_verified_mac(
+    old, new, expected
+) -> None:
+    assert _transport_switch_is_safe(
+        {CONF_BLE_DEVICE: old}, {CONF_BLE_DEVICE: new}
+    ) is expected
+
+
 def test_warning_gate_requires_access_or_write_permission() -> None:
     assert not _warning_required(1, False)
     assert _warning_required(2, False)
@@ -248,6 +426,35 @@ async def test_warning_loader_uses_common_translation_keys(monkeypatch) -> None:
         "ACCESS\n\nWRITE\n\nOPTIMIZATION"
     )
     loader.assert_awaited_once_with(hass, "de", "common", integrations=(DOMAIN,))
+
+
+@pytest.mark.asyncio
+async def test_warning_loader_falls_back_to_english_for_missing_locale_fragments(
+    monkeypatch,
+) -> None:
+    loader = AsyncMock(
+        side_effect=[
+            {f"component.{DOMAIN}.common.access_level_warning": "ZUGRIFF"},
+            {
+                f"component.{DOMAIN}.common.access_level_warning": "ACCESS",
+                f"component.{DOMAIN}.common.write_access_warning": "WRITE",
+                f"component.{DOMAIN}.common.optimization_note": "OPTIMIZATION",
+            },
+        ]
+    )
+    monkeypatch.setattr(
+        "custom_components.openrbus.config_flow.translation.async_get_translations",
+        loader,
+    )
+    hass = SimpleNamespace(config=SimpleNamespace(language="fr-FR"))
+
+    assert await _async_warning_text(hass, access_level=3, write_enabled=True) == (
+        "ZUGRIFF\n\nWRITE\n\nOPTIMIZATION"
+    )
+    assert loader.await_args_list == [
+        call(hass, "fr", "common", integrations=(DOMAIN,)),
+        call(hass, "en", "common", integrations=(DOMAIN,)),
+    ]
 
 
 def test_warning_translation_files_have_matching_fragments_and_placeholder() -> None:

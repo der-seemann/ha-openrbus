@@ -1,0 +1,636 @@
+substitutions:
+  device_name: openrbus-ble-proxy
+  friendly_name: OpenRBus BLE Proxy
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  comment: "ESP-WROOM-32 Bluetooth-Proxy mit OpenRBus Pairing-PoC"
+  on_boot:
+    - priority: -100
+      then:
+        - lambda: |-
+            // Thin-RPC owns the BLE lifecycle; fence the legacy pairing
+            // watchdog so it cannot disconnect an authenticated session.
+            id(openrbus_thin_rpc_active) = true;
+  build_flags:
+    - -DESPHOME_BLE_DEVICE_BASE_LISTENER_COUNT=1
+  includes:
+    - openrbus_zero_write.h
+    - openrbus_transport.h
+    - openrbus_gatt_rpc.h
+
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+
+logger:
+  # Phase-1A ATT instrumentation. Keep the global level below VERBOSE so a
+  # Bluetooth-proxy log flood cannot starve the ESP-IDF loop task.
+  level: DEBUG
+
+api:
+  custom_services: true
+  encryption:
+    key: !secret api_encryption_key
+  actions:
+    - action: openrbus_gatt_rpc_request
+      variables:
+        request_id: int
+        frame: string
+      then:
+        - lambda: |-
+            openrbus_thin_gatt::instance().api_request(request_id, frame);
+    - action: openrbus_gatt_rpc_poll
+      supports_response: only
+      then:
+        - api.respond:
+            data: !lambda |-
+              root["frame"] = openrbus_thin_gatt::instance().poll_frame();
+    - action: openrbus_gatt_rpc_diagnostics
+      supports_response: only
+      then:
+        - api.respond:
+            data: !lambda |-
+              root["snapshot"] = openrbus_thin_gatt::instance().diagnostics_snapshot();
+    - action: openrbus_pair
+      variables:
+        passkey: int
+      then:
+        - lambda: |-
+            if (passkey < 0 || passkey > 999999) {
+              id(openrbus_pairing_status).publish_state("invalid_passkey");
+              return;
+            }
+            if (id(openrbus_pair_state) != 0) {
+              id(openrbus_pairing_status).publish_state("failed_connect");
+              ESP_LOGW("openrbus_pairing", "Pairing request rejected while state machine is active");
+              return;
+            }
+            id(openrbus_pairing_passkey) = static_cast<uint32_t>(passkey);
+            id(openrbus_pairing_armed) = true;
+            id(openrbus_pair_state) = 1;
+            id(openrbus_pair_deadline) = millis() + 2000;
+            id(openrbus_pairing_status).publish_state("disconnecting");
+            id(ehc16_ble_client).disconnect();
+            ESP_LOGW("openrbus_pairing", "Pairing state machine armed");
+    - action: openrbus_disconnect
+      then:
+        - lambda: |-
+            id(openrbus_pairing_passkey) = 0;
+            id(openrbus_pairing_armed) = false;
+            id(openrbus_pair_state) = 5;
+            id(openrbus_pair_deadline) = millis() + 5000;
+            id(openrbus_pairing_status).publish_state("disconnecting");
+            id(ehc16_ble_client).disconnect();
+    - action: openrbus_unpair
+      then:
+        - lambda: |-
+            id(openrbus_pairing_passkey) = 0;
+            id(openrbus_pairing_armed) = false;
+            id(openrbus_pair_state) = 0;
+            id(ehc16_ble_client).disconnect();
+        - delay: 1s
+        - ble_client.remove_bond:
+            id: ehc16_ble_client
+        - lambda: |-
+            id(openrbus_pairing_status).publish_state("unpaired");
+            ESP_LOGW("openrbus_pairing", "Bond removal requested");
+    - action: openrbus_gateway_auth
+      variables:
+        passkey: int
+      then:
+        - lambda: |-
+            if (passkey < 0 || passkey > 999999) {
+              id(openrbus_pairing_status).publish_state("invalid_passkey");
+              return;
+            }
+            // A bonded gateway may still request MITM authentication when the
+            // reconnect's security procedure is started by pair().  Keep the
+            // callback armed for this operation as well as for the explicit
+            // pairing action; otherwise the request is ignored after
+            // gateway_ident_sent and the link drops before the ident notify.
+            id(openrbus_pairing_passkey) = static_cast<uint32_t>(passkey);
+            id(openrbus_pairing_armed) = true;
+            id(openrbus_gateway_auth_ok) = false;
+            id(openrbus_gateway_ident_ready) = false;
+            id(openrbus_gateway_auth_ready) = false;
+            id(openrbus_pairing_status).publish_state("gateway_auth_triggered");
+        - ble_client.connect:
+            id: ehc16_ble_client
+        - wait_until:
+            condition:
+              lambda: return id(ehc16_ble_client).connected();
+            timeout: 20s
+        - if:
+            condition:
+              lambda: return id(ehc16_ble_client).connected();
+            then:
+              - lambda: |-
+                  // ESPHome's stock BLE-write action passes nullptr for a
+                  // zero-length value. ESP-IDF rejects that before it emits
+                  // the valid empty IdentInfo request. Keep a dummy buffer
+                  // while retaining ATT length zero.
+                  static const uint8_t service_uuid[] = {
+                    0x1F,0xD0,0xED,0x34,0xF3,0xED,0x82,0x81,
+                    0x7F,0x45,0x9D,0x77,0x7E,0xB9,0x37,0x6A
+                  };
+                  static const uint8_t ident_uuid[] = {
+                    0x65,0xC6,0x35,0x31,0x8F,0xCC,0x6F,0x8A,
+                    0x0C,0x4C,0x9A,0xF6,0xC4,0x4D,0xE5,0x94
+                  };
+                  auto *characteristic = id(ehc16_ble_client).get_characteristic(
+                    esphome::esp32_ble_tracker::ESPBTUUID::from_raw(service_uuid),
+                    esphome::esp32_ble_tracker::ESPBTUUID::from_raw(ident_uuid));
+                  if (characteristic == nullptr) {
+                    id(openrbus_pairing_status).publish_state("gateway_ident_characteristic_missing");
+                  } else {
+                    // A reconnect with an existing bond does not reliably trigger
+                    // link encryption on its own.  Reuse ESPHome's established
+                    // security path before the ATT gate can release CCCD/IdentInfo.
+                    const esp_err_t security_err = id(ehc16_ble_client).pair();
+                    if (security_err != ESP_OK) {
+                      id(openrbus_pairing_status).publish_state("security_request_failed");
+                      ESP_LOGW("openrbus_pairing", "Security request failed: %d", security_err);
+                    }
+                    openrbus_phase1a::write_empty_with_response(
+                        id(ehc16_ble_client), characteristic->handle);
+                    id(openrbus_pairing_status).publish_state("gateway_ident_sent");
+                  }
+              - wait_until:
+                  condition:
+                    lambda: return id(openrbus_gateway_ident_ready);
+                  timeout: 10s
+              - if:
+                  condition:
+                    lambda: return id(openrbus_gateway_ident_ready);
+                  then:
+                    - lambda: |-
+                        const auto &ident = id(openrbus_gateway_identification);
+                        uint32_t v0 = 5;
+                        uint32_t v1 = 5;
+                        uint32_t sum = 0;
+                        const uint32_t k0 = 368026687;
+                        const uint32_t k1 = uint32_t(ident[0]) | (uint32_t(ident[1]) << 8) |
+                                            (uint32_t(ident[2]) << 16) | (uint32_t(ident[3]) << 24);
+                        const uint32_t k2 = uint32_t(ident[4]) | (uint32_t(ident[5]) << 8) |
+                                            (uint32_t(ident[6]) << 16) | (uint32_t(ident[7]) << 24);
+                        const uint32_t k3 = 5;
+                        for (uint8_t i = 0; i < 32; i++) {
+                          sum += 0x9E3779B9;
+                          v0 += ((v1 << 4) + k0) ^ (v1 + sum) ^ ((v1 >> 5) + k1);
+                          v1 += ((v0 << 4) + k2) ^ (v0 + sum) ^ ((v0 >> 5) + k3);
+                        }
+                        id(openrbus_gateway_auth_payload) = {
+                          5,
+                          uint8_t(v0), uint8_t(v0 >> 8), uint8_t(v0 >> 16), uint8_t(v0 >> 24),
+                          uint8_t(v1), uint8_t(v1 >> 8), uint8_t(v1 >> 16), uint8_t(v1 >> 24)
+                        };
+                    - ble_client.ble_write:
+                        id: ehc16_ble_client
+                        service_uuid: 6a37b97e-779d-457f-8182-edf334edd01f
+                        characteristic_uuid: f1ca5aeb-02cd-44a8-972b-44b6e7250d0b
+                        value: !lambda return id(openrbus_gateway_auth_payload);
+                    - wait_until:
+                        condition:
+                          lambda: return id(openrbus_gateway_auth_ready);
+                        timeout: 10s
+                    - lambda: |-
+                        id(openrbus_pairing_status).publish_state(
+                          id(openrbus_gateway_auth_ok) ? "gateway_authenticated" : "gateway_auth_failed");
+                    - if:
+                        condition:
+                          lambda: return id(openrbus_gateway_auth_ok) && !id(openrbus_dynamic_session);
+                        then:
+                          - lambda: |-
+                              // Historic, read-only EHC reference: CAN-IP Read through
+                              // bus target FF for object 2001:02 (device/boiler type).
+                              // Frame was generated and CRC-checked by current openrbus:
+                              // ff 01 02 00 00 00 00 00 ff 20 01 02 5d 12
+                              id(openrbus_read_ready) = false;
+                              id(openrbus_read_response).clear();
+                              id(openrbus_read_raw_response).publish_state("");
+                              id(openrbus_pairing_status).publish_state("openrbus_read_sent");
+                          - ble_client.ble_write:
+                              id: ehc16_ble_client
+                              service_uuid: f8fc98e4-5919-4a5c-852e-dfe04ad383c0
+                              characteristic_uuid: 496b1b03-cebc-4d59-9c32-14ea88c266f9
+                              value: [0xFF, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x20, 0x01, 0x02, 0x5D, 0x12]
+                          - wait_until:
+                              condition:
+                                lambda: return id(openrbus_read_ready);
+                              timeout: 10s
+                          - lambda: |-
+                              id(openrbus_pairing_status).publish_state(
+                                id(openrbus_read_ready) ? "openrbus_read_received" : "openrbus_read_timeout");
+                        else:
+                          - lambda: id(openrbus_pairing_status).publish_state("gateway_authenticated_dynamic");
+            else:
+              - lambda: id(openrbus_pairing_status).publish_state("gateway_connect_failed");
+        - if:
+            condition:
+              lambda: return !id(openrbus_dynamic_session);
+            then:
+              - ble_client.disconnect:
+                  id: ehc16_ble_client
+    - action: openrbus_enable_dynamic_transport
+      then:
+        - if:
+            condition:
+              lambda: return openrbus_phase2::instance().authenticated();
+            then:
+              - lambda: |-
+                  ESP_LOGI("openrbus_pairing", "dynamic activation requested authenticated=true");
+                  openrbus_phase2::instance().set_enabled(true);
+              - wait_until:
+                  condition:
+                    lambda: return openrbus_phase2::instance().ready();
+                  timeout: 5s
+              - if:
+                  condition:
+                    lambda: return openrbus_phase2::instance().ready();
+                  then:
+                    - lambda: |-
+                        id(openrbus_dynamic_session) = true;
+                        id(openrbus_pairing_status).publish_state("dynamic_session_enabled");
+                        ESP_LOGI("openrbus_pairing", "dynamic session enabled authenticated=true handles_ready=true");
+                  else:
+                    - lambda: |-
+                        openrbus_phase2::instance().set_enabled(false);
+                        id(openrbus_dynamic_session) = false;
+                        id(openrbus_pairing_status).publish_state("dynamic_session_not_ready");
+                        ESP_LOGW("openrbus_pairing", "dynamic activation not ready authenticated=true");
+            else:
+              - lambda: |-
+                  id(openrbus_dynamic_session) = false;
+                  id(openrbus_pairing_status).publish_state("dynamic_session_waiting_auth");
+                  ESP_LOGW("openrbus_pairing", "dynamic activation rejected authenticated=false");
+    - action: openrbus_disable_dynamic_transport
+      then:
+        - lambda: |-
+            id(openrbus_dynamic_session) = false;
+            openrbus_phase2::instance().set_enabled(false);
+            id(openrbus_pairing_status).publish_state("dynamic_session_disabled");
+            id(ehc16_ble_client).disconnect();
+    - action: openrbus_reboot
+      then:
+        - lambda: |-
+            id(openrbus_pairing_status).publish_state("rebooting");
+            App.safe_reboot();
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  fast_connect: true
+  power_save_mode: none
+  ap:
+    ssid: "OpenRBus BLE Proxy Fallback"
+    password: !secret fallback_ap_password
+
+captive_portal:
+
+esp32_ble:
+  io_capability: keyboard_only
+  max_connections: 3
+
+esp32_ble_tracker:
+  scan_parameters:
+    active: true
+    interval: 320ms
+    window: 30ms
+
+bluetooth_proxy:
+  active: true
+  connection_slots: 2
+
+globals:
+  - id: openrbus_pairing_passkey
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: openrbus_pairing_armed
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: openrbus_pair_state
+    type: uint8_t
+    restore_value: false
+    initial_value: "0"
+  - id: openrbus_thin_rpc_active
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: openrbus_pair_deadline
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+  - id: openrbus_gateway_identification
+    type: std::vector<uint8_t>
+    restore_value: false
+    initial_value: "std::vector<uint8_t>()"
+  - id: openrbus_gateway_auth_payload
+    type: std::vector<uint8_t>
+    restore_value: false
+    initial_value: "std::vector<uint8_t>()"
+  - id: openrbus_gateway_ident_ready
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: openrbus_gateway_auth_ready
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: openrbus_gateway_auth_ok
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: openrbus_dynamic_session
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: openrbus_read_response
+    type: std::vector<uint8_t>
+    restore_value: false
+    initial_value: "std::vector<uint8_t>()"
+  - id: openrbus_read_ready
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: openrbus_read_generation_counter
+    type: uint32_t
+    restore_value: true
+    initial_value: "0"
+  - id: openrbus_trace_reset_reported
+    type: bool
+    restore_value: false
+    initial_value: "false"
+
+interval:
+  - interval: 10s
+    then:
+      - lambda: |-
+          if (!id(openrbus_trace_reset_reported)) {
+            id(openrbus_trace_reset_reported) = true;
+            ESP_LOGI("openrbus_att", "BOOT reset_reason=%d uptime_ms=%lu",
+                     static_cast<int>(esp_reset_reason()), static_cast<unsigned long>(millis()));
+          }
+  - interval: 250ms
+    then:
+      - lambda: |-
+          // Attach once to the existing BLEClient. This does not start a
+          // second connection or duplicate the verified auth/CCCD lifecycle.
+          openrbus_thin_gatt::instance().begin(id(ehc16_ble_client));
+          openrbus_thin_gatt::instance().loop();
+          openrbus_phase2::instance().begin(id(ehc16_ble_client));
+          std::vector<uint8_t> dynamic_response;
+          uint32_t dynamic_request_id = 0;
+          uint32_t dynamic_generation = 0;
+          if (openrbus_phase2::instance().take_response(dynamic_response, dynamic_request_id, dynamic_generation)) {
+            static const char hex[] = "0123456789abcdef";
+            std::string encoded;
+            encoded.reserve(dynamic_response.size() * 2);
+            for (uint8_t byte : dynamic_response) {
+              encoded.push_back(hex[byte >> 4]);
+              encoded.push_back(hex[byte & 0x0F]);
+            }
+            id(openrbus_read_response).assign(dynamic_response.begin(), dynamic_response.end());
+            id(openrbus_read_raw_response).publish_state(encoded);
+            id(openrbus_read_generation_counter)++;
+            id(openrbus_read_generation).publish_state(
+                static_cast<float>(id(openrbus_read_generation_counter)));
+            id(openrbus_last_request_id).publish_state(std::to_string(dynamic_request_id));
+            id(openrbus_pairing_status).publish_state("openrbus_dynamic_response");
+            ESP_LOGD("openrbus_transport", "response request_id=%lu generation=%lu bytes=%u",
+                     static_cast<unsigned long>(dynamic_request_id),
+                     static_cast<unsigned long>(dynamic_generation),
+                     static_cast<unsigned>(dynamic_response.size()));
+          }
+          if (!id(openrbus_thin_rpc_active)) {
+            const uint32_t now = millis();
+            if (id(openrbus_pair_state) == 1 && static_cast<int32_t>(now - id(openrbus_pair_deadline)) >= 0) {
+            id(openrbus_pair_state) = 2;
+            id(openrbus_pair_deadline) = now + 15000;
+            id(openrbus_pairing_status).publish_state("connecting");
+            id(ehc16_ble_client).connect();
+            ESP_LOGW("openrbus_pairing", "BLE connect requested");
+          } else if (id(openrbus_pair_state) == 2) {
+            if (id(ehc16_ble_client).connected()) {
+              id(openrbus_pair_state) = 3;
+              id(openrbus_pair_deadline) = now + 30000;
+              id(openrbus_pairing_status).publish_state("connected");
+              const esp_err_t err = id(ehc16_ble_client).pair();
+              if (err != ESP_OK) {
+                id(openrbus_pairing_status).publish_state("failed_pairing");
+                id(openrbus_pairing_passkey) = 0;
+                id(openrbus_pairing_armed) = false;
+                id(openrbus_pair_state) = 5;
+                id(openrbus_pair_deadline) = now + 5000;
+                id(ehc16_ble_client).disconnect();
+                ESP_LOGE("openrbus_pairing", "pair() failed: %d", err);
+              } else {
+                id(openrbus_pairing_status).publish_state("pairing");
+                ESP_LOGW("openrbus_pairing", "Pairing requested after confirmed connection");
+              }
+            } else if (static_cast<int32_t>(now - id(openrbus_pair_deadline)) >= 0) {
+              id(openrbus_pairing_status).publish_state("failed_connect");
+              id(openrbus_pairing_passkey) = 0;
+              id(openrbus_pairing_armed) = false;
+              id(openrbus_pair_state) = 5;
+              id(openrbus_pair_deadline) = now + 5000;
+              id(ehc16_ble_client).disconnect();
+              ESP_LOGE("openrbus_pairing", "BLE connect timed out");
+            }
+          } else if (id(openrbus_pair_state) == 3) {
+            if (id(ehc16_ble_client).is_paired()) {
+              id(openrbus_pairing_status).publish_state("bonded");
+              id(openrbus_pairing_passkey) = 0;
+              id(openrbus_pairing_armed) = false;
+              id(openrbus_pair_state) = 4;
+              id(openrbus_pair_deadline) = now + 1000;
+              ESP_LOGW("openrbus_pairing", "Pairing succeeded");
+            } else if (static_cast<int32_t>(now - id(openrbus_pair_deadline)) >= 0) {
+              id(openrbus_pairing_status).publish_state("timeout");
+              id(openrbus_pairing_passkey) = 0;
+              id(openrbus_pairing_armed) = false;
+              id(openrbus_pair_state) = 5;
+              id(openrbus_pair_deadline) = now + 5000;
+              id(ehc16_ble_client).disconnect();
+              ESP_LOGE("openrbus_pairing", "Pairing timed out");
+            }
+          } else if (id(openrbus_pair_state) == 4 && static_cast<int32_t>(now - id(openrbus_pair_deadline)) >= 0) {
+            id(openrbus_pairing_status).publish_state("disconnecting");
+            id(openrbus_pair_state) = 5;
+            id(openrbus_pair_deadline) = now + 5000;
+            id(ehc16_ble_client).disconnect();
+            } else if (id(openrbus_pair_state) == 5 &&
+                       (!id(ehc16_ble_client).connected() || static_cast<int32_t>(now - id(openrbus_pair_deadline)) >= 0)) {
+              id(openrbus_pair_state) = 0;
+              id(openrbus_pairing_status).publish_state("idle");
+            }
+          }
+
+ble_client:
+  # Keep the target identifier in the local secrets file.  The release tree
+  # deliberately contains no installation-specific BLE address.
+  - mac_address: !secret ble_target_mac
+    id: ehc16_ble_client
+    auto_connect: false
+    on_passkey_request:
+      then:
+        - if:
+            condition:
+              lambda: return id(openrbus_pairing_armed);
+            then:
+              - logger.log:
+                  level: WARN
+                  tag: openrbus_pairing
+                  format: "Passkey request received; replying with transient value"
+              - ble_client.passkey_reply:
+                  id: ehc16_ble_client
+                  passkey: !lambda return id(openrbus_pairing_passkey);
+            else:
+              - logger.log:
+                  level: ERROR
+                  tag: openrbus_pairing
+                  format: "Unexpected passkey request ignored"
+    on_connect:
+      then:
+        - lambda: |-
+            static const uint8_t service_uuid[] = {
+              0x1F,0xD0,0xED,0x34,0xF3,0xED,0x82,0x81,
+              0x7F,0x45,0x9D,0x77,0x7E,0xB9,0x37,0x6A
+            };
+            static const uint8_t ident_uuid[] = {
+              0x8A,0xDA,0x06,0xA4,0xAD,0x24,0x3B,0x80,
+              0xEA,0x4F,0x82,0xA1,0x00,0x23,0x09,0x69
+            };
+            static const uint8_t auth_notify_uuid[] = {
+              0xCF,0x61,0x46,0x4F,0xDC,0x5B,0x4A,0xB7,
+              0x79,0x4D,0xFF,0x6D,0x25,0x78,0xC4,0xE2
+            };
+            auto *ident = id(ehc16_ble_client).get_characteristic(
+                esphome::esp32_ble_tracker::ESPBTUUID::from_raw(service_uuid),
+                esphome::esp32_ble_tracker::ESPBTUUID::from_raw(ident_uuid));
+            auto *auth_notify = id(ehc16_ble_client).get_characteristic(
+                esphome::esp32_ble_tracker::ESPBTUUID::from_raw(service_uuid),
+                esphome::esp32_ble_tracker::ESPBTUUID::from_raw(auth_notify_uuid));
+            auto *ident_cccd = ident == nullptr ? nullptr : ident->get_descriptor(0x2902);
+            auto *auth_cccd = auth_notify == nullptr ? nullptr : auth_notify->get_descriptor(0x2902);
+            ESP_LOGD("openrbus_att",
+                     "CONN gatt_if=%d conn_id=%u ident=0x%04X cccd=0x%04X auth_notify=0x%04X cccd=0x%04X",
+                     id(ehc16_ble_client).get_gattc_if(), id(ehc16_ble_client).get_conn_id(),
+                     ident == nullptr ? 0 : ident->handle, ident_cccd == nullptr ? 0 : ident_cccd->handle,
+                     auth_notify == nullptr ? 0 : auth_notify->handle,
+                     auth_cccd == nullptr ? 0 : auth_cccd->handle);
+        - logger.log:
+            level: WARN
+            tag: openrbus_pairing
+            format: "BLE client connected"
+    on_disconnect:
+      then:
+        - logger.log:
+            level: WARN
+            tag: openrbus_pairing
+            format: "BLE client disconnected"
+
+text_sensor:
+  - platform: template
+    id: openrbus_read_raw_response
+    name: "OpenRBus Read Raw Response"
+    entity_category: diagnostic
+    update_interval: never
+  - platform: template
+    id: openrbus_last_request_id
+    name: "OpenRBus Last Request ID"
+    entity_category: diagnostic
+    update_interval: never
+  - platform: ble_client
+    id: openrbus_gateway_ident_notification
+    ble_client_id: ehc16_ble_client
+    service_uuid: 6a37b97e-779d-457f-8182-edf334edd01f
+    characteristic_uuid: 69092300-a182-4fea-803b-24ada406da8a
+    notify: true
+    internal: true
+    on_notify:
+      then:
+        - lambda: |-
+            id(openrbus_gateway_identification).assign(x.begin(), x.end());
+            id(openrbus_gateway_ident_ready) = x.size() == 8;
+  - platform: ble_client
+    id: openrbus_gateway_auth_notification
+    ble_client_id: ehc16_ble_client
+    service_uuid: 6a37b97e-779d-457f-8182-edf334edd01f
+    characteristic_uuid: e2c47825-6dff-4d79-b74a-5bdc4f4661cf
+    # The ATT gate defers this subscription until MITM encryption is active;
+    # the original pre-auth sequence still contains only IdentInfo.
+    notify: true
+    internal: true
+    on_notify:
+      then:
+        - lambda: |-
+            id(openrbus_gateway_auth_ok) = x.size() == 1 && uint8_t(x[0]) == 1;
+            id(openrbus_gateway_auth_ready) = true;
+            openrbus_phase2::instance().set_authenticated(id(openrbus_gateway_auth_ok));
+            // Publish the correlated terminal boundary as soon as the
+            // validated gateway-auth notification arrives.  The action still
+            // waits on auth_ready and performs the normal read sequence.
+            id(openrbus_pairing_status).publish_state(
+              id(openrbus_gateway_auth_ok) ? "gateway_authenticated" : "gateway_auth_failed");
+            ESP_LOGI("openrbus_pairing", "gateway auth notification ok=%s", id(openrbus_gateway_auth_ok) ? "true" : "false");
+  - platform: ble_client
+    id: openrbus_extended_response
+    ble_client_id: ehc16_ble_client
+    service_uuid: f8fc98e4-5919-4a5c-852e-dfe04ad383c0
+    characteristic_uuid: ab9af948-fb86-492d-820d-bdea2dcb7ecf
+    notify: true
+    internal: true
+    on_notify:
+      then:
+        - lambda: |-
+            // The selected historical response is one final 0xFF segment.
+            // Preserve the complete raw ATT value for the Python core tool.
+            id(openrbus_read_response).assign(x.begin(), x.end());
+            id(openrbus_read_ready) = !x.empty() && uint8_t(x[0]) == 0xFF;
+            static const char hex[] = "0123456789abcdef";
+            std::string encoded;
+            encoded.reserve(x.size() * 2);
+            for (unsigned char byte : x) {
+              encoded.push_back(hex[byte >> 4]);
+              encoded.push_back(hex[byte & 0x0F]);
+            }
+            id(openrbus_read_raw_response).publish_state(encoded);
+            // A repeated valid response may have the same raw value.  Publish
+            // a monotonic freshness marker so HA can correlate every read.
+            if (id(openrbus_read_ready)) {
+              id(openrbus_read_generation_counter)++;
+              id(openrbus_read_generation).publish_state(
+                static_cast<float>(id(openrbus_read_generation_counter)));
+            }
+  - platform: version
+    name: "ESPHome-Version"
+    entity_category: diagnostic
+  - platform: template
+    id: openrbus_pairing_status
+    name: "OpenRBus Pairing-Status"
+    entity_category: diagnostic
+    update_interval: never
+
+sensor:
+  - platform: template
+    id: openrbus_read_generation
+    name: "OpenRBus Read Generation"
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: never
+  - platform: wifi_signal
+    name: "WLAN-Signal"
+    update_interval: 60s
+    entity_category: diagnostic
+  - platform: uptime
+    name: "Uptime"
+    entity_category: diagnostic
