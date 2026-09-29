@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from homeassistant.exceptions import HomeAssistantError
 from openrbus.authorization import AuthorizationCorrelationError
-from openrbus.errors import RequestTimeoutError, TransportError
+from openrbus.errors import ProtocolError, RequestTimeoutError, TransportError
 from openrbus.protocol.canip import ObjectAddress
 from openrbus.transport.thin_gatt import (
     CAPABILITY_MARKER,
@@ -326,6 +326,75 @@ async def test_thin_single_read_retries_once_after_transport_loss() -> None:
     assert backend.client.calls == 2
     assert ready_calls == 1
     assert recoveries == 1
+
+
+@pytest.mark.asyncio
+async def test_thin_discovery_retries_once_after_transport_loss(monkeypatch) -> None:
+    """Read-only discovery gets the same bounded recovery as register reads."""
+
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    backend._read_lock = asyncio.Lock()
+    backend.client = object()
+    backend.effective_access_levels = {}
+    backend.async_start = _async_noop
+    attempts = 0
+    recoveries = 0
+
+    async def discover(_client, *, include_serial):
+        nonlocal attempts
+        assert include_serial is False
+        attempts += 1
+        if attempts == 1:
+            raise RequestTimeoutError("Thin-GATT message response timed out")
+        return ()
+
+    async def recover() -> None:
+        nonlocal recoveries
+        recoveries += 1
+
+    async def read_effective_access(_client, identities):
+        assert identities == ()
+        return {}
+
+    backend._recover_after_transport_loss = recover
+    monkeypatch.setattr(
+        "custom_components.openrbus.transport.discover_devices", discover
+    )
+    monkeypatch.setattr(
+        "custom_components.openrbus.transport._read_effective_access_levels",
+        read_effective_access,
+    )
+
+    assert await backend.async_discover_devices() == ()
+    assert attempts == 2
+    assert recoveries == 1
+
+
+@pytest.mark.asyncio
+async def test_thin_discovery_does_not_retry_protocol_failure(monkeypatch) -> None:
+    """Only transport loss enters recovery; discovery protocol errors remain exact."""
+
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    backend._read_lock = asyncio.Lock()
+    backend.client = object()
+    backend.async_start = _async_noop
+    recoveries = 0
+
+    async def discover(_client, *, include_serial):
+        raise ProtocolError("invalid assignment directory response")
+
+    async def recover() -> None:
+        nonlocal recoveries
+        recoveries += 1
+
+    backend._recover_after_transport_loss = recover
+    monkeypatch.setattr(
+        "custom_components.openrbus.transport.discover_devices", discover
+    )
+
+    with pytest.raises(ProtocolError, match="invalid assignment directory response"):
+        await backend.async_discover_devices()
+    assert recoveries == 0
 
 
 @pytest.mark.asyncio

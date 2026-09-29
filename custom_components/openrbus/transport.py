@@ -1697,7 +1697,16 @@ class ThinRpcBackend:
             await self.async_start()
             if self.client is None:
                 raise HomeAssistantError("Thin-RPC backend is not started")
-            identities = await discover_devices(self.client, include_serial=False)
+            try:
+                identities = await discover_devices(self.client, include_serial=False)
+            except TransportError:
+                # Bus discovery is read-only and idempotent. Use the same
+                # single-generation recovery as ordinary reads when a
+                # request (notably the initial 1f85:00 assignment bound)
+                # loses its Thin-GATT response, then repeat discovery once.
+                # Protocol/abort errors are not retried or reinterpreted.
+                await self._recover_after_transport_loss()
+                identities = await discover_devices(self.client, include_serial=False)
             scoped: list[DeviceIdentity] = []
             for identity in identities:
                 try:
