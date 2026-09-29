@@ -16,6 +16,8 @@ OUTCOMES = (
     "timeout_no_response",
     "cancelled_before_response",
     "cancelled_after_response",
+    "recovery_succeeded",
+    "recovery_failed",
     "error",
 )
 _BUCKETS = ("lt_100ms", "100_499ms", "500_1999ms", "2_9999ms", "gte_10s")
@@ -81,10 +83,10 @@ class SetupResponseMetrics:
         snapshot.update(
             {
                 phase: {
-                "outcomes": dict(self._counts[phase]),
-                "elapsed_ms_buckets": dict(self._elapsed[phase]),
-            }
-            for phase in PHASES
+                    "outcomes": dict(self._counts[phase]),
+                    "elapsed_ms_buckets": dict(self._elapsed[phase]),
+                }
+                for phase in PHASES
             }
         )
         return snapshot

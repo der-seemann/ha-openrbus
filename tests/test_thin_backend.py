@@ -65,6 +65,10 @@ def _hass(*names: str):
     return SimpleNamespace(services=_Services(*names))
 
 
+async def _async_noop() -> None:
+    return None
+
+
 def test_thin_capability_requires_request_poll_and_diagnostics() -> None:
     capability = detect_thin_rpc_capability(
         _hass("openrbus_gatt_rpc_request", "openrbus_gatt_rpc_poll")
@@ -853,6 +857,155 @@ async def test_thin_setup_does_not_accept_stale_already_secure_terminal(
     ):
         await backend._arm_pairing_if_configured()
     assert calls == [("openrbus_pair", {"passkey": 123456})]
+
+
+@pytest.mark.asyncio
+async def test_thin_pair_arm_resets_stale_state_once_and_rearms(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class _ServiceRegistry(_Services):
+        async def async_call(self, domain, service, data, *, blocking):
+            assert domain == "esphome"
+            assert blocking is True
+            calls.append((service, data))
+
+    class _Channel:
+        samples = iter(
+            (
+                {"link_active": True, "parent_connected": True},
+                {"link_active": False, "parent_connected": False},
+                {"link_active": False, "parent_connected": False},
+            )
+        )
+
+        async def diagnostics(self):
+            return next(self.samples)
+
+    hass = SimpleNamespace(
+        services=_ServiceRegistry("openrbus_pair", "openrbus_disconnect")
+    )
+    backend = ThinRpcBackend(
+        hass,
+        controller_id="controller",
+        channel=_Channel(),
+        pair_action="openrbus_pair",
+        passkey=123456,
+    )
+    backend._drain_stale_frames = _async_noop
+    monkeypatch.setattr(
+        "custom_components.openrbus.transport._THIN_DISCONNECT_TIMEOUT", 0
+    )
+
+    await backend._arm_pairing_if_configured()
+
+    assert calls == [
+        ("openrbus_pair", {"passkey": 123456}),
+        ("openrbus_disconnect", {}),
+        ("openrbus_pair", {"passkey": 123456}),
+    ]
+    assert (
+        backend.setup_metrics.diagnostics()["pairing_arm"]["outcomes"][
+            "recovery_succeeded"
+        ]
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_thin_pair_arm_stale_state_retry_is_bounded(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class _ServiceRegistry(_Services):
+        async def async_call(self, domain, service, data, *, blocking):
+            calls.append((service, data))
+
+    class _Channel:
+        samples = iter(
+            (
+                {"link_active": True, "parent_connected": True},
+                {"link_active": False, "parent_connected": False},
+                {"link_active": True, "parent_connected": True},
+            )
+        )
+
+        async def diagnostics(self):
+            return next(self.samples)
+
+    hass = SimpleNamespace(
+        services=_ServiceRegistry("openrbus_pair", "openrbus_disconnect")
+    )
+    backend = ThinRpcBackend(
+        hass,
+        controller_id="controller",
+        channel=_Channel(),
+        pair_action="openrbus_pair",
+        passkey=123456,
+    )
+    backend._drain_stale_frames = _async_noop
+    monkeypatch.setattr(
+        "custom_components.openrbus.transport._THIN_DISCONNECT_TIMEOUT", 0
+    )
+
+    with pytest.raises(HomeAssistantError, match="stale pairing reset/rearm failed"):
+        await backend._arm_pairing_if_configured()
+
+    assert [service for service, _data in calls] == [
+        "openrbus_pair",
+        "openrbus_disconnect",
+        "openrbus_pair",
+    ]
+    assert (
+        backend.setup_metrics.diagnostics()["pairing_arm"]["outcomes"][
+            "recovery_failed"
+        ]
+        == 1
+    )
+
+
+@pytest.mark.asyncio
+async def test_thin_pair_arm_disconnect_action_failure_does_not_rearm(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+
+    class _ServiceRegistry(_Services):
+        async def async_call(self, domain, service, data, *, blocking):
+            del domain, data, blocking
+            calls.append(service)
+            if service == "openrbus_disconnect":
+                raise RuntimeError("raw service detail")
+
+    class _Channel:
+        async def diagnostics(self):
+            return {"link_active": True, "parent_connected": True}
+
+    hass = SimpleNamespace(
+        services=_ServiceRegistry("openrbus_pair", "openrbus_disconnect")
+    )
+    backend = ThinRpcBackend(
+        hass,
+        controller_id="controller",
+        channel=_Channel(),
+        pair_action="openrbus_pair",
+        passkey=123456,
+    )
+    monkeypatch.setattr(
+        "custom_components.openrbus.transport._THIN_DISCONNECT_TIMEOUT", 0
+    )
+
+    with pytest.raises(
+        HomeAssistantError, match="stale pairing reset/rearm failed"
+    ) as error:
+        await backend._arm_pairing_if_configured()
+
+    assert calls == ["openrbus_pair", "openrbus_disconnect"]
+    assert "raw service detail" not in str(error.value)
+    assert (
+        backend.setup_metrics.diagnostics()["pairing_arm"]["outcomes"][
+            "recovery_failed"
+        ]
+        == 1
+    )
 
 
 @pytest.mark.asyncio

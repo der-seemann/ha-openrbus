@@ -84,10 +84,12 @@ decision.
 
 ## Tests and checks
 
-- HA pytest suite: 208 passed, 6 dependency/runtime warnings, 0 failures in an
+- HA pytest suite: 215 passed, 6 dependency/runtime warnings, 0 failures in an
   isolated Python 3.14.4 environment with Home Assistant 2026.9.1, pytest
-  9.1.1, pytest-asyncio 1.4.0, Ruff 0.16.6, and the locally built Core 0.4.1
-  wheel. This environment is separate from the running Test-HA instance.
+  9.1.1, pytest-asyncio 1.4.0, Ruff 0.16.6, and matching Core 0.4.1 source
+  supplied through `PYTHONPATH`. This includes bounded stale-pairing reset/rearm
+  and Thin-RPC recovery-fence regressions. This environment is separate from the
+  running Test-HA instance.
 - Python bytecode compilation: passed for `custom_components/openrbus` and
   `tests`.
 - JSON parsing: passed for the manifest, HACS metadata, strings, and all

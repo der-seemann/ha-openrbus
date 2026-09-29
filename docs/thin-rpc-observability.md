@@ -50,7 +50,10 @@ a completed request dispatch (`call_completed`), a Thin-RPC frame observed
 (`esp_response` / `response`), an empty poll with no Thin-RPC frame
 (`no_esp_response`, attributed to `handle_lookup` while a lookup response is
 pending), and HA task cancellation before or after a correlated HANDLE_LOOKUP
-response. `error` is a fixed category; exception text is never kept.
+response. Pairing-arm recovery also records `recovery_succeeded` or
+`recovery_failed` when the first arm returns but the physical disconnect
+boundary does not arrive and the bounded sibling-action reset/rearm is used.
+`error` is a fixed category; exception text is never kept.
 
 The setup-response counts are explicitly scoped to the lifetime of one backend
 object and include `setup_attempts`, which increments each time startup really

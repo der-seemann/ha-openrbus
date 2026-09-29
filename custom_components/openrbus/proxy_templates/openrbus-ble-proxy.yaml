@@ -63,7 +63,20 @@ api:
               id(openrbus_pairing_status).publish_state("invalid_passkey");
               return;
             }
-            if (id(openrbus_pair_state) != 0) {
+            // After an interrupted Thin-RPC setup, the legacy pairing loop
+            // may remain fenced and leave a terminal state behind. Clear
+            // only a disarmed terminal state while physically disconnected;
+            // never infer completion or cancel an active pairing operation.
+            const bool stale_terminal = id(openrbus_pair_state) == 4 ||
+                                        id(openrbus_pair_state) == 5;
+            if (!id(openrbus_pairing_armed) && stale_terminal &&
+                !id(ehc16_ble_client).connected()) {
+              ESP_LOGW("openrbus_pairing",
+                       "Clearing stale terminal pairing state=%u while disconnected",
+                       static_cast<unsigned>(id(openrbus_pair_state)));
+              id(openrbus_pair_state) = 0;
+            }
+            if (id(openrbus_pair_state) != 0 || id(openrbus_pairing_armed)) {
               id(openrbus_pairing_status).publish_state("failed_connect");
               ESP_LOGW("openrbus_pairing", "Pairing request rejected while state machine is active");
               return;

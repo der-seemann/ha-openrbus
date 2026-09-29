@@ -67,6 +67,8 @@ _RESPONSE_WRAPPERS = ("response", "service_data", "data", "service_response")
 # cancels the Core operation.  Object reads retain the configured timeout.
 _THIN_SECURE_TIMEOUT = 20.0
 _THIN_DISCONNECT_TIMEOUT = 5.0
+_PAIR_ACTION_SUFFIX = "openrbus_pair"
+_DISCONNECT_ACTION_SUFFIX = "openrbus_disconnect"
 MAX_FRAME_TRACE_ENTRIES = 4096
 MAX_FRAME_TRACE_BYTES = 1024 * 1024
 _TRACE_KINDS = frozenset({"request", "response", "event"})
@@ -300,7 +302,10 @@ async def _read_objects_batched(
             # failing the whole request.  Retry only that entry, leaving
             # successful batch results untouched and avoiding duplicate
             # traffic for healthy objects.
-            if isinstance(raw_result.error, CanOpenAbortError) and record_batch_event is not None:
+            if (
+                isinstance(raw_result.error, CanOpenAbortError)
+                and record_batch_event is not None
+            ):
                 record_batch_event("abort")
             if record_batch_event is not None:
                 record_batch_event("fallback")
@@ -315,9 +320,7 @@ async def _read_objects_batched(
                 registry=_REGISTRY,
             )
         except (RegistryError, ValidationError, ValueError) as error:
-            results.append(
-                _tag_read_error(HomeAssistantError(str(error)), "decode")
-            )
+            results.append(_tag_read_error(HomeAssistantError(str(error)), "decode"))
         else:
             results.append(GenericRead(node, address, raw_result.raw, value))
     return tuple(results)
@@ -686,6 +689,10 @@ def _has_esphome_service(hass: HomeAssistant, service: str) -> bool:
     if callable(has_service):
         return bool(has_service("esphome", service))
     return service in _service_names(hass)
+
+
+class _PairingArmBoundaryTimeout(HomeAssistantError):
+    """The pair action returned, but no physical disconnect boundary followed."""
 
 
 def detect_thin_rpc_capability(
@@ -1352,9 +1359,7 @@ class ThinRpcBackend:
         )
         self.channel = channel
         self.setup_metrics = SetupResponseMetrics()
-        self._batch_event_counts = dict.fromkeys(
-            ("malformed", "abort", "fallback"), 0
-        )
+        self._batch_event_counts = dict.fromkeys(("malformed", "abort", "fallback"), 0)
         self.frame_trace = frame_trace
         self.target_address = target_address
         self.target_address_type = target_address_type
@@ -1539,6 +1544,57 @@ class ThinRpcBackend:
         self.setup_metrics.record("pairing_arm", "response", elapsed)
         if self.channel is None:
             return False
+        try:
+            await self._wait_for_pairing_arm_boundary()
+        except _PairingArmBoundaryTimeout:
+            # The deployed ESPHome wrapper can retain pair_state=1 and
+            # pairing_armed=true after an interrupted Thin-RPC setup.  Its
+            # ordinary pair action rejects another arm in that state.  The
+            # sibling disconnect action clears the armed PIN and sets the
+            # terminal state; after the physical down boundary, the deployed
+            # pair action safely clears terminal state 5 and accepts one new
+            # arm.  Attempt this normal-action recovery once, and only after
+            # the specific missing-boundary timeout.
+            if not self.pair_action.endswith(_PAIR_ACTION_SUFFIX):
+                raise
+            disconnect_action = (
+                self.pair_action[: -len(_PAIR_ACTION_SUFFIX)]
+                + _DISCONNECT_ACTION_SUFFIX
+            )
+            if not _has_esphome_service(self.hass, disconnect_action):
+                raise
+            recovery_started = asyncio.get_running_loop().time()
+            try:
+                await self.hass.services.async_call(
+                    "esphome", disconnect_action, {}, blocking=True
+                )
+                await self._wait_for_physical_disconnect()
+                await self._drain_stale_frames()
+                await self.hass.services.async_call(
+                    "esphome",
+                    self.pair_action,
+                    {"passkey": self.passkey},
+                    blocking=True,
+                )
+                await self._wait_for_pairing_arm_boundary()
+                await self._drain_stale_frames()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                elapsed = (asyncio.get_running_loop().time() - recovery_started) * 1000
+                self.setup_metrics.record("pairing_arm", "recovery_failed", elapsed)
+                raise HomeAssistantError(
+                    "Thin-RPC stale pairing reset/rearm failed"
+                ) from exc
+            elapsed = (asyncio.get_running_loop().time() - recovery_started) * 1000
+            self.setup_metrics.record("pairing_arm", "recovery_succeeded", elapsed)
+            return False
+        await self._drain_stale_frames()
+        return False
+
+    async def _wait_for_pairing_arm_boundary(self) -> None:
+        """Wait for this arm's disconnect; stale RPC terminals are not proof."""
+
         deadline = asyncio.get_running_loop().time() + _THIN_DISCONNECT_TIMEOUT
         while True:
             snapshot = await self.channel.diagnostics()
@@ -1546,14 +1602,14 @@ class ThinRpcBackend:
                 snapshot.get("link_active") is False
                 and snapshot.get("parent_connected") is False
             ):
-                return False
+                return
             # The RPC already-secure terminal belongs to PAIR_ENCRYPT, which
             # is issued only after this pairing-arm boundary. It cannot prove
             # that the ESPHome pairing action just completed: diagnostics may
             # still contain that terminal from an earlier session. Keep the
             # arm boundary physical and current to this operation.
             if asyncio.get_running_loop().time() >= deadline:
-                raise HomeAssistantError(
+                raise _PairingArmBoundaryTimeout(
                     "Thin-RPC pairing arm did not reach the disconnect boundary"
                 )
             await asyncio.sleep(0.05)
