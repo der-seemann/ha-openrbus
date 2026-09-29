@@ -24,8 +24,12 @@ _ERROR_SUBTYPES = (
     "batch.fallback",
 )
 _SUBTYPES_BY_CLASS = {
-    "session": frozenset(name.split(".", 1)[1] for name in _ERROR_SUBTYPES if name.startswith("session.")),
-    "batch": frozenset(name.split(".", 1)[1] for name in _ERROR_SUBTYPES if name.startswith("batch.")),
+    "session": frozenset(
+        name.split(".", 1)[1] for name in _ERROR_SUBTYPES if name.startswith("session.")
+    ),
+    "batch": frozenset(
+        name.split(".", 1)[1] for name in _ERROR_SUBTYPES if name.startswith("batch.")
+    ),
 }
 _BATCH_EVENTS = ("malformed", "abort", "fallback")
 _COUNTER_MAX = 2_147_483_647
@@ -38,13 +42,22 @@ def _safe_poll_snapshot(
     if not isinstance(snapshot, dict):
         return {}
     safe: dict[str, Any] = {}
-    for key in ("poll_count", "success_items", "failed_items", "available_items", "unavailable_items"):
+    for key in (
+        "poll_count",
+        "success_items",
+        "failed_items",
+        "available_items",
+        "unavailable_items",
+    ):
         value = snapshot.get(key)
         if type(value) is int and 0 <= value <= _COUNTER_MAX:
             safe[key] = value
     delta = snapshot.get("availability_delta")
     if type(delta) is int and -_COUNTER_MAX <= delta <= _COUNTER_MAX:
         safe["availability_delta"] = delta
+    in_progress = snapshot.get("poll_in_progress")
+    if type(in_progress) is bool:
+        safe["poll_in_progress"] = in_progress
     errors = snapshot.get("error_counts")
     if isinstance(errors, dict):
         safe["error_counts"] = {
@@ -118,7 +131,13 @@ def _safe_setup_response(snapshot: object) -> dict[str, Any]:
             },
             "elapsed_ms_buckets": {
                 bucket: min(_COUNTER_MAX, max(0, buckets.get(bucket, 0)))
-                for bucket in ("lt_100ms", "100_499ms", "500_1999ms", "2_9999ms", "gte_10s")
+                for bucket in (
+                    "lt_100ms",
+                    "100_499ms",
+                    "500_1999ms",
+                    "2_9999ms",
+                    "gte_10s",
+                )
                 if type(buckets.get(bucket)) is int
             },
         }
@@ -158,17 +177,23 @@ async def async_get_config_entry_diagnostics(
     backend = getattr(coordinator, "_backend", None)
     backend_diagnostics = getattr(backend, "diagnostics", None)
     try:
-        backend_snapshot = backend_diagnostics() if callable(backend_diagnostics) else {}
+        backend_snapshot = (
+            backend_diagnostics() if callable(backend_diagnostics) else {}
+        )
     except Exception:  # noqa: BLE001 - diagnostics must never break issue export
         backend_snapshot = {}
     # Project only explicit numeric lifecycle facts. Never serialize an
     # adapter-provided mapping wholesale: it may grow private fields later.
-    transport_session = {
-        key: value
-        for key in ("session_generation", "session_epoch")
-        if type(value := backend_snapshot.get(key)) is int
-        and 0 <= value <= 2_147_483_647
-    } if isinstance(backend_snapshot, dict) else {}
+    transport_session = (
+        {
+            key: value
+            for key in ("session_generation", "session_epoch")
+            if type(value := backend_snapshot.get(key)) is int
+            and 0 <= value <= 2_147_483_647
+        }
+        if isinstance(backend_snapshot, dict)
+        else {}
+    )
     setup_response = _safe_setup_response(
         backend_snapshot.get("setup_response")
         if isinstance(backend_snapshot, dict)
@@ -197,13 +222,17 @@ async def async_get_config_entry_diagnostics(
                     )
                 except Exception:  # noqa: BLE001, S112 - best-effort, log-free export
                     continue
+    poll_in_progress = any(
+        snapshot.get("poll_in_progress") is True
+        for snapshot in poll_diagnostics.values()
+    )
     return {
         "gateway": {
             "backend": entry.data.get(CONF_BACKEND),
         },
         "coordinator": {
             "cycle_id": getattr(coordinator, "_cycle_id", 0),
-            "poll_lock_locked": coordinator._poll_lock.locked(),
+            "poll_in_progress": poll_in_progress,
             "last_update_success": coordinator.last_update_success,
             "discovery_attempted": getattr(coordinator, "_discovery_attempted", False),
             "discovery_error_type": (

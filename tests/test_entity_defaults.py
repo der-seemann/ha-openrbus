@@ -85,11 +85,15 @@ def test_typed_read_state_is_available_when_write_policy_is_blocked(
     assert entity.available is True
 
 
-def test_manual_entity_override_changes_default_but_keeps_zone_safety(monkeypatch) -> None:
+def test_manual_entity_override_changes_default_but_keeps_zone_safety(
+    monkeypatch,
+) -> None:
     row = _register("5501:01", levels=("Installer",))
     identity = SimpleNamespace(node=3)
     parent = SimpleNamespace(
-        entity_overrides={"uid": True}, zone_profiles={}, zone_overrides={},
+        entity_overrides={"uid": True},
+        zone_profiles={},
+        zone_overrides={},
     )
     # The ID function is patched in the test module's implementation namespace
     # to keep the test independent of HA's entity registry.
@@ -153,6 +157,11 @@ def test_diagnostic_visibility_toggles_only_integration_owned_registry_rows(
             }
 
         def async_update_entity(self, entity_id, **changes):
+            if changes.get("disabled_by") is not None:
+                assert (
+                    changes["disabled_by"]
+                    is register_entities.er.RegistryEntryDisabler.INTEGRATION
+                )
             for entity in self.entities.values():
                 if entity.entity_id == entity_id:
                     entity.disabled_by = changes["disabled_by"]
@@ -221,6 +230,11 @@ def test_screed_visibility_preserves_user_disable(monkeypatch) -> None:
             }
 
         def async_update_entity(self, entity_id, **changes):
+            if changes.get("disabled_by") is not None:
+                assert (
+                    changes["disabled_by"]
+                    is register_entities.er.RegistryEntryDisabler.INTEGRATION
+                )
             for entity in self.entities.values():
                 if entity.entity_id == entity_id:
                     entity.disabled_by = changes["disabled_by"]
@@ -230,19 +244,29 @@ def test_screed_visibility_preserves_user_disable(monkeypatch) -> None:
             entry_id="entry", data={}, options={CONF_SCREED_DRYING_ENABLED: False}
         ),
         inventories=(SimpleNamespace(identity=SimpleNamespace(node=1)),),
-        devices=(), language="de", effective_access_levels={1: 1},
-        configured_access_level=1, write_enabled=False,
+        devices=(),
+        language="de",
+        effective_access_levels={1: 1},
+        configured_access_level=1,
+        write_enabled=False,
     )
     row = SimpleNamespace(
-        internal_code="ScreedDryingEnable", name_en="Screed drying enable",
-        name_de="Estrichtrocknung aktivieren", readable=True, writable=False,
-        address=ObjectAddress.parse("348c:00"), node=1, datatype="UINT16",
+        internal_code="ScreedDryingEnable",
+        name_en="Screed drying enable",
+        name_de="Estrichtrocknung aktivieren",
+        readable=True,
+        writable=False,
+        address=ObjectAddress.parse("348c:00"),
+        node=1,
+        datatype="UINT16",
         unit=None,
         access_level_evidence={"read": {"levels": ["User"]}},
     )
     monkeypatch.setattr(register_entities.er, "async_get", lambda _hass: Registry())
     monkeypatch.setattr(register_entities, "catalog_for_node", lambda *_args: (row,))
-    monkeypatch.setattr(register_entities, "entity_unique_id", lambda *_args: screed.unique_id)
+    monkeypatch.setattr(
+        register_entities, "entity_unique_id", lambda *_args: screed.unique_id
+    )
 
     # Disabled means no platform projection and no polling address. The
     # entity registry row from an earlier opt-in is handled separately below.
@@ -260,16 +284,25 @@ def test_screed_visibility_preserves_user_disable(monkeypatch) -> None:
 
 def test_generic_override_only_changes_integration_owned_safe_rows(monkeypatch) -> None:
     enabled = SimpleNamespace(
-        platform=DOMAIN, config_entry_id="entry", unique_id="safe",
-        entity_id="sensor.safe", disabled_by="integration",
+        platform=DOMAIN,
+        config_entry_id="entry",
+        unique_id="safe",
+        entity_id="sensor.safe",
+        disabled_by="integration",
     )
     hidden = SimpleNamespace(
-        platform=DOMAIN, config_entry_id="entry", unique_id="hidden",
-        entity_id="sensor.hidden", disabled_by=None,
+        platform=DOMAIN,
+        config_entry_id="entry",
+        unique_id="hidden",
+        entity_id="sensor.hidden",
+        disabled_by=None,
     )
     user_disabled = SimpleNamespace(
-        platform=DOMAIN, config_entry_id="entry", unique_id="safe",
-        entity_id="sensor.user_disabled", disabled_by="user",
+        platform=DOMAIN,
+        config_entry_id="entry",
+        unique_id="safe",
+        entity_id="sensor.user_disabled",
+        disabled_by="user",
     )
 
     class Registry:
@@ -279,26 +312,41 @@ def test_generic_override_only_changes_integration_owned_safe_rows(monkeypatch) 
             }
 
         def async_update_entity(self, entity_id, **changes):
+            if changes.get("disabled_by") is not None:
+                assert (
+                    changes["disabled_by"]
+                    is register_entities.er.RegistryEntryDisabler.INTEGRATION
+                )
             self.entities[entity_id].disabled_by = changes["disabled_by"]
 
     registry = Registry()
     parent = SimpleNamespace(
         config_entry=SimpleNamespace(entry_id="entry", data={}, options={}),
         entity_overrides={"safe": True, "hidden": True},
-        effective_access_levels={}, language="en", configured_access_level=1,
+        effective_access_levels={},
+        language="en",
+        configured_access_level=1,
         write_enabled=False,
     )
     row = SimpleNamespace(
-        readable=True, writable=False, internal_code="safe",
+        readable=True,
+        writable=False,
+        internal_code="safe",
         address=ObjectAddress.parse("2001:02"),
     )
     monkeypatch.setattr(register_entities.er, "async_get", lambda _hass: registry)
-    monkeypatch.setattr(register_entities, "rows_for_parent", lambda *_a, **_k: ((SimpleNamespace(node=1), row, "standard", True),))
+    monkeypatch.setattr(
+        register_entities,
+        "rows_for_parent",
+        lambda *_a, **_k: ((SimpleNamespace(node=1), row, "standard", True),),
+    )
     monkeypatch.setattr(register_entities, "entity_unique_id", lambda *_a: "safe")
 
     register_entities.async_apply_entity_overrides(object(), parent)
     assert enabled.disabled_by is None
-    assert hidden.disabled_by == "integration"  # stale enable cannot expose an unsafe row
+    assert (
+        hidden.disabled_by == "integration"
+    )  # stale enable cannot expose an unsafe row
     assert user_disabled.disabled_by == "user"
 
     parent.entity_overrides["safe"] = False

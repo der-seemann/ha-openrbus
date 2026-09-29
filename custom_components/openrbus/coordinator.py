@@ -145,6 +145,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         self._diagnostic_item_failures: list[dict[str, int | str]] = []
         self._diagnostic_poll_count = 0
         self.backend_mode = backend
+
         def configured_level(key: str, fallback: object = 1) -> int:
             try:
                 return max(1, min(3, int(configured.get(key, fallback))))
@@ -210,7 +211,9 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         # Entries are keyed by protocol identity, never display names.
         self.zone_profiles: dict[tuple[int, int], ZoneProfile] = {}
         self.zone_overrides = normalized_overrides(configured.get(CONF_ZONE_OVERRIDES))
-        self.entity_overrides = normalized_overrides(configured.get(CONF_ENTITY_OVERRIDES))
+        self.entity_overrides = normalized_overrides(
+            configured.get(CONF_ENTITY_OVERRIDES)
+        )
         if backend == BACKEND_NATIVE:
             self._backend = NativeBluetoothBackend(
                 hass,
@@ -458,7 +461,9 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             verify=verify,
         )
 
-    async def async_reactivate_register(self, node: int, address: ObjectAddress) -> None:
+    async def async_reactivate_register(
+        self, node: int, address: ObjectAddress
+    ) -> None:
         """Re-enable a lifecycle-retired projection and request a fresh poll.
 
         This is intentionally explicit: once polling is stopped, a sentinel
@@ -477,9 +482,15 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                     f"object:{address.index:04x}:{address.subindex:02x}"
                 )
                 for platform in ("sensor", "number", "select", "switch"):
-                    entity_id = registry.async_get_entity_id(platform, DOMAIN, unique_id)
+                    entity_id = registry.async_get_entity_id(
+                        platform, DOMAIN, unique_id
+                    )
                     entity = registry.entities.get(entity_id) if entity_id else None
-                    if entity is not None and str(getattr(entity, "disabled_by", "")).casefold() == "integration":
+                    if (
+                        entity is not None
+                        and str(getattr(entity, "disabled_by", "")).casefold()
+                        == "integration"
+                    ):
                         registry.async_update_entity(entity_id, disabled_by=None)
             except (AttributeError, TypeError, ValueError):
                 _LOGGER.debug("Could not re-enable OpenRBus entity %s", address)
@@ -538,17 +549,19 @@ class OpenRBusPollingCoordinator(
         self._diagnostic_available_items = 0
         self._diagnostic_total_items = 0
         self._diagnostic_availability_delta = 0
+        self._poll_in_progress_count = 0
 
     def diagnostics(self) -> dict[str, Any]:
         """Return bounded, redacted poll statistics for config diagnostics."""
         return {
             "poll_count": self._diagnostic_poll_count,
+            "poll_in_progress": getattr(self, "_poll_in_progress_count", 0) > 0,
             "success_items": self._diagnostic_success_items,
             "failed_items": self._diagnostic_failed_items,
             "error_counts": dict(self._diagnostic_error_counts),
             "error_subtype_counts": dict(self._diagnostic_subtype_counts),
             "available_items": self._diagnostic_available_items,
-                "unavailable_items": max(
+            "unavailable_items": max(
                 0, self._diagnostic_total_items - self._diagnostic_available_items
             ),
             "availability_delta": self._diagnostic_availability_delta,
@@ -589,6 +602,17 @@ class OpenRBusPollingCoordinator(
         self.validity.reactivate((node, address))
 
     async def _async_update_data(
+        self,
+    ) -> dict[tuple[int, ObjectAddress], GenericRead | HomeAssistantError]:
+        self._poll_in_progress_count = getattr(self, "_poll_in_progress_count", 0) + 1
+        try:
+            return await self._async_poll_data()
+        finally:
+            self._poll_in_progress_count = max(
+                0, getattr(self, "_poll_in_progress_count", 1) - 1
+            )
+
+    async def _async_poll_data(
         self,
     ) -> dict[tuple[int, ObjectAddress], GenericRead | HomeAssistantError]:
         grouped: dict[int, list[ObjectAddress]] = defaultdict(list)
@@ -647,7 +671,9 @@ class OpenRBusPollingCoordinator(
                     error_class = _read_error_class(error)
                     error_subtype = _read_error_subtype(error, error_class)
                     if error_class in {"abort", "item"}:
-                        error_subtype = "abort" if error_class == "abort" else "fallback"
+                        error_subtype = (
+                            "abort" if error_class == "abort" else "fallback"
+                        )
                         error_class = "batch"
                     elif error_class == "batch" and error_subtype is None:
                         error_subtype = "fallback"
@@ -685,7 +711,9 @@ class OpenRBusPollingCoordinator(
                     if isinstance(value, GenericRead) and (
                         value.node != node or value.address != address
                     ):
-                        value = HomeAssistantError("OpenRBus response correlation failed")
+                        value = HomeAssistantError(
+                            "OpenRBus response correlation failed"
+                        )
                         value._openrbus_error_class = "correlation"  # type: ignore[attr-defined]
                     if isinstance(value, HomeAssistantError):
                         failed_items += 1
@@ -702,27 +730,28 @@ class OpenRBusPollingCoordinator(
                                 self._diagnostic_subtype_counts[subtype_key]
                             )
                         options = getattr(self.parent.config_entry, "options", {})
-                        if (
-                            error_class in _ERROR_CLASSES
-                            and bool(options.get(CONF_DIAGNOSTICS_ENABLED, False))
+                        if error_class in _ERROR_CLASSES and bool(
+                            options.get(CONF_DIAGNOSTICS_ENABLED, False)
                         ):
                             failure = {
-                                    "node": node,
-                                    "index": address.index,
-                                    "subindex": address.subindex,
-                                    "error_class": error_class,
-                                }
+                                "node": node,
+                                "index": address.index,
+                                "subindex": address.subindex,
+                                "error_class": error_class,
+                            }
                             if error_subtype:
                                 failure["error_subtype"] = error_subtype
                             self._diagnostic_item_failures.append(failure)
                             del self._diagnostic_item_failures[
-                                : -_DIAGNOSTIC_ITEM_FAILURE_LIMIT
+                                :-_DIAGNOSTIC_ITEM_FAILURE_LIMIT
                             ]
                     else:
                         success_items += 1
                     result[(node, address)] = value
                     observation = self.validity.observe(
-                        (node, address), value, self.register_metadata.get((node, address))
+                        (node, address),
+                        value,
+                        self.register_metadata.get((node, address)),
                     )
                     if observation.expired:
                         self._disable_expired_entities(node, address)
@@ -761,6 +790,9 @@ class OpenRBusPollingCoordinator(
             if entity is None or getattr(entity, "disabled_by", None):
                 continue
             try:
-                registry.async_update_entity(entity_id, disabled_by="integration")
+                registry.async_update_entity(
+                    entity_id,
+                    disabled_by=er.RegistryEntryDisabler.INTEGRATION,
+                )
             except (TypeError, ValueError):
                 _LOGGER.debug("Could not disable expired OpenRBus entity %s", entity_id)

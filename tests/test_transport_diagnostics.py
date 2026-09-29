@@ -155,7 +155,10 @@ def test_setup_response_metrics_are_fixed_bounded_and_redacted() -> None:
     assert metrics.diagnostics()["setup_attempts"] == 1
     metrics.mark_handle_lookup_response()
     metrics.record_setup_cancellation(100)
-    assert metrics.diagnostics()["handle_lookup"]["outcomes"]["cancelled_after_response"] == 2
+    assert (
+        metrics.diagnostics()["handle_lookup"]["outcomes"]["cancelled_after_response"]
+        == 2
+    )
     assert snapshot["poll_request"]["outcomes"]["no_esp_response"] == 1
     assert "private" not in repr(snapshot)
     assert _safe_setup_response({**snapshot, "private": "secret"}) == snapshot
@@ -192,6 +195,7 @@ async def test_entry_diagnostics_add_only_redacted_transport_metrics() -> None:
             "available_items": 7,
             "unavailable_items": 1,
             "availability_delta": -1,
+            "poll_in_progress": True,
             "error_counts": {"session": 2},
             "item_failures": [
                 {"node": 4, "index": 0x1234, "subindex": 2, "error_class": "item"}
@@ -204,7 +208,6 @@ async def test_entry_diagnostics_add_only_redacted_transport_metrics() -> None:
         inventories=(),
         discovery_error=None,
         _cycle_id=3,
-        _poll_lock=SimpleNamespace(locked=lambda: False),
         last_update_success=False,
         _discovery_attempted=True,
         _diagnostic_poll_count=4,
@@ -230,8 +233,13 @@ async def test_entry_diagnostics_add_only_redacted_transport_metrics() -> None:
         "session_epoch": 17,
     }
     assert diagnostics["coordinator"]["coordinator_error_counts"]["correlation"] == 2
+    assert diagnostics["coordinator"]["poll_in_progress"] is True
+    assert "poll_lock_locked" not in diagnostics["coordinator"]
     assert diagnostics["coordinator"]["coordinator_poll_count"] == 4
-    assert diagnostics["coordinator"]["poll_groups"]["standard"]["error_counts"]["session"] == 2
+    assert (
+        diagnostics["coordinator"]["poll_groups"]["standard"]["error_counts"]["session"]
+        == 2
+    )
     assert "item_failures" not in diagnostics["coordinator"]["poll_groups"]["standard"]
     assert "AA:BB:CC:DD:EE:FF" not in rendered
     assert "credential" not in rendered
@@ -249,6 +257,7 @@ async def test_poll_group_tracks_fixed_error_classes_and_availability_delta() ->
         error._openrbus_error_class = error_class
         values.append(error)
     values.append(GenericRead(1, addresses[-1], b"\x01", 1))
+    poller_ref = {}
 
     class _Parent:
         config_entry = SimpleNamespace(
@@ -257,6 +266,7 @@ async def test_poll_group_tracks_fixed_error_classes_and_availability_delta() ->
 
         async def async_read_objects(self, _addresses, *, node):
             assert node == 1
+            assert poller_ref["poller"].diagnostics()["poll_in_progress"] is True
             return tuple(values)
 
     poller = OpenRBusPollingCoordinator.__new__(OpenRBusPollingCoordinator)
@@ -265,7 +275,9 @@ async def test_poll_group_tracks_fixed_error_classes_and_availability_delta() ->
     poller.group = "standard"
     poller.registers = tuple((1, address) for address in addresses)
     poller.register_metadata = {}
-    poller.validity = RegisterValidityTracker(__import__("datetime").timedelta(minutes=5))
+    poller.validity = RegisterValidityTracker(
+        __import__("datetime").timedelta(minutes=5)
+    )
     poller._diagnostic_poll_count = 0
     poller._diagnostic_success_items = 0
     poller._diagnostic_failed_items = 0
@@ -287,10 +299,12 @@ async def test_poll_group_tracks_fixed_error_classes_and_availability_delta() ->
     poller._diagnostic_available_items = 0
     poller._diagnostic_total_items = 0
     poller._diagnostic_availability_delta = 0
+    poller_ref["poller"] = poller
 
     await poller._async_update_data()
     metrics = poller.diagnostics()
     assert metrics["poll_count"] == 1
+    assert metrics["poll_in_progress"] is False
     assert metrics["success_items"] == 1
     assert metrics["failed_items"] == 5
     assert metrics["available_items"] == 1

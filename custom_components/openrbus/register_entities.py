@@ -227,7 +227,11 @@ def rows_for_parent(
     return tuple(rows)
 
 
-def zone_row_enabled(parent: OpenRBusCoordinator, identity: DeviceIdentity, register: RegisterCatalogEntry) -> bool:
+def zone_row_enabled(
+    parent: OpenRBusCoordinator,
+    identity: DeviceIdentity,
+    register: RegisterCatalogEntry,
+) -> bool:
     """Return whether a zone row belongs to a selected non-empty zone."""
 
     slot = zone_subindex(register)
@@ -250,17 +254,25 @@ def entity_enabled_by_default(
             and register.datatype not in {"STRUCT", "OCTETSTRING"}
             and any(
                 str(level).casefold() in {"level 0", "user"}
-                for level in (register.access_level_evidence.get("read", {}) or {}).get("levels", ())
+                for level in (register.access_level_evidence.get("read", {}) or {}).get(
+                    "levels", ()
+                )
             )
         )
     )
     # Manual choices may expose a non-recommended row, but cannot bypass
     # discovery/access, hidden-category, or zone safety gates.
     unique_id = unique_id or entity_unique_id(parent, identity, register)
-    explicit = normalized_entity_overrides(getattr(parent, "entity_overrides", {})).get(unique_id)
+    explicit = normalized_entity_overrides(getattr(parent, "entity_overrides", {})).get(
+        unique_id
+    )
     if explicit is None:
         return default
-    return bool(explicit) and register.readable and zone_row_enabled(parent, identity, register)
+    return (
+        bool(explicit)
+        and register.readable
+        and zone_row_enabled(parent, identity, register)
+    )
 
 
 def normalized_entity_overrides(value: object) -> dict[str, bool]:
@@ -270,7 +282,9 @@ def normalized_entity_overrides(value: object) -> dict[str, bool]:
     return {str(key): bool(enabled) for key, enabled in value.items()}
 
 
-def async_apply_entity_overrides(hass: HomeAssistant, parent: OpenRBusCoordinator) -> None:
+def async_apply_entity_overrides(
+    hass: HomeAssistant, parent: OpenRBusCoordinator
+) -> None:
     """Apply generic choices to existing rows, preserving HA user decisions."""
     try:
         registry = er.async_get(hass)
@@ -288,9 +302,8 @@ def async_apply_entity_overrides(hass: HomeAssistant, parent: OpenRBusCoordinato
         # A manual enable is constrained by current access evidence and all
         # explicit opt-in categories. Zone selection also remains sovereign.
         category_visible = (
-            (not is_diagnostic_register(register) or diagnostics_enabled(parent))
-            and (not is_screed_drying_register(register) or screed_drying_enabled(parent))
-        )
+            not is_diagnostic_register(register) or diagnostics_enabled(parent)
+        ) and (not is_screed_drying_register(register) or screed_drying_enabled(parent))
         effective = parent.effective_access_levels.get(identity.node)
         safe[uid] = bool(
             allowed
@@ -318,7 +331,10 @@ def async_apply_entity_overrides(hass: HomeAssistant, parent: OpenRBusCoordinato
         explicit = overrides[uid]
         should_enable = explicit and safe.get(uid, False)
         if not should_enable and not disabled_by:
-            registry.async_update_entity(entity.entity_id, disabled_by="integration")
+            registry.async_update_entity(
+                entity.entity_id,
+                disabled_by=er.RegistryEntryDisabler.INTEGRATION,
+            )
         elif should_enable and disabled_by == "integration":
             registry.async_update_entity(entity.entity_id, disabled_by=None)
 
@@ -362,19 +378,17 @@ def async_apply_diagnostic_visibility(
         if not diagnostic and not screed_drying:
             continue
         unique_id = entity_unique_id(parent, identity, register)
-        permitted[unique_id] = (
-            control_kind(register, parent.language) is None
-            or write_access_allowed(
-                parent,
-                register,
-                parent.effective_access_levels.get(identity.node),
-            )
+        permitted[unique_id] = control_kind(
+            register, parent.language
+        ) is None or write_access_allowed(
+            parent,
+            register,
+            parent.effective_access_levels.get(identity.node),
         )
         # A row can theoretically carry both classifications.  Both opt-ins
         # must then be enabled; a generic heating row never reaches this map.
-        visibility[unique_id] = (
-            (not diagnostic or diagnostics_visible)
-            and (not screed_drying or screed_drying_visible)
+        visibility[unique_id] = (not diagnostic or diagnostics_visible) and (
+            not screed_drying or screed_drying_visible
         )
     for entity in tuple(registry.entities.values()):
         if (
@@ -384,8 +398,14 @@ def async_apply_diagnostic_visibility(
         ):
             continue
         disabled_by = str(getattr(entity, "disabled_by", "") or "").casefold()
-        if not visibility.get(entity.unique_id, diagnostics_visible) and not disabled_by:
-            registry.async_update_entity(entity.entity_id, disabled_by="integration")
+        if (
+            not visibility.get(entity.unique_id, diagnostics_visible)
+            and not disabled_by
+        ):
+            registry.async_update_entity(
+                entity.entity_id,
+                disabled_by=er.RegistryEntryDisabler.INTEGRATION,
+            )
         elif (
             visibility.get(entity.unique_id, diagnostics_visible)
             and disabled_by == "integration"
@@ -407,7 +427,9 @@ def ensure_polling_coordinators(
         "slow": set(),
     }
     metadata: dict[str, dict[tuple[int, ObjectAddress], RegisterCatalogEntry]] = {
-        "fast": {}, "standard": {}, "slow": {}
+        "fast": {},
+        "standard": {},
+        "slow": {},
     }
     for identity, register, group, allowed in rows:
         if not allowed:
@@ -660,7 +682,9 @@ def bitfield_structure(register: RegisterCatalogEntry):
         return None
     name = getattr(wire, "struct_name", None)
     structure = CATALOG_REGISTRY.structure(name) if name else None
-    if structure is None or not any(field.bit_length == 1 for field in structure.fields):
+    if structure is None or not any(
+        field.bit_length == 1 for field in structure.fields
+    ):
         return None
     return structure
 
@@ -873,14 +897,19 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
             if slot is not None
             else None
         )
-        if profile is not None and zone_enabled(self._parent, profile.node, profile.subindex):
-            node_identifier = f"{self._parent.config_entry.entry_id}:node:{self._identity.node}"
+        if profile is not None and zone_enabled(
+            self._parent, profile.node, profile.subindex
+        ):
+            node_identifier = (
+                f"{self._parent.config_entry.entry_id}:node:{self._identity.node}"
+            )
             return DeviceInfo(
                 identifiers={
                     ("openrbus", f"{node_identifier}:zone:{profile.subindex}")
                 },
                 name=zone_device_name(profile),
-                manufacturer=getattr(self._identity, "manufacturer", None) or "OpenRBus",
+                manufacturer=getattr(self._identity, "manufacturer", None)
+                or "OpenRBus",
                 model=getattr(self._identity, "model", None)
                 or getattr(self._identity, "family", None),
                 via_device=("openrbus", node_identifier),
