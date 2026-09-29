@@ -10,7 +10,6 @@ from openrbus.value_codec import CanOpenTimeOfDay
 from custom_components.openrbus.register_entities import (
     control_kind,
     entity_unique_id,
-    enum_options,
 )
 from custom_components.openrbus.sensor import (
     _catalog_visible,
@@ -54,9 +53,7 @@ def test_register_entity_catalog_is_not_capped_by_configured_access_level() -> N
         assert {row.address for row in low} <= {row.address for row in complete}
 
 
-def test_cp733_unverified_write_claim_projects_as_read_only_sensor() -> (
-    None
-):
+def test_cp733_without_public_write_evidence_projects_as_read_only_sensor() -> None:
     identity = resolve_device_identity(DeviceIdentity(4, None, None, "SCB-10"))
     catalog = catalog_for_node(identity, max_access_level=3)
     cp733 = [row for row in catalog if row.address == ObjectAddress(0x346A, 4)]
@@ -67,16 +64,11 @@ def test_cp733_unverified_write_claim_projects_as_read_only_sensor() -> (
     )
 
     assert len(cp733) == 1
-    # Canonical OBD metadata and the local installation snapshot agree on
-    # this concrete CP730 array element.
-    assert control_kind(cp733[0]) == "select"
-    assert tuple(value for value, _label in enum_options(cp733[0], "de")) == tuple(
-        range(6)
-    )
-    assert cp733[0].access_level_evidence["read"]["required_level"] == "professional"
-    assert cp733[0].access_level_evidence["write"]["required_level"] == "professional"
-    assert cp733[0].writable is True
-    assert cp733[0].safety == "manufacturer_metadata"
+    # Public catalog metadata has not validated this write or supplied
+    # installation-specific evidence, so the integration keeps it read-only.
+    assert control_kind(cp733[0]) is None
+    assert cp733[0].writable is False
+    assert cp733[0].safety == "unverified"
     assert cp733[0].address != cp730_count.address
     assert control_kind(cp730_count) is None
 
@@ -101,11 +93,11 @@ def test_family_projection_counts_and_polling_are_bounded() -> None:
     cases = (
         (
             DeviceIdentity(4, None, None, "SCB-10"),
-            (855, 617, (850, 0, 5, 0), (612, 0, 5, 0)),
+            (855, 617, (855, 0, 0, 0), (617, 0, 0, 0)),
         ),
         (
             DeviceIdentity(88, 528, None, None),
-            (784, 388, (783, 0, 1, 0), (387, 0, 1, 0)),
+            (784, 388, (784, 0, 0, 0), (388, 0, 0, 0)),
         ),
         (
             DeviceIdentity(3, 7702, 3, "GTW-Bluetooth"),
