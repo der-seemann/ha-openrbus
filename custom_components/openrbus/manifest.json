@@ -1,9 +1,9 @@
 {
   "domain": "openrbus",
   "name": "OpenRBus",
+  "after_dependencies": ["bluetooth", "esphome"],
   "codeowners": ["@der-seemann"],
   "config_flow": true,
-  "after_dependencies": ["esphome"],
   "documentation": "https://github.com/der-seemann/ha-openrbus",
   "integration_type": "hub",
   "iot_class": "local_polling",
