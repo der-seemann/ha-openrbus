@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -153,6 +154,32 @@ async def test_coordinator_dispatches_native_and_thin_without_fallback(
     await native_coordinator.async_shutdown()
     await thin_coordinator.async_shutdown()
     assert native.stopped and thin.stopped
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure", [RuntimeError("discovery failed"), asyncio.CancelledError()]
+)
+async def test_coordinator_stops_backend_when_startup_discovery_fails(
+    monkeypatch, failure
+) -> None:
+    backend = _Backend()
+
+    async def fail_discovery():
+        raise failure
+
+    backend.async_discover_devices = fail_discovery
+    monkeypatch.setattr(
+        "custom_components.openrbus.coordinator.NativeBluetoothBackend",
+        lambda *a, **k: backend,
+    )
+    coordinator = OpenRBusCoordinator(_hass(), _entry(BACKEND_NATIVE))
+
+    with pytest.raises(type(failure)):
+        await coordinator.async_start()
+
+    assert backend.started is True
+    assert backend.stopped is True
 
 
 @pytest.mark.asyncio

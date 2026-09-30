@@ -121,3 +121,51 @@ def test_abort_and_generic_item_errors_expire_only_after_continuous_interval() -
         key, generic, _register(), now=start + timedelta(minutes=90)
     )
     assert generic_expired.expired and generic_expired.reason == "item"
+
+
+def test_deterministic_failures_quarantine_only_in_exact_scope() -> None:
+    tracker = RegisterValidityTracker(timedelta(hours=1))
+    key = (1, ObjectAddress(0x430E, 0))
+    scope = (1, ("identity", 4), 2, 7)
+    abort = RuntimeError("private detail")
+    abort._openrbus_error_class = "abort"
+    abort._openrbus_abort_category = "unsupported_access"
+
+    assert tracker.quarantine_deterministic_failure(key, abort, scope)
+    assert tracker.is_quarantined(key, scope)
+    assert tracker.quarantined_snapshot() == (
+        {
+            "node": 1,
+            "index": 0x430E,
+            "subindex": 0,
+            "error_class": "abort",
+            "subtype": "unsupported_access",
+        },
+    )
+    assert not tracker.is_valid(key, _read(17))
+
+    # A level, identity, or session change ends the quarantine and requests a
+    # new read. Unknown scope also fails open rather than retaining a stale ban.
+    assert not tracker.is_quarantined(key, (2, ("identity", 4), 2, 7))
+    assert tracker.quarantined_count == 0
+    assert tracker.quarantine_deterministic_failure(key, abort, scope)
+    assert not tracker.is_quarantined(key, (1, ("identity", 5), 2, 7))
+    assert tracker.quarantined_count == 0
+
+    malformed = RuntimeError("private payload detail")
+    malformed._openrbus_error_class = "decode"
+    malformed._openrbus_decode_subtype = "visible_string_non_ascii"
+    assert tracker.quarantine_deterministic_failure(key, malformed, scope)
+    assert tracker.is_quarantined(key, scope)
+    tracker.reactivate(key)
+    assert not tracker.is_quarantined(key, scope)
+    assert tracker.quarantined_count == 0
+
+    transient = RuntimeError("private transport detail")
+    transient._openrbus_error_class = "session"
+    assert not tracker.quarantine_deterministic_failure(key, transient, scope)
+    unknown_decode = RuntimeError("private decode detail")
+    unknown_decode._openrbus_error_class = "decode"
+    unknown_decode._openrbus_decode_subtype = "visible_string_other"
+    assert not tracker.quarantine_deterministic_failure(key, unknown_decode, scope)
+    assert not tracker.quarantine_deterministic_failure(key, malformed, None)

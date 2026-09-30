@@ -7,7 +7,7 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_BACKEND, CONF_DIAGNOSTICS_ENABLED
+from .const import CONF_BACKEND, CONF_DIAGNOSTICS_ENABLED, DOMAIN
 from .setup_observability import OUTCOMES as _SETUP_OUTCOMES
 from .setup_observability import PHASES as _SETUP_PHASES
 
@@ -31,6 +31,44 @@ _SUBTYPES_BY_CLASS = {
         name.split(".", 1)[1] for name in _ERROR_SUBTYPES if name.startswith("batch.")
     ),
 }
+_ABORT_CATEGORIES = frozenset(
+    {
+        "unsupported_access",
+        "read_not_supported",
+        "write_not_supported",
+        "object_missing",
+        "subindex_missing",
+        "type_length_mismatch",
+        "other_abort",
+    }
+)
+_DECODE_DETAILS = frozenset(
+    {"visible_string_non_ascii", "visible_string_overlength", "visible_string_other"}
+)
+_BATCH_EXCEPTION_TYPES = frozenset(
+    {
+        "canopen_abort",
+        "request_timeout",
+        "transport_error",
+        "protocol_error",
+        "registry_error",
+        "validation_error",
+        "timeout",
+        "home_assistant_error",
+        "value_error",
+        "type_error",
+        "assertion_error",
+        "attribute_error",
+        "index_error",
+        "key_error",
+        "lookup_error",
+        "not_implemented_error",
+        "os_error",
+        "runtime_error",
+        "unicode_error",
+        "other_error",
+    }
+)
 _BATCH_EVENTS = ("malformed", "abort", "fallback")
 _FENCE_TIMEOUT_CLASSES = (
     "both_connected",
@@ -58,6 +96,9 @@ def _safe_poll_snapshot(
         value = snapshot.get(key)
         if type(value) is int and 0 <= value <= _COUNTER_MAX:
             safe[key] = value
+    quarantined_count = snapshot.get("quarantined_count")
+    if type(quarantined_count) is int and 0 <= quarantined_count <= _COUNTER_MAX:
+        safe["quarantined_count"] = quarantined_count
     delta = snapshot.get("availability_delta")
     if type(delta) is int and -_COUNTER_MAX <= delta <= _COUNTER_MAX:
         safe["availability_delta"] = delta
@@ -97,6 +138,21 @@ def _safe_poll_snapshot(
                     in _SUBTYPES_BY_CLASS.get(item["error_class"], ())
                     else {}
                 ),
+                **(
+                    {"abort_category": item["abort_category"]}
+                    if item.get("abort_category") in _ABORT_CATEGORIES
+                    else {}
+                ),
+                **(
+                    {"decode_subtype": item["decode_subtype"]}
+                    if item.get("decode_subtype") in _DECODE_DETAILS
+                    else {}
+                ),
+                **(
+                    {"batch_exception_type": item["batch_exception_type"]}
+                    if item.get("batch_exception_type") in _BATCH_EXCEPTION_TYPES
+                    else {}
+                ),
             }
             for item in failures[-16:]
             if isinstance(item, dict)
@@ -108,6 +164,31 @@ def _safe_poll_snapshot(
             and 0 <= item["subindex"] <= 255
             and item.get("error_class") in _ERROR_CLASSES
         ]
+        quarantined = snapshot.get("quarantined_items")
+        if isinstance(quarantined, (tuple, list)):
+            safe["quarantined_items"] = [
+                {
+                    "node": item["node"],
+                    "index": item["index"],
+                    "subindex": item["subindex"],
+                    "error_class": item["error_class"],
+                    "subtype": item["subtype"],
+                }
+                for item in quarantined[-16:]
+                if isinstance(item, dict)
+                and type(item.get("node")) is int
+                and 0 <= item["node"] <= 255
+                and type(item.get("index")) is int
+                and 0 <= item["index"] <= 65535
+                and type(item.get("subindex")) is int
+                and 0 <= item["subindex"] <= 255
+                and (
+                    (item.get("error_class") == "abort"
+                     and item.get("subtype") in {"unsupported_access", "read_not_supported"})
+                    or (item.get("error_class") == "decode"
+                        and item.get("subtype") == "visible_string_non_ascii")
+                )
+            ]
     return safe
 
 
@@ -175,6 +256,42 @@ def _safe_recovery_fence(snapshot: object) -> dict[str, Any]:
         isinstance(last_class, str) and last_class in _FENCE_TIMEOUT_CLASSES
     ):
         safe["last_timeout_class"] = last_class
+    attempt = snapshot.get("disconnect_attempt")
+    if isinstance(attempt, dict):
+        safe_attempt: dict[str, Any] = {}
+        for key in ("attempt_id", "session_epoch"):
+            value = attempt.get(key)
+            if value is None or (type(value) is int and 0 <= value <= _COUNTER_MAX):
+                safe_attempt[key] = value
+        outcome = attempt.get("outcome")
+        if outcome is None or (
+            isinstance(outcome, str)
+            and outcome in {
+            "missing_channel",
+            "missing_session",
+            "missing_identity",
+            "invalid_epoch",
+            "service_completed",
+            "service_not_acknowledged",
+            "service_exception",
+            }
+        ):
+            safe_attempt["outcome"] = outcome
+        exception_class = attempt.get("exception_class")
+        if exception_class is None or (
+            isinstance(exception_class, str)
+            and exception_class
+            in {
+                "HomeAssistantError",
+                "TimeoutError",
+                "TransportError",
+                "RuntimeError",
+                "other",
+            }
+        ):
+            safe_attempt["exception_class"] = exception_class
+        if safe_attempt:
+            safe["disconnect_attempt"] = safe_attempt
     return safe
 
 
@@ -187,6 +304,221 @@ def _safe_batch_events(snapshot: object) -> dict[str, int]:
         for name in _BATCH_EVENTS
         if type(value := snapshot.get(name)) is int and 0 <= value <= _COUNTER_MAX
     }
+
+
+def _safe_thin_rpc_frame_trace(snapshot: object) -> list[dict[str, Any]]:
+    """Project a small request/response trace without frame payloads."""
+    if not isinstance(snapshot, (tuple, list)):
+        return []
+    operations = {
+        "CAPABILITY", "CANCEL", "CONNECT", "CONNECTION_STATE", "DISCONNECT",
+        "DISCONNECTED", "DISCOVER", "ENCRYPTION_STATE", "FLOW_CONTROL",
+        "HANDLE_LOOKUP", "NOTIFICATION", "PAIR_ENCRYPT", "SUBSCRIBE", "WRITE",
+        "WRITE_CHAR", "WRITE_DESCRIPTOR", "READ_CHAR", "READ_DESCRIPTOR",
+        "SCAN", "SCAN_RESULT", "SCAN_DONE",
+    }
+    kinds = {"request", "response", "event"}
+    statuses = {
+        "OK", "ACCEPTED", "ERROR", "WRITE_FAILED", "CANCELLED", "success",
+        "failed", "timeout", "terminal_success", "terminal_error", "late_callback",
+    }
+    states = {"connected", "disconnected", "encrypted", "failed"}
+    safe: list[dict[str, Any]] = []
+    for item in snapshot[-64:]:
+        if not isinstance(item, dict):
+            continue
+        record: dict[str, Any] = {
+            "direction": item["direction"]
+            if item.get("direction") in {"request", "response"}
+            else "other",
+            "kind": item["kind"] if item.get("kind") in kinds else "other",
+            "op": item["op"] if item.get("op") in operations else "other",
+            "request_id_present": item.get("request_id_present") is True,
+        }
+        for key in ("seq", "epoch", "request_id"):
+            value = item.get(key)
+            if type(value) is int and 0 <= value <= 4_294_967_295:
+                record[key] = value
+        value = item.get("read_operation_id")
+        if type(value) is int and 1 <= value <= 4_294_967_295:
+            record["read_operation_id"] = value
+        if item.get("status") in statuses:
+            record["status"] = item["status"]
+        if item.get("state_category") in states:
+            record["state_category"] = item["state_category"]
+        if item.get("context") == "discovery":
+            record["context"] = "discovery"
+        safe.append(record)
+    return safe
+
+
+def _safe_read_operation_trace(snapshot: object) -> list[dict[str, Any]]:
+    """Project address-free bus operation IDs and terminal outcomes."""
+    if not isinstance(snapshot, (tuple, list)):
+        return []
+    safe = []
+    for item in snapshot[-32:]:
+        if not isinstance(item, dict):
+            continue
+        operation_id = item.get("operation_id")
+        if type(operation_id) is not int or not 1 <= operation_id <= 4_294_967_295:
+            continue
+        record: dict[str, Any] = {"operation_id": operation_id}
+        if item.get("kind") in {"single", "batch"}:
+            record["kind"] = item["kind"]
+        if item.get("outcome") in {"success", "partial_error", "error"}:
+            record["outcome"] = item["outcome"]
+        epoch = item.get("epoch")
+        if type(epoch) is int and 0 <= epoch <= 4_294_967_295:
+            record["epoch"] = epoch
+        safe.append(record)
+    return safe
+
+
+def _safe_read_transport_capture(snapshot: object) -> dict[str, Any]:
+    """Project pre/post proxy counters for the single captured read."""
+    if not isinstance(snapshot, dict):
+        return {}
+    operation_id = snapshot.get("operation_id")
+    if type(operation_id) is not int or not 1 <= operation_id <= 4_294_967_295:
+        return {}
+    safe: dict[str, Any] = {"operation_id": operation_id}
+    if snapshot.get("outcome") in {"success", "error"}:
+        safe["outcome"] = snapshot["outcome"]
+    counters = (
+        "epoch", "epoch_count", "rpc_requests", "last_rpc_request_id",
+        "att_write_char_calls", "att_write_char_callbacks",
+        "last_att_write_request_id", "notification_callbacks",
+        "last_notification_epoch", "last_notification_seq",
+        "last_notification_request_id",
+        "event_queue_depth", "poll_frame_calls", "poll_nonempty_returns",
+        "poll_empty_returns", "poll_queue_depth_before",
+        "poll_queue_depth_after", "total_frames_enqueued",
+    )
+    statuses = {"none", "WRITE_CHAR", "success", "failed", "waiting_notification"}
+    safe_enums = {
+        "last_enqueued_kind": {"none", "event", "response"},
+        "last_enqueued_op": {
+            "none",
+            "NOTIFICATION",
+            "CONNECTED",
+            "DISCONNECTED",
+            "CONNECT",
+            "DISCONNECT",
+            "WRITE_CHAR",
+            "READ_CHAR",
+            "PAIR_ENCRYPT",
+            "CAPABILITY",
+            "ERROR",
+            "INVALID_REQUEST",
+        },
+    }
+    booleans = {
+        "host_ready", "parent_connected", "link_active",
+        "last_att_write_waiting_notification", "last_notification_nonempty",
+        "last_notification_matched_request",
+    }
+    for phase in ("before", "after"):
+        values = snapshot.get(phase)
+        if not isinstance(values, dict):
+            continue
+        projected: dict[str, Any] = {}
+        for key in counters:
+            value = values.get(key)
+            if type(value) is int and 0 <= value <= 4_294_967_295:
+                projected[key] = value
+        for key in (
+            "last_att_write_status", "last_rpc_request_op",
+            "last_enqueued_kind", "last_enqueued_op",
+        ):
+            value = values.get(key)
+            allowed = (
+                statuses
+                if key in {"last_att_write_status", "last_rpc_request_op"}
+                else safe_enums.get(key, set())
+            )
+            if isinstance(value, str) and value in allowed:
+                projected[key] = value
+        for key in booleans:
+            value = values.get(key)
+            if type(value) is bool:
+                projected[key] = value
+        safe[phase] = projected
+    return safe
+
+
+def _safe_proxy_read_counters(snapshot: object) -> dict[str, Any]:
+    """Project only bounded request, callback, and liveness counters."""
+    if not isinstance(snapshot, dict):
+        return {}
+    safe: dict[str, Any] = {}
+    for key in (
+        "epoch", "epoch_count", "rpc_requests", "last_rpc_request_id",
+        "att_write_char_calls", "att_write_char_callbacks",
+        "last_att_write_request_id", "notification_callbacks",
+        "last_notification_epoch", "last_notification_seq",
+        "last_notification_request_id",
+        "event_queue_depth", "poll_frame_calls", "poll_nonempty_returns",
+        "poll_empty_returns", "poll_queue_depth_before",
+        "poll_queue_depth_after", "total_frames_enqueued",
+    ):
+        value = snapshot.get(key)
+        if type(value) is int and 0 <= value <= 4_294_967_295:
+            safe[key] = value
+    for key in ("last_att_write_status", "last_rpc_request_op"):
+        value = snapshot.get(key)
+        if isinstance(value, str) and value in {
+            "none", "WRITE_CHAR", "success", "failed", "waiting_notification"
+        }:
+            safe[key] = value
+    last_enqueued_kind = snapshot.get("last_enqueued_kind")
+    if last_enqueued_kind in {"none", "event", "response"}:
+        safe["last_enqueued_kind"] = last_enqueued_kind
+    last_enqueued_op = snapshot.get("last_enqueued_op")
+    if last_enqueued_op in {
+        "none", "NOTIFICATION", "CONNECTED", "DISCONNECTED", "CONNECT",
+        "DISCONNECT", "WRITE_CHAR", "READ_CHAR", "PAIR_ENCRYPT",
+        "CAPABILITY", "ERROR", "INVALID_REQUEST",
+    }:
+        safe["last_enqueued_op"] = last_enqueued_op
+    for key in (
+        "host_ready", "parent_connected", "link_active",
+        "last_att_write_waiting_notification", "last_notification_nonempty",
+        "last_notification_matched_request",
+    ):
+        value = snapshot.get(key)
+        if type(value) is bool:
+            safe[key] = value
+    return safe
+
+
+def _safe_batch_failure_trace(snapshot: object) -> dict[str, Any]:
+    """Project the one-shot batch failure trace through a fixed schema."""
+    if not isinstance(snapshot, dict):
+        return {}
+    operation_id = snapshot.get("operation_id")
+    if type(operation_id) is not int or not 1 <= operation_id <= 4_294_967_295:
+        return {}
+    stages = {
+        "get_list_call", "response_parse", "single_fallback", "recovery_dispatch"
+    }
+    exception_types = _BATCH_EXCEPTION_TYPES
+    stage = snapshot.get("stage")
+    exception_class = snapshot.get("exception_class")
+    if stage not in stages or exception_class not in exception_types:
+        return {}
+    safe: dict[str, Any] = {
+        "operation_id": operation_id,
+        "stage": stage,
+        "exception_class": exception_class,
+    }
+    for key in ("request_id", "epoch"):
+        value = snapshot.get(key)
+        if type(value) is int and 0 <= value <= 4_294_967_295:
+            safe[key] = value
+    for phase in ("before", "after"):
+        safe[phase] = _safe_proxy_read_counters(snapshot.get(phase))
+    return safe
 
 
 async def async_get_config_entry_diagnostics(
@@ -242,7 +574,60 @@ async def async_get_config_entry_diagnostics(
         if isinstance(backend_snapshot, dict)
         else None
     )
+    thin_rpc_frame_trace = _safe_thin_rpc_frame_trace(
+        backend_snapshot.get("thin_rpc_frame_trace")
+        if isinstance(backend_snapshot, dict)
+        else None
+    )
+    read_operation_trace = _safe_read_operation_trace(
+        backend_snapshot.get("read_operation_trace")
+        if isinstance(backend_snapshot, dict)
+        else None
+    )
+    read_transport_capture = _safe_read_transport_capture(
+        backend_snapshot.get("last_read_transport_capture")
+        if isinstance(backend_snapshot, dict)
+        else None
+    )
+    batch_failure_trace = _safe_batch_failure_trace(
+        backend_snapshot.get("last_batch_failure_trace")
+        if isinstance(backend_snapshot, dict)
+        else None
+    )
     polling = getattr(coordinator, "_openrbus_polling_coordinators", {})
+    hass_data = getattr(hass, "data", {})
+    polling_store = (
+        hass_data.get(f"{DOMAIN}_polling_coordinators", {})
+        if isinstance(hass_data, dict)
+        else {}
+    )
+    entry_pollers = (
+        polling_store.get(getattr(entry, "entry_id", None), {})
+        if isinstance(polling_store, dict)
+        else {}
+    )
+    if not isinstance(polling, dict) or not polling:
+        polling = entry_pollers
+    # Some HA platform setup paths hand diagnostics a reconstituted entry
+    # object with a runtime_data instance that differs from the one owning the
+    # pollers. Resolve the sole active entry only when both the integration
+    # and our registry unambiguously contain one entry.
+    if not polling and isinstance(polling_store, dict) and len(polling_store) == 1:
+        try:
+            active_entries = hass.config_entries.async_entries(DOMAIN)
+        except (AttributeError, TypeError):
+            active_entries = ()
+        if len(active_entries) == 1:
+            polling = next(iter(polling_store.values()))
+    poller_registry = {
+        "stored_entry_count": min(_COUNTER_MAX, len(polling_store))
+        if isinstance(polling_store, dict)
+        else 0,
+        "entry_match": bool(entry_pollers),
+        "selected_groups": [group for group in _POLL_GROUPS if group in polling]
+        if isinstance(polling, dict)
+        else [],
+    }
     poll_diagnostics = {}
     if isinstance(polling, dict):
         for group in _POLL_GROUPS:
@@ -281,7 +666,12 @@ async def async_get_config_entry_diagnostics(
             "transport_session": transport_session,
             "setup_response": setup_response,
             "batch_events": batch_events,
+            "thin_rpc_frame_trace": thin_rpc_frame_trace,
+            "read_operation_trace": read_operation_trace,
+            "read_transport_capture": read_transport_capture,
+            "batch_failure_trace": batch_failure_trace,
             "poll_groups": poll_diagnostics,
+            "poller_registry": poller_registry,
             "coordinator_poll_count": min(
                 _COUNTER_MAX,
                 max(0, getattr(coordinator, "_diagnostic_poll_count", 0))

@@ -27,6 +27,22 @@ _FENCE_TIMEOUT_CLASSES = (
     "parent_connected",
     "state_unavailable",
 )
+_DISCONNECT_OUTCOMES = (
+    "missing_channel",
+    "missing_session",
+    "missing_identity",
+    "invalid_epoch",
+    "service_completed",
+    "service_not_acknowledged",
+    "service_exception",
+)
+_DISCONNECT_EXCEPTION_CLASSES = (
+    "HomeAssistantError",
+    "TimeoutError",
+    "TransportError",
+    "RuntimeError",
+    "other",
+)
 
 
 class RecoveryFenceMetrics:
@@ -40,13 +56,37 @@ class RecoveryFenceMetrics:
         self._timeout_count = 0
         self._timeout_classes = dict.fromkeys(_FENCE_TIMEOUT_CLASSES, 0)
         self._last_timeout_class: str | None = None
+        self._disconnect_attempt: dict[str, Any] = {}
 
-    def begin_attempt(self) -> None:
+    def begin_attempt(self, session_epoch: object = None) -> int:
         self._attempts = min(_MAX, self._attempts + 1)
         self._dispatch_acknowledged = None
         self._link_active = None
         self._parent_connected = None
         self._last_timeout_class = None
+        self._disconnect_attempt = {
+            "attempt_id": self._attempts,
+            "session_epoch": (
+                session_epoch
+                if type(session_epoch) is int and 0 <= session_epoch <= _MAX
+                else None
+            ),
+            "outcome": None,
+            "exception_class": None,
+        }
+        return self._attempts
+
+    def record_disconnect_outcome(
+        self, outcome: str, exception: BaseException | None = None
+    ) -> None:
+        if outcome not in _DISCONNECT_OUTCOMES:
+            return
+        self._disconnect_attempt["outcome"] = outcome
+        if outcome == "service_exception" and exception is not None:
+            name = type(exception).__name__
+            self._disconnect_attempt["exception_class"] = (
+                name if name in _DISCONNECT_EXCEPTION_CLASSES[:-1] else "other"
+            )
 
     def record_dispatch(self, acknowledged: bool) -> None:
         self._dispatch_acknowledged = acknowledged is True
@@ -75,7 +115,7 @@ class RecoveryFenceMetrics:
 
     def diagnostics(self) -> dict[str, Any]:
         """Return only fixed counters, booleans, and fixed timeout classes."""
-        return {
+        result = {
             "attempts": self._attempts,
             "dispatch_acknowledged": self._dispatch_acknowledged,
             "link_active": self._link_active,
@@ -84,6 +124,9 @@ class RecoveryFenceMetrics:
             "timeout_classes": dict(self._timeout_classes),
             "last_timeout_class": self._last_timeout_class,
         }
+        if self._disconnect_attempt:
+            result["disconnect_attempt"] = dict(self._disconnect_attempt)
+        return result
 
 
 class SetupResponseMetrics:

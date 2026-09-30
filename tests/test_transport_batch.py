@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from homeassistant.exceptions import HomeAssistantError
 from openrbus.access import RawReadResult
 from openrbus.errors import CanOpenAbortError, ProtocolError
 from openrbus.registry import Registry
@@ -126,3 +127,24 @@ async def test_poll_group_retries_when_batch_result_count_is_malformed() -> None
     assert calls == ["batch", "single"]
     assert events == ["malformed", "fallback"]
     assert result[0].value == 0
+
+
+@pytest.mark.asyncio
+async def test_batch_visible_string_decode_error_keeps_safe_subtype() -> None:
+    definition = next(
+        row
+        for row in Registry.load_default().registers
+        if row.wire.storage.value == "VISIBLESTRING"
+    )
+    raw = b"\xff" + bytes(definition.wire.length - 1)
+
+    class _Client:
+        async def read_many_raw(self, items):
+            return (RawReadResult(7, definition.address, raw=raw),)
+
+    result = await _read_objects_batched(_Client(), (definition.address,), node=7)
+
+    assert len(result) == 1
+    assert isinstance(result[0], HomeAssistantError)
+    assert result[0]._openrbus_error_class == "decode"
+    assert result[0]._openrbus_decode_subtype == "visible_string_non_ascii"

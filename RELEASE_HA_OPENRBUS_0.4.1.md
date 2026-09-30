@@ -1,14 +1,18 @@
 # HA OpenRBus 0.4.1 release review
 
-Status: release candidate prepared; no commit, tag, GitHub release, HACS
-submission, or PyPI publication was performed by this review.
+Status: local 0.4.1 candidate package prepared. The HA candidate changes and
+this report are committed locally; no push, tag, GitHub release, HACS
+submission, or PyPI publication was performed.
 
 ## Verdict
 
-The HA repository is a `0.4.1` release candidate. Its current dirty tree passes
-the isolated HA suite against a locally built Core `0.4.1` wheel. The package
-has not been published; HACS/Hassfest, the exact ESPHome source compile, live
-transport acceptance, and a clean-candidate rerun remain open.
+The HA repository is a `0.4.1` release candidate against Core commit
+`facdd2ebd04e06d5bac03b57cc8d2374971253f8`. The current candidate source
+passes its recorded software checks, and the isolated Test-HA completed the
+explicit 30-minute read-only Thin-RPC stability gate described by the current
+handover. The package has not been published. CI, HACS Action, Hassfest,
+external repository settings, and a final clean-commit/package rerun remain
+open.
 
 ## Review scope
 
@@ -63,8 +67,8 @@ Current official guidance: [HACS default repositories](https://www.hacs.xyz/docs
 | Brand asset | Ready | `brand/icon.png` and SVG source are present. |
 | GitHub description, topics, issues enabled | External | Verify repository settings before submission. |
 | Full GitHub Release, not tag only | External | Create `v0.4.1` after CI passes. |
-| HACS Action | Ready in CI | `.github/workflows/validate.yml` runs the pinned HACS action. |
-| Hassfest | Ready in CI | The same workflow runs official Hassfest validation. |
+| HACS Action | Pending | `.github/workflows/validate.yml` runs the pinned HACS action; it has not run against this exact commit. |
+| Hassfest | Pending | The same workflow runs official Hassfest validation; it has not run against this exact commit. |
 | HACS default PR | External | Owner/major contributor submits an alphabetical PR to `hacs/default/integration` after release. |
 | Stars or popularity threshold | Not required by current docs | Do not claim a star requirement; current HACS inclusion guidance lists owner/contributor and validation checks instead. |
 
@@ -102,13 +106,50 @@ decision.
 - Live transport and write acceptance: not included in this check. Do not infer
   release readiness from the software suite.
 
+## Candidate update — 2026-09-30
+
+- HA candidate changes in this package cover bounded poll/session recovery
+  diagnostics, scoped quarantine for deterministic object-local failures,
+  coordinator lifecycle handling, and related regression coverage. Public
+  diagnostic output is projected through finite schemas and bounded counters;
+  trace records omit bus payloads and exception messages. Item addresses are
+  emitted only under the existing expert diagnostics option.
+- Source-diff privacy review found no installation paths, private network or
+  device identifiers, credential values, live evidence, or firmware/build
+  output in the candidate tree. The detailed live-attribution report and raw
+  supporting evidence remain in the private local project/evidence area and
+  are not tracked in this repository.
+- Candidate working-tree checks recorded in `PROJECT_STATE.md`: Core suite
+  150 passed; HA suite 245 passed with six environment/deprecation warnings;
+  Core lint/format/type checks and package/archive audits passed; HA Ruff,
+  bytecode compilation, and diff checks passed. These are working-tree results,
+  not a clean post-commit rerun. The HA run uses the local Core candidate on
+  `PYTHONPATH`; a clean package integration run against the eventual published
+  Core remains to be repeated.
+- The isolated Test-HA read-only gate passed continuously for 1,801.4 seconds
+  (58 samples), with all three poll groups advancing, no new poll errors,
+  quarantines, or unavailable active entities, and stable HA/proxy epochs.
+  This establishes only the stated read-only Thin-RPC stability criterion.
+  The scoped disconnect fallback was not exercised live. No live write,
+  native-Bluetooth, migration, elevated-access, or fallback-branch acceptance
+  is claimed.
+- The older 61-minute read/write/disconnect/reconnect item in the project
+  backlog is not specified as the current handover's release gate. The
+  handover's explicit immediate live gate is the 30-minute error-free
+  read-only Thin-RPC observation, now passed. Therefore the untested write,
+  native-Bluetooth, and fallback behavior must remain documented limitations;
+  they are not silently represented as validated capabilities. Any release
+  notes that promise those behaviors as field-validated must be narrowed.
+- No device-specific firmware is a release artifact. ESPHome source compile
+  provenance and hashes are retained privately, outside this HA repository.
+
 ## External release sequence
 
 1. Review and release `openrbus` Core `0.4.1` to PyPI.
 2. Review and release the ESPHome proxy firmware/source at its coordinated
    version, with no installation-specific captures or configuration.
 3. Run HA tests against the published Core wheel, then run HACS Action and
-   Hassfest on the clean HA release commit.
-4. Commit the reviewed HA tree, tag `v0.4.1`, and create a full GitHub Release.
+   Hassfest on the exact clean HA release commit.
+4. After all gates pass, tag `v0.4.1` and create a full GitHub Release.
 5. Verify HACS can install the GitHub release as a custom repository.
 6. Submit the owner-authored PR to `hacs/default/integration`.

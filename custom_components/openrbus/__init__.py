@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import voluptuous as vol
 from annotatedyaml import YAMLException
@@ -47,6 +49,7 @@ from .coordinator import OpenRBusCoordinator
 from .proxy_provisioning import PROXY_SOURCE_VERSION, read_proxy_yaml
 
 PLATFORMS = ["sensor", "binary_sensor", "number", "select", "switch"]
+_LOGGER = logging.getLogger(__name__)
 
 # The opt-in ESPHome Thin-RPC firmware exposes the same canonical EHC
 # characteristics as the native Core transport.  Keep these implementation
@@ -295,11 +298,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         raise HomeAssistantError(
             "Thin-RPC requires a valid profile and an EHC key secret reference"
         )
+    # Retain only a tiny redacted Thin-RPC frame trace so a failed initial
+    # discovery can be correlated with the proxy without retaining payloads.
+    thin_frame_trace: list[dict[str, Any]] = []
     coordinator = OpenRBusCoordinator(
         hass,
         entry,
         thin_key_provider=key_provider,
         thin_profile=profile,
+        thin_frame_trace=thin_frame_trace,
     )
     entry.runtime_data = coordinator
     await coordinator.async_start()
@@ -320,7 +327,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 address = ObjectAddress.parse(call.data["object"])
             except ValueError as error:
                 raise HomeAssistantError("object must use hhhh:ss notation") from error
-            result = await target.async_read_object(address, node=call.data["node"])
+            if call.data.get("capture_transport", False):
+                result = await target.async_read_object_with_transport_capture(
+                    address, node=call.data["node"]
+                )
+            else:
+                result = await target.async_read_object(address, node=call.data["node"])
             return {
                 "node": result.node,
                 "object": str(result.address),
@@ -340,6 +352,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     vol.Optional("node", default=0xFF): vol.All(
                         vol.Coerce(int), vol.Range(min=1, max=255)
                     ),
+                    vol.Optional("capture_transport", default=False): cv.boolean,
                 }
             ),
             supports_response=SupportsResponse.OPTIONAL,
@@ -543,9 +556,37 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload an OpenRBus config entry."""
     coordinator: OpenRBusCoordinator = entry.runtime_data
+    backend = getattr(coordinator, "_backend", None)
+    _LOGGER.warning(
+        "UNLOAD_TRACE event=entry_unload_begin controller_owned=%s backend_started=%s",
+        bool(getattr(backend, "_owns_controller", False)),
+        bool(getattr(backend, "started", False)),
+    )
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    _LOGGER.warning(
+        "UNLOAD_TRACE event=platform_unload_complete unloaded=%s controller_owned=%s",
+        unloaded,
+        bool(getattr(backend, "_owns_controller", False)),
+    )
     if unloaded:
-        await coordinator.async_shutdown()
+        try:
+            await coordinator.async_shutdown()
+        except BaseException as error:
+            _LOGGER.warning(
+                "UNLOAD_TRACE event=coordinator_shutdown_error error_type=%s controller_owned=%s",
+                type(error).__name__,
+                bool(getattr(backend, "_owns_controller", False)),
+            )
+            raise
+        _LOGGER.warning(
+            "UNLOAD_TRACE event=coordinator_shutdown_complete controller_owned=%s",
+            bool(getattr(backend, "_owns_controller", False)),
+        )
+        hass.data.get(f"{DOMAIN}_polling_coordinators", {}).pop(
+            entry.entry_id, None
+        )
+    else:
+        _LOGGER.warning("UNLOAD_TRACE event=coordinator_shutdown_skipped")
     if not hass.config_entries.async_entries(DOMAIN):
         hass.services.async_remove(DOMAIN, "read_object")
         hass.services.async_remove(DOMAIN, "read_group")

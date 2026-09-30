@@ -212,10 +212,14 @@ async def test_transport_recovery_waits_and_drains_before_reprepare() -> None:
     backend._recovery_fence_metrics = RecoveryFenceMetrics()
 
     class _Session:
+        identity = object()
+        epoch = 1
+
         def retire(self) -> None:
             events.append("retire")
 
     backend.session = _Session()
+    backend.channel = object()
 
     async def force_disconnect() -> bool:
         events.append("disconnect")
@@ -249,8 +253,195 @@ async def test_transport_recovery_waits_and_drains_before_reprepare() -> None:
     fence = backend._recovery_fence_metrics.diagnostics()
     assert fence["attempts"] == 1
     assert fence["dispatch_acknowledged"] is True
+    assert fence["disconnect_attempt"] == {
+        "attempt_id": 1,
+        "session_epoch": 1,
+        "outcome": "service_completed",
+        "exception_class": None,
+    }
     assert fence["link_active"] is False
     assert fence["parent_connected"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("channel", "identity", "epoch", "expected"),
+    [
+        (None, object(), 1, "missing_channel"),
+        (object(), object(), None, "invalid_epoch"),
+        (object(), None, 1, "missing_identity"),
+    ],
+)
+async def test_transport_recovery_records_exact_disconnect_guard(
+    channel, identity, epoch, expected
+) -> None:
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    backend.channel = channel
+    backend.session = SimpleNamespace(
+        identity=identity, epoch=epoch, retire=lambda: None
+    )
+    backend._recovery_fence_metrics = RecoveryFenceMetrics()
+    dispatches: list[bool] = []
+
+    async def force_disconnect() -> bool:
+        dispatches.append(True)
+        return True
+
+    async def wait_for_disconnect(*, recovery_fence=None) -> None:
+        recovery_fence.record_state(False, False)
+
+    backend._force_disconnect_current_session = force_disconnect
+    backend._wait_for_physical_disconnect = wait_for_disconnect
+    backend._drain_stale_frames = _async_noop
+    backend._ensure_session_ready = _async_noop
+
+    if expected in {"missing_identity", "invalid_epoch"}:
+        with pytest.raises(HomeAssistantError, match="no scoped ESPHome disconnect"):
+            await backend._recover_after_transport_loss()
+    else:
+        await backend._recover_after_transport_loss()
+
+    attempt = backend._recovery_fence_metrics.diagnostics()["disconnect_attempt"]
+    assert attempt["outcome"] == expected
+    assert dispatches == []
+
+
+@pytest.mark.asyncio
+async def test_transport_recovery_records_missing_session_guard() -> None:
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    backend.channel = object()
+    backend.session = None
+    backend._recovery_fence_metrics = RecoveryFenceMetrics()
+
+    async def unexpected_dispatch() -> bool:
+        raise AssertionError("guard must prevent DISCONNECT dispatch")
+
+    async def wait_for_disconnect(*, recovery_fence=None) -> None:
+        recovery_fence.record_state(False, False)
+
+    backend._force_disconnect_current_session = unexpected_dispatch
+    backend._wait_for_physical_disconnect = wait_for_disconnect
+    backend._drain_stale_frames = _async_noop
+    backend._ensure_session_ready = _async_noop
+
+    with pytest.raises(HomeAssistantError, match="no scoped ESPHome disconnect"):
+        await backend._recover_after_transport_loss()
+
+    attempt = backend._recovery_fence_metrics.diagnostics()["disconnect_attempt"]
+    assert attempt["outcome"] == "missing_session"
+
+
+@pytest.mark.asyncio
+async def test_transport_recovery_uses_scoped_disconnect_and_rearms_before_reprepare() -> None:
+    events: list[str] = []
+
+    class _RecoveryServices:
+        def async_services(self):
+            return {"esphome": {name: object() for name in ("proxy_openrbus_pair", "proxy_openrbus_disconnect")}}
+
+        async def async_call(self, domain, service, data, *, blocking):
+            events.append(service)
+
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    backend.hass = SimpleNamespace(services=_RecoveryServices())
+    backend.pair_action = "proxy_openrbus_pair"
+    backend.capability = SimpleNamespace(request_service="proxy_openrbus_gatt_rpc_request")
+    backend.channel = object()
+    backend.session = SimpleNamespace(identity=None, epoch=13, retire=lambda: events.append("retire"))
+    backend._recovery_fence_metrics = RecoveryFenceMetrics()
+
+    async def wait_for_disconnect(*, recovery_fence=None) -> None:
+        events.append("physical_down")
+        recovery_fence.record_state(False, False)
+
+    async def arm_pairing() -> bool:
+        events.append("pair_rearm")
+        return False
+
+    async def drain() -> None:
+        events.append("drain")
+
+    async def reprepare() -> None:
+        events.append("reprepare")
+
+    backend._wait_for_physical_disconnect = wait_for_disconnect
+    backend._arm_pairing_if_configured = arm_pairing
+    backend._drain_stale_frames = drain
+    backend._ensure_session_ready = reprepare
+
+    await backend._recover_after_transport_loss()
+
+    assert events == [
+        "retire",
+        "proxy_openrbus_disconnect",
+        "physical_down",
+        "drain",
+        "pair_rearm",
+        "reprepare",
+    ]
+    assert backend._recovery_fence_metrics.diagnostics()["link_active"] is False
+
+
+@pytest.mark.asyncio
+async def test_transport_recovery_scoped_disconnect_timeout_never_reprepares() -> None:
+    events: list[str] = []
+
+    class _RecoveryServices:
+        def async_services(self):
+            return {"esphome": {name: object() for name in ("proxy_openrbus_pair", "proxy_openrbus_disconnect")}}
+
+        async def async_call(self, domain, service, data, *, blocking):
+            events.append(service)
+
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    backend.hass = SimpleNamespace(services=_RecoveryServices())
+    backend.pair_action = "proxy_openrbus_pair"
+    backend.capability = SimpleNamespace(request_service="proxy_openrbus_gatt_rpc_request")
+    backend.channel = object()
+    backend.session = None
+    backend._recovery_fence_metrics = RecoveryFenceMetrics()
+
+    async def timeout(*, recovery_fence=None) -> None:
+        events.append("physical_down")
+        recovery_fence.record_state(True, True)
+        recovery_fence.record_timeout()
+        raise HomeAssistantError("physical disconnect timeout")
+
+    backend._wait_for_physical_disconnect = timeout
+    backend._drain_stale_frames = _async_noop
+    backend._ensure_session_ready = lambda: pytest.fail("must not reprepare")
+
+    with pytest.raises(HomeAssistantError, match="physical disconnect timeout"):
+        await backend._recover_after_transport_loss()
+    assert events == ["proxy_openrbus_disconnect", "physical_down"]
+
+
+@pytest.mark.asyncio
+async def test_transport_recovery_scoped_disconnect_cancellation_propagates() -> None:
+    events: list[str] = []
+
+    class _RecoveryServices:
+        def async_services(self):
+            return {"esphome": {name: object() for name in ("proxy_openrbus_pair", "proxy_openrbus_disconnect")}}
+
+        async def async_call(self, domain, service, data, *, blocking):
+            events.append(service)
+            raise asyncio.CancelledError
+
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    backend.hass = SimpleNamespace(services=_RecoveryServices())
+    backend.pair_action = "proxy_openrbus_pair"
+    backend.capability = SimpleNamespace(request_service="proxy_openrbus_gatt_rpc_request")
+    backend.channel = object()
+    backend.session = None
+    backend._recovery_fence_metrics = RecoveryFenceMetrics()
+    backend._wait_for_physical_disconnect = lambda **kwargs: pytest.fail("must not fence")
+    backend._drain_stale_frames = _async_noop
+    backend._ensure_session_ready = _async_noop
+
+    with pytest.raises(asyncio.CancelledError):
+        await backend._recover_after_transport_loss()
+    assert events == ["proxy_openrbus_disconnect"]
 
 
 @pytest.mark.asyncio
@@ -278,7 +469,8 @@ async def test_transport_recovery_does_not_reprepare_after_disconnect_timeout() 
     async def ensure_session_ready() -> None:
         events.append("reprepare")
 
-    backend.session = None
+    backend.channel = object()
+    backend.session = SimpleNamespace(identity=object(), epoch=9, retire=lambda: None)
     backend._force_disconnect_current_session = force_disconnect
     backend._wait_for_physical_disconnect = wait_for_disconnect
     backend._drain_stale_frames = drain_stale_frames
@@ -290,8 +482,41 @@ async def test_transport_recovery_does_not_reprepare_after_disconnect_timeout() 
     assert events == ["disconnect", "physical_disconnect"]
     fence = backend._recovery_fence_metrics.diagnostics()
     assert fence["dispatch_acknowledged"] is False
+    assert fence["disconnect_attempt"]["outcome"] == "service_not_acknowledged"
     assert fence["timeout_count"] == 1
     assert fence["last_timeout_class"] == "link_active"
+
+
+@pytest.mark.asyncio
+async def test_transport_recovery_records_disconnect_exception_class() -> None:
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    backend._recovery_fence_metrics = RecoveryFenceMetrics()
+    backend.channel = object()
+    backend.session = SimpleNamespace(
+        identity=object(), epoch=23, retire=lambda: None
+    )
+
+    async def force_disconnect() -> bool:
+        raise HomeAssistantError("private detail must not be retained")
+
+    async def wait_for_disconnect(*, recovery_fence=None) -> None:
+        recovery_fence.record_state(False, False)
+
+    backend._force_disconnect_current_session = force_disconnect
+    backend._wait_for_physical_disconnect = wait_for_disconnect
+    backend._drain_stale_frames = _async_noop
+    backend._ensure_session_ready = _async_noop
+
+    await backend._recover_after_transport_loss()
+
+    attempt = backend._recovery_fence_metrics.diagnostics()["disconnect_attempt"]
+    assert attempt == {
+        "attempt_id": 1,
+        "session_epoch": 23,
+        "outcome": "service_exception",
+        "exception_class": "HomeAssistantError",
+    }
+    assert "private detail" not in repr(attempt)
 
 
 @pytest.mark.asyncio
@@ -382,6 +607,110 @@ async def test_thin_single_read_retries_once_after_transport_loss() -> None:
 
 
 @pytest.mark.asyncio
+async def test_single_read_capture_tags_frames_and_brackets_proxy_counters() -> None:
+    trace: list[dict[str, object]] = []
+    channel = HomeAssistantThinGattChannel(
+        object(), ThinRpcCapability("request", "poll", "diagnostics"), trace
+    )
+    snapshots = iter(
+        [
+            {
+                "epoch": 8,
+                "rpc_requests": 4,
+                "att_write_char_calls": 2,
+                "event_queue_depth": 2,
+                "poll_frame_calls": 20,
+                "poll_nonempty_returns": 8,
+                "poll_empty_returns": 12,
+                "poll_queue_depth_before": 1,
+                "poll_queue_depth_after": 2,
+                "total_frames_enqueued": 10,
+                "private_snapshot_field": "must not escape",
+            },
+            {
+                "epoch": 8,
+                "rpc_requests": 5,
+                "att_write_char_calls": 3,
+                "att_write_char_callbacks": 3,
+                "last_att_write_request_id": 19,
+                "last_att_write_status": "success",
+                "notification_callbacks": 7,
+                "last_notification_epoch": 8,
+                "last_notification_seq": 12,
+                "last_notification_nonempty": True,
+                "event_queue_depth": 1,
+                "poll_frame_calls": 21,
+                "poll_nonempty_returns": 9,
+                "poll_empty_returns": 12,
+                "poll_queue_depth_before": 2,
+                "poll_queue_depth_after": 1,
+                "total_frames_enqueued": 11,
+                "private_snapshot_field": "must not escape",
+            },
+        ]
+    )
+
+    async def diagnostics():
+        return next(snapshots)
+
+    channel.diagnostics = diagnostics
+    address = ObjectAddress(0x500F, 0x00)
+
+    class _Client:
+        async def read_raw(self, _node, _address):
+            channel._record_frame(
+                "request",
+                {
+                    "kind": "request",
+                    "op": "WRITE_CHAR",
+                    "epoch": 8,
+                    "request_id": 19,
+                },
+            )
+            channel._record_frame(
+                "response",
+                {
+                    "kind": "event",
+                    "op": "NOTIFICATION",
+                    "epoch": 8,
+                    "seq": 12,
+                    "request_id": 0,
+                },
+            )
+            return b"\x00"
+
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    backend._read_lock = asyncio.Lock()
+    backend.channel = channel
+    backend.client = _Client()
+    backend.session = SimpleNamespace(epoch=8)
+
+    async def ensure_ready():
+        return None
+
+    backend._ensure_session_ready = ensure_ready
+    result = await backend.async_read_object_with_transport_capture(address, node=5)
+    assert result.raw_value == b"\x00"
+    assert [frame["read_operation_id"] for frame in trace] == [1, 1]
+    assert backend._read_operation_trace == [
+        {"operation_id": 1, "kind": "single", "outcome": "success", "epoch": 8}
+    ]
+    capture = backend._last_read_transport_capture
+    assert capture["before"]["rpc_requests"] == 4
+    assert capture["before"]["total_frames_enqueued"] == 10
+    assert capture["before"]["poll_frame_calls"] == 20
+    assert capture["after"]["total_frames_enqueued"] == 11
+    assert capture["after"]["poll_frame_calls"] == 21
+    assert capture["after"]["poll_nonempty_returns"] == 9
+    assert capture["after"]["poll_empty_returns"] == 12
+    assert capture["after"]["poll_queue_depth_before"] == 2
+    assert capture["after"]["poll_queue_depth_after"] == 1
+    assert "private_snapshot_field" not in repr(capture)
+    assert capture["after"]["last_att_write_request_id"] == 19
+    assert capture["after"]["last_notification_seq"] == 12
+
+
+@pytest.mark.asyncio
 async def test_thin_discovery_retries_once_after_transport_loss(monkeypatch) -> None:
     """Read-only discovery gets the same bounded recovery as register reads."""
 
@@ -424,6 +753,28 @@ async def test_thin_discovery_retries_once_after_transport_loss(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_batch_failure_trace_falls_back_to_same_window_proxy_request_id() -> None:
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    backend._batch_failure_trace_captured = False
+    backend.frame_trace = []
+
+    class _Channel:
+        async def diagnostics(self):
+            return {"epoch": 8, "last_rpc_request_id": 1141}
+
+    backend.channel = _Channel()
+    await backend._finish_batch_failure_trace(
+        176,
+        {"stage": "recovery_dispatch", "exception_class": "home_assistant_error"},
+        {"epoch": 8, "last_rpc_request_id": 1135},
+    )
+
+    assert backend._last_batch_failure_trace["operation_id"] == 176
+    assert backend._last_batch_failure_trace["request_id"] == 1141
+    assert backend._last_batch_failure_trace["epoch"] == 8
+
+
+@pytest.mark.asyncio
 async def test_thin_discovery_does_not_retry_protocol_failure(monkeypatch) -> None:
     """Only transport loss enters recovery; discovery protocol errors remain exact."""
 
@@ -459,8 +810,16 @@ async def test_failed_thin_reprepare_releases_backend_lifecycle_for_next_poll() 
     backend._started = True
     backend.controller_id = controller_id
     backend._active_controllers.add(controller_id)
-    backend.session = SimpleNamespace(connected=False)
+    backend._owns_controller = True
+    backend.session = SimpleNamespace(connected=False, identity=None, epoch=0)
     backend.link = object()
+    backend.channel = SimpleNamespace(
+        diagnostics=lambda: asyncio.sleep(
+            0, result={"link_active": False, "parent_connected": False}
+        )
+    )
+    backend._lifecycle_lock = asyncio.Lock()
+    backend.timeout = 10.0
     backend.authentication = object()
     backend.transport = object()
     backend.client = object()
@@ -1398,6 +1757,7 @@ async def test_frame_trace_captures_seq_one_attach_without_private_fields() -> N
         ThinRpcCapability("request", "poll", "diagnostics"),
         frame_trace=trace,
     )
+    channel.trace_context = "discovery"
     session = ThinGattSession(
         channel,
         services=ThinGattRpcServices(
@@ -1413,15 +1773,17 @@ async def test_frame_trace_captures_seq_one_attach_without_private_fields() -> N
             item["op"],
             item["seq"],
             item["epoch"],
+            item["request_id"],
+            item["context"],
             item["status"],
             item["state_category"],
         )
         for item in trace
     ] == [
-        ("request", "CONNECT", None, 0, None, None),
-        ("event", "CAPABILITY", 0, 0, None, None),
-        ("response", "CONNECT", 0, 3, "OK", None),
-        ("event", "CONNECTION_STATE", 1, 3, None, "connected"),
+        ("request", "CONNECT", None, 0, 1, "discovery", None, None),
+        ("event", "CAPABILITY", 0, 0, None, "discovery", None, None),
+        ("response", "CONNECT", 0, 3, 1, "discovery", "OK", None),
+        ("event", "CONNECTION_STATE", 1, 3, 1, "discovery", None, "connected"),
     ]
     assert all(
         set(item)
@@ -1432,6 +1794,8 @@ async def test_frame_trace_captures_seq_one_attach_without_private_fields() -> N
             "seq",
             "epoch",
             "request_id_present",
+            "request_id",
+            "context",
             "status",
             "state_category",
         }
@@ -1591,11 +1955,77 @@ async def test_stop_waits_for_physical_disconnect_before_releasing_controller() 
     backend = ThinRpcBackend(_hass(), controller_id="controller", channel=channel)
     backend.link = _Link()
     backend._active_controllers.add("controller")
+    backend._owns_controller = True
 
     await backend.async_stop()
 
     assert channel.snapshots == []
     assert "controller" not in backend._active_controllers
+
+
+@pytest.mark.asyncio
+async def test_start_failure_retains_controller_until_safe_stop_then_allows_setup(
+    monkeypatch,
+) -> None:
+    controller_id = "test-start-failure-owner-fence"
+
+    class _Channel:
+        async def diagnostics(self):
+            return {"link_active": False, "parent_connected": False}
+
+    class _Link:
+        is_connected = True
+
+        async def disconnect(self, *, timeout):
+            del timeout
+            raise TransportError("disconnect not confirmed")
+
+    channel = _Channel()
+    first = ThinRpcBackend(
+        _hass(),
+        controller_id=controller_id,
+        channel=channel,
+        profile=object(),
+        capability=ThinRpcCapability("request", "poll", "diagnostics"),
+    )
+    first.link = _Link()
+
+    async def fail_establish(*, attach):
+        assert attach is True
+        raise HomeAssistantError("startup probe failed")
+
+    monkeypatch.setattr(first, "_establish_session", fail_establish)
+    with pytest.raises(HomeAssistantError, match="startup probe failed"):
+        await first.async_start()
+
+    assert first._owns_controller is True
+    assert controller_id in first._active_controllers
+
+    second = ThinRpcBackend(
+        _hass(),
+        controller_id=controller_id,
+        channel=channel,
+        profile=object(),
+        capability=ThinRpcCapability("request", "poll", "diagnostics"),
+    )
+    with pytest.raises(HomeAssistantError, match="already owned"):
+        await second.async_start()
+    assert second._owns_controller is False
+    assert controller_id in second._active_controllers
+
+    first.link.is_connected = False
+    await first.async_stop()
+    assert first._owns_controller is False
+    assert controller_id not in first._active_controllers
+
+    async def succeed_establish(*, attach):
+        assert attach is True
+
+    monkeypatch.setattr(second, "_establish_session", succeed_establish)
+    await second.async_start()
+    assert second.started is True
+    assert second._owns_controller is True
+    await second.async_stop()
 
 
 class _Client:

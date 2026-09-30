@@ -69,8 +69,9 @@ _THIN_SECURE_TIMEOUT = 20.0
 _THIN_DISCONNECT_TIMEOUT = 5.0
 _PAIR_ACTION_SUFFIX = "openrbus_pair"
 _DISCONNECT_ACTION_SUFFIX = "openrbus_disconnect"
-MAX_FRAME_TRACE_ENTRIES = 4096
-MAX_FRAME_TRACE_BYTES = 1024 * 1024
+MAX_FRAME_TRACE_ENTRIES = 128
+MAX_FRAME_TRACE_BYTES = 24 * 1024
+MAX_READ_OPERATION_TRACE_ENTRIES = 32
 _TRACE_KINDS = frozenset({"request", "response", "event"})
 _TRACE_OPS = frozenset(
     {
@@ -88,6 +89,10 @@ _TRACE_OPS = frozenset(
         "PAIR_ENCRYPT",
         "SUBSCRIBE",
         "WRITE",
+        "WRITE_CHAR",
+        "WRITE_DESCRIPTOR",
+        "READ_CHAR",
+        "READ_DESCRIPTOR",
         "SCAN",
         "SCAN_RESULT",
         "SCAN_DONE",
@@ -136,10 +141,50 @@ _SESSION_SUBTYPES = frozenset(
     {"not_ready", "link_lost", "timeout", "not_secure", "transport"}
 )
 _BATCH_SUBTYPES = frozenset({"malformed", "abort", "fallback"})
+_ABORT_CATEGORIES = {
+    0x06010000: "unsupported_access",
+    0x06010001: "read_not_supported",
+    0x06010002: "write_not_supported",
+    0x06020000: "object_missing",
+    0x06090011: "subindex_missing",
+    0x06070010: "type_length_mismatch",
+}
+_VISIBLE_STRING_ERROR_SUBTYPES = frozenset(
+    {"visible_string_non_ascii", "visible_string_overlength", "visible_string_other"}
+)
+_SAFE_BATCH_EXCEPTION_TYPES = (
+    (CanOpenAbortError, "canopen_abort"),
+    (RequestTimeoutError, "request_timeout"),
+    (TransportError, "transport_error"),
+    (ProtocolError, "protocol_error"),
+    (RegistryError, "registry_error"),
+    (ValidationError, "validation_error"),
+    (TimeoutError, "timeout"),
+    (HomeAssistantError, "home_assistant_error"),
+    (ValueError, "value_error"),
+    (TypeError, "type_error"),
+    # Keep the diagnostic vocabulary finite and payload-free.  These are
+    # common failures raised by optional batch implementations and adapters.
+    (AssertionError, "assertion_error"),
+    (AttributeError, "attribute_error"),
+    (IndexError, "index_error"),
+    (KeyError, "key_error"),
+    (LookupError, "lookup_error"),
+    (NotImplementedError, "not_implemented_error"),
+    (OSError, "os_error"),
+    (RuntimeError, "runtime_error"),
+    (UnicodeError, "unicode_error"),
+)
 
 
 def _tag_read_error(
-    error: HomeAssistantError, error_class: str, error_subtype: str | None = None
+    error: HomeAssistantError,
+    error_class: str,
+    error_subtype: str | None = None,
+    *,
+    abort_category: str | None = None,
+    decode_subtype: str | None = None,
+    batch_exception_type: str | None = None,
 ) -> HomeAssistantError:
     """Attach a fixed, non-sensitive classification for aggregate diagnostics."""
     if error_class in {"item", "abort", "batch", "decode", "correlation", "session"}:
@@ -147,7 +192,43 @@ def _tag_read_error(
     allowed = _SESSION_SUBTYPES if error_class == "session" else _BATCH_SUBTYPES
     if error_subtype in allowed:
         error._openrbus_error_subtype = error_subtype  # type: ignore[attr-defined]
+    if abort_category in set(_ABORT_CATEGORIES.values()) | {"other_abort"}:
+        error._openrbus_abort_category = abort_category  # type: ignore[attr-defined]
+    if decode_subtype in _VISIBLE_STRING_ERROR_SUBTYPES:
+        error._openrbus_decode_subtype = decode_subtype  # type: ignore[attr-defined]
+    if batch_exception_type in _SAFE_BATCH_EXCEPTION_TYPES_VALUES:
+        error._openrbus_batch_exception_type = batch_exception_type  # type: ignore[attr-defined]
     return error
+
+
+_SAFE_BATCH_EXCEPTION_TYPES_VALUES = frozenset(
+    value for _error_type, value in _SAFE_BATCH_EXCEPTION_TYPES
+) | {"other_error"}
+
+
+def safe_batch_exception_type(error: BaseException) -> str:
+    """Map an exception to an allowlisted label without exposing its message."""
+    for error_type, value in _SAFE_BATCH_EXCEPTION_TYPES:
+        if isinstance(error, error_type):
+            return value
+    return "other_error"
+
+
+def _abort_category(error: CanOpenAbortError) -> str:
+    return _ABORT_CATEGORIES.get(error.code, "other_abort")
+
+
+def _visible_string_decode_subtype(
+    error: BaseException, raw: bytes, expected_length: int
+) -> str:
+    if len(raw) > expected_length:
+        return "visible_string_overlength"
+    cause: BaseException | None = error
+    while cause is not None:
+        if isinstance(cause, UnicodeDecodeError):
+            return "visible_string_non_ascii"
+        cause = cause.__cause__
+    return "visible_string_other"
 
 
 def _read_error_class(error: BaseException) -> str:
@@ -196,12 +277,64 @@ def _read_error_subtype(error: BaseException, error_class: str) -> str | None:
     return "transport"
 
 
+def _safe_proxy_read_counters(snapshot: object) -> dict[str, Any]:
+    """Keep only counters and request/epoch tokens needed for a read join."""
+    if not isinstance(snapshot, Mapping):
+        return {}
+    safe: dict[str, Any] = {}
+    for key in (
+        "epoch",
+        "epoch_count",
+        "rpc_requests",
+        "last_rpc_request_id",
+        "att_write_char_calls",
+        "att_write_char_callbacks",
+        "last_att_write_request_id",
+        "notification_callbacks",
+        "last_notification_epoch",
+        "last_notification_seq",
+        "last_notification_request_id",
+        "event_queue_depth",
+        "poll_frame_calls",
+        "poll_nonempty_returns",
+        "poll_empty_returns",
+        "poll_queue_depth_before",
+        "poll_queue_depth_after",
+        "total_frames_enqueued",
+    ):
+        value = snapshot.get(key)
+        if type(value) is int and 0 <= value <= 4_294_967_295:
+            safe[key] = value
+    for key in (
+        "last_att_write_status",
+        "last_rpc_request_op",
+    ):
+        value = snapshot.get(key)
+        if isinstance(value, str) and value in {
+            "none", "WRITE_CHAR", "success", "failed", "waiting_notification"
+        }:
+            safe[key] = value
+    for key in (
+        "host_ready",
+        "parent_connected",
+        "link_active",
+        "last_att_write_waiting_notification",
+        "last_notification_nonempty",
+        "last_notification_matched_request",
+    ):
+        value = snapshot.get(key)
+        if type(value) is bool:
+            safe[key] = value
+    return safe
+
+
 async def _read_objects_batched(
     client: RawObjectClient,
     addresses: Sequence[ObjectAddress],
     *,
     node: int,
     record_batch_event: Callable[[str], None] | None = None,
+    record_failure_trace: Callable[[str, BaseException], None] | None = None,
 ) -> tuple[GenericRead | HomeAssistantError, ...]:
     """Read one node's poll group through Core's size-aware GetList path.
 
@@ -236,18 +369,42 @@ async def _read_objects_batched(
             ValidationError,
             ValueError,
         ) as error:
+            if record_failure_trace is not None:
+                record_failure_trace("single_fallback", error)
             error_class = _read_error_class(error)
+            definition = _REGISTRY.find(address)
+            details: dict[str, str | None] = {}
+            if isinstance(error, CanOpenAbortError):
+                details["abort_category"] = _abort_category(error)
+            if (
+                isinstance(error, ValidationError)
+                and definition is not None
+                and definition.wire.storage.value == "VISIBLESTRING"
+            ):
+                raw_value = raw if isinstance(locals().get("raw"), bytes) else b""
+                details["decode_subtype"] = _visible_string_decode_subtype(
+                    error, raw_value, definition.wire.length
+                )
             return _tag_read_error(
                 HomeAssistantError(str(error)),
                 error_class,
                 _read_error_subtype(error, error_class),
+                **details,
             )
         return GenericRead(node, address, raw, value)
 
-    async def read_singles() -> tuple[GenericRead | HomeAssistantError, ...]:
+    async def read_singles(
+        *, batch_exception_type: str | None = None
+    ) -> tuple[GenericRead | HomeAssistantError, ...]:
         if record_batch_event is not None:
             record_batch_event("fallback")
-        return tuple([await read_single(address) for address in addresses])
+        results: list[GenericRead | HomeAssistantError] = []
+        for address in addresses:
+            value = await read_single(address)
+            if isinstance(value, HomeAssistantError) and batch_exception_type:
+                value._openrbus_batch_exception_type = batch_exception_type  # type: ignore[attr-defined]
+            results.append(value)
+        return tuple(results)
 
     try:
         items = tuple(
@@ -263,6 +420,8 @@ async def _read_objects_batched(
         ValidationError,
         ValueError,
     ) as error:
+        if record_failure_trace is not None:
+            record_failure_trace("get_list_call", error)
         # A dropped prepared link is not a GetList capability failure.  Do
         # not immediately issue hundreds of single reads on that dead
         # transport; return object-local errors so the Thin backend can fence
@@ -285,9 +444,11 @@ async def _read_objects_batched(
         # A failed batch must not make every otherwise readable entity
         # unavailable; retry each object through Core's ordinary validated
         # read path while preserving per-object errors.
-        return await read_singles()
+        return await read_singles(batch_exception_type=safe_batch_exception_type(error))
 
     if len(raw_results) != len(addresses):
+        if record_failure_trace is not None:
+            record_failure_trace("response_parse", ValueError("invalid result count"))
         # Do not turn a malformed/partial batch response into a permanent
         # outage for every typed entity.  Retry each requested object through
         # Core's single-object path and preserve any object-local error.
@@ -313,14 +474,30 @@ async def _read_objects_batched(
             results.append(fallback)
             continue
         try:
+            definition = _REGISTRY.get(address)
             value = decode_value(
-                _REGISTRY.get(address),
+                definition,
                 address,
                 raw_result.raw,
                 registry=_REGISTRY,
             )
         except (RegistryError, ValidationError, ValueError) as error:
-            results.append(_tag_read_error(HomeAssistantError(str(error)), "decode"))
+            decode_subtype = None
+            if (
+                isinstance(error, ValidationError)
+                and definition.wire.storage.value == "VISIBLESTRING"
+                and raw_result.raw is not None
+            ):
+                decode_subtype = _visible_string_decode_subtype(
+                    error, raw_result.raw, definition.wire.length
+                )
+            results.append(
+                _tag_read_error(
+                    HomeAssistantError(str(error)),
+                    "decode",
+                    decode_subtype=decode_subtype,
+                )
+            )
         else:
             results.append(GenericRead(node, address, raw_result.raw, value))
     return tuple(results)
@@ -915,12 +1092,14 @@ class HomeAssistantThinGattChannel:
         self.client = client
         self.capability = capability
         self.frame_trace = frame_trace
+        self.trace_context: str | None = None
         self.target_address = target_address
         self.target_address_type = target_address_type
         self.setup_metrics = setup_metrics
         self._setup_handle_lookup_request_ids: set[int] = set()
         self.effective_access_levels: dict[int, int] = {}
         self._frame_trace_bytes = 0
+        self.trace_operation_id: int | None = None
 
     def _record_frame(self, direction: str, frame: Mapping[str, Any]) -> None:
         """Record only bounded, categorical correlation evidence when enabled."""
@@ -945,9 +1124,22 @@ class HomeAssistantThinGattChannel:
                 if type(frame.get("epoch")) is int
                 else None,
                 "request_id_present": type(frame.get("request_id")) is int,
+                "request_id": (
+                    frame.get("request_id")
+                    if type(frame.get("request_id")) is int
+                    and 0 <= frame["request_id"] <= 4_294_967_295
+                    else None
+                ),
+                "context": (
+                    self.trace_context
+                    if self.trace_context in {"discovery"}
+                    else None
+                ),
                 "status": status if status in _TRACE_STATUSES else None,
                 "state_category": state if state in _TRACE_STATES else None,
             }
+            if type(self.trace_operation_id) is int and 1 <= self.trace_operation_id <= 4_294_967_295:
+                record["read_operation_id"] = self.trace_operation_id
             encoded_size = (
                 len(
                     json.dumps(
@@ -1371,7 +1563,14 @@ class ThinRpcBackend:
         self.transport: ThinGattMessageTransport | None = None
         self.client: RawObjectClient | None = None
         self._diagnostics: Mapping[str, Any] = {}
+        self._next_read_operation_id = 0
+        self._read_operation_trace: list[dict[str, Any]] = []
+        self._last_read_transport_capture: dict[str, Any] | None = None
+        self._batch_failure_trace_captured = False
+        self._last_batch_failure_trace: dict[str, Any] | None = None
         self._started = False
+        self._owns_controller = False
+        self._last_disconnect_snapshot: dict[str, bool | int | None] = {}
         self._lifecycle_lock = asyncio.Lock()
         self._read_lock = asyncio.Lock()
 
@@ -1413,6 +1612,7 @@ class ThinRpcBackend:
                     "Thin-RPC controller is already owned by another entry"
                 )
             self._active_controllers.add(self.controller_id)
+            self._owns_controller = True
             setup_started = asyncio.get_running_loop().time()
             try:
                 if self.channel is None:
@@ -1460,37 +1660,69 @@ class ThinRpcBackend:
                     # remains strict and no frame is reinterpreted.
                     await self._establish_session(attach=True)
                 self._started = True
-            except asyncio.CancelledError:
+            except asyncio.CancelledError as error:
                 elapsed = (asyncio.get_running_loop().time() - setup_started) * 1000
                 self.setup_metrics.record_setup_cancellation(elapsed)
-                self._active_controllers.discard(self.controller_id)
-                self._started = False
+                try:
+                    await self._cleanup_owned_session()
+                except BaseException as cleanup_error:  # noqa: BLE001 - preserve cancellation while reporting cleanup failure
+                    error.add_note(
+                        "Thin-RPC startup cleanup did not prove physical disconnect: "
+                        f"{type(cleanup_error).__name__}; controller ownership retained"
+                    )
                 raise
-            except Exception:
-                self._active_controllers.discard(self.controller_id)
-                if self.link is not None and self.link.is_connected:
-                    with contextlib.suppress(Exception):
-                        await self.link.disconnect()
-                else:
-                    with contextlib.suppress(Exception):
-                        await self._force_disconnect_current_session()
-                self._started = False
-                self.transport = None
-                self.client = None
-                self.session = None
-                self.link = None
-                self.authentication = None
+            except Exception as error:
+                try:
+                    await self._cleanup_owned_session()
+                except BaseException as cleanup_error:  # noqa: BLE001 - preserve cancellation while reporting cleanup failure
+                    error.add_note(
+                        "Thin-RPC startup cleanup did not prove physical disconnect: "
+                        f"{type(cleanup_error).__name__}; controller ownership retained"
+                    )
                 raise
+
+    async def _cleanup_owned_session(self) -> None:
+        """Release a claimed controller only after the physical link is down."""
+
+        if not self._owns_controller:
+            return
+        channel = getattr(self, "channel", None)
+        link = getattr(self, "link", None)
+        session = getattr(self, "session", None)
+        if channel is None and (
+            session is not None or getattr(link, "is_connected", False)
+        ):
+            raise HomeAssistantError(
+                "Thin-RPC cannot prove physical disconnect without its channel"
+            )
+        if link is not None and getattr(link, "is_connected", False):
+            await link.disconnect(timeout=min(5.0, self.timeout))
+        elif session is not None:
+            await self._force_disconnect_current_session()
+        # DISCONNECT acknowledgement alone is not the safety boundary. Keep
+        # ownership until the proxy confirms both physical connection flags
+        # are down. If diagnostics/time out, the controller remains reserved.
+        await self._wait_for_physical_disconnect()
+        if session is not None:
+            retire = getattr(session, "retire", None)
+            if callable(retire):
+                retire()
+        self._started = False
+        self.transport = None
+        self.client = None
+        self.session = None
+        self.link = None
+        self.authentication = None
+        self._active_controllers.discard(self.controller_id)
+        self._owns_controller = False
 
     async def _force_disconnect_current_session(self) -> bool:
         """Fence a partially prepared session using its observed identity."""
 
-        if self.channel is None or self.session is None:
+        if self._current_disconnect_guard_outcome() is not None:
             return False
         identity = self.session.identity
         epoch = self.session.epoch
-        if identity is None or type(epoch) is not int or epoch <= 0:
-            return False
         await self.channel.action(
             self.capability.request_service,
             {
@@ -1504,6 +1736,21 @@ class ThinRpcBackend:
         )
         self.session.retire()
         return True
+
+    def _current_disconnect_guard_outcome(self) -> str | None:
+        """Return the fixed reason the current session cannot be fenced."""
+
+        if getattr(self, "channel", None) is None:
+            return "missing_channel"
+        session = getattr(self, "session", None)
+        if session is None:
+            return "missing_session"
+        if getattr(session, "identity", None) is None:
+            return "missing_identity"
+        epoch = getattr(session, "epoch", None)
+        if type(epoch) is not int or epoch <= 0:
+            return "invalid_epoch"
+        return None
 
     async def _arm_pairing_if_configured(self) -> bool:
         """Arm the existing ESPHome pairing state machine before first connect.
@@ -1620,29 +1867,37 @@ class ThinRpcBackend:
         # Read operations take the read lock before the lifecycle lock.  Stop
         # follows the same order so it cannot retire a session mid-request.
         async with self._read_lock, self._lifecycle_lock:
-            try:
-                if self.link is not None and self.link.is_connected:
-                    await self.link.disconnect(timeout=min(5.0, self.timeout))
-                    await self._wait_for_physical_disconnect()
-            finally:
-                self._started = False
-                self.transport = None
-                self.client = None
-                self.session = None
-                self.link = None
-                self.authentication = None
-                self._active_controllers.discard(self.controller_id)
+            await self._cleanup_owned_session()
 
     async def _wait_for_physical_disconnect(
         self, *, recovery_fence: RecoveryFenceMetrics | None = None
     ) -> None:
         """Fence reload until the ESP reports that the BLE link is down."""
 
-        if self.channel is None:
+        channel = getattr(self, "channel", None)
+        if channel is None:
             return
         deadline = asyncio.get_running_loop().time() + _THIN_DISCONNECT_TIMEOUT
         while True:
-            snapshot = await self.channel.diagnostics()
+            snapshot = await channel.diagnostics()
+            epoch = snapshot.get("epoch")
+            self._last_disconnect_snapshot = {
+                "link_active": (
+                    snapshot.get("link_active")
+                    if type(snapshot.get("link_active")) is bool
+                    else None
+                ),
+                "parent_connected": (
+                    snapshot.get("parent_connected")
+                    if type(snapshot.get("parent_connected")) is bool
+                    else None
+                ),
+                "epoch": (
+                    epoch
+                    if type(epoch) is int and 0 <= epoch <= 2_147_483_647
+                    else None
+                ),
+            }
             if recovery_fence is not None:
                 recovery_fence.record_state(
                     snapshot.get("link_active"), snapshot.get("parent_connected")
@@ -1687,18 +1942,32 @@ class ThinRpcBackend:
     ) -> GenericRead:
         async with self._read_lock:
             await self._ensure_session_ready()
+            operation_id = self._begin_read_operation("single")
+            outcome = "error"
             try:
-                raw = await self.client.read_raw(node, address)
-            except TransportError:
-                # A read is idempotent.  If the secure link disappears after
-                # the readiness check, fence that generation and retry this
-                # one object once on a fully re-prepared session.  Do not
-                # turn this into an unbounded reconnect loop.
-                await self._recover_after_transport_loss()
-                raw = await self.client.read_raw(node, address)
-            definition = _REGISTRY.get(address)
-            value = decode_value(definition, address, raw, registry=_REGISTRY)
-            return GenericRead(node, address, raw, value)
+                try:
+                    raw = await self.client.read_raw(node, address)
+                except TransportError as transport_error:
+                    # A read is idempotent. If the secure link disappears
+                    # after the readiness check, fence and retry this one
+                    # object once on a fully re-prepared session.
+                    try:
+                        await self._recover_after_transport_loss()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as recovery_error:  # noqa: BLE001
+                        transport_error.add_note(
+                            "Thin-RPC recovery failed: "
+                            f"{type(recovery_error).__name__}"
+                        )
+                        raise transport_error
+                    raw = await self.client.read_raw(node, address)
+                definition = _REGISTRY.get(address)
+                value = decode_value(definition, address, raw, registry=_REGISTRY)
+                outcome = "success"
+                return GenericRead(node, address, raw, value)
+            finally:
+                self._end_read_operation(operation_id, "single", outcome)
 
     async def async_discover_devices(self) -> tuple[DeviceIdentity, ...]:
         """Run Core's read-only bus discovery through the prepared Thin link."""
@@ -1707,16 +1976,31 @@ class ThinRpcBackend:
             await self.async_start()
             if self.client is None:
                 raise HomeAssistantError("Thin-RPC backend is not started")
+            trace_channel = getattr(self, "channel", None)
+            if isinstance(trace_channel, HomeAssistantThinGattChannel):
+                trace_channel.trace_context = "discovery"
             try:
                 identities = await discover_devices(self.client, include_serial=False)
-            except TransportError:
+            except TransportError as transport_error:
                 # Bus discovery is read-only and idempotent. Use the same
                 # single-generation recovery as ordinary reads when a
                 # request (notably the initial 1f85:00 assignment bound)
                 # loses its Thin-GATT response, then repeat discovery once.
                 # Protocol/abort errors are not retried or reinterpreted.
-                await self._recover_after_transport_loss()
+                try:
+                    await self._recover_after_transport_loss()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as recovery_error:  # noqa: BLE001
+                    transport_error.add_note(
+                        "Thin-RPC recovery failed: "
+                        f"{type(recovery_error).__name__}"
+                    )
+                    raise transport_error
                 identities = await discover_devices(self.client, include_serial=False)
+            finally:
+                if isinstance(trace_channel, HomeAssistantThinGattChannel):
+                    trace_channel.trace_context = None
             scoped: list[DeviceIdentity] = []
             for identity in identities:
                 try:
@@ -1742,48 +2026,220 @@ class ThinRpcBackend:
             return tuple(scoped)
 
     async def async_read_objects(
-        self, addresses: Sequence[ObjectAddress], *, node: int = 0xFF
+        self, addresses: Sequence[ObjectAddress], *, node: int = 0xFF,
+        trace_failure: bool = False,
     ) -> tuple[GenericRead | HomeAssistantError, ...]:
         async with self._read_lock:
             await self._ensure_session_ready()
-            values = await _read_objects_batched(
-                self.client,
-                addresses,
-                node=node,
-                record_batch_event=self._record_batch_event,
+            capture_failure = (
+                trace_failure and not self._batch_failure_trace_captured
             )
-            # A transport/session failure can occur after the initial
-            # readiness check. Retry only those object-local failures once
-            # after Core/Thin-RPC re-prepares the secure session; protocol,
-            # decode, and unsupported-object errors remain object-local.
-            failed = tuple(
-                address
-                for address, value in zip(addresses, values, strict=True)
-                if isinstance(value, HomeAssistantError)
-                and (
-                    _read_error_class(value) == "session"
-                    or "link lost" in str(value).casefold()
+            before: Mapping[str, Any] = {}
+            if capture_failure and isinstance(self.channel, HomeAssistantThinGattChannel):
+                try:
+                    before = await self.channel.diagnostics()
+                except Exception:  # noqa: BLE001 - diagnostics cannot mask polling
+                    before = {}
+            operation_id = self._begin_read_operation("batch")
+            outcome = "error"
+            failure: dict[str, str] = {}
+
+            def record_failure(stage: str, error: BaseException) -> None:
+                if stage in {
+                    "get_list_call", "response_parse", "single_fallback",
+                    "recovery_dispatch",
+                }:
+                    failure["stage"] = stage
+                    failure["exception_class"] = safe_batch_exception_type(error)
+
+            try:
+                values = await _read_objects_batched(
+                    self.client,
+                    addresses,
+                    node=node,
+                    record_batch_event=self._record_batch_event,
+                    record_failure_trace=record_failure if capture_failure else None,
                 )
-            )
-            if failed:
-                # A transport failure can occur after Core's request loop
-                # returns its object-local error while the session still
-                # appears connected (including a request timeout). Fence the
-                # current generation and build one fresh session before
-                # retrying only failed objects; successful batch values
-                # remain untouched.
-                await self._recover_after_transport_loss()
-                # Re-run the same Core-partitioned batches on the fresh
-                # session.  ``read_many_raw`` already bounds each GetList;
-                # single-object fallback remains available for gateways that
-                # reject a specific batch or item.
-                recovered = await _read_objects_batched(self.client, failed, node=node)
-                recovered_by_address = dict(zip(failed, recovered, strict=True))
-                values = tuple(
-                    recovered_by_address.get(address, value)
+                # A transport/session failure can occur after the initial
+                # readiness check. Retry only those object-local failures once
+                # after Core/Thin-RPC re-prepares the secure session; protocol,
+                # decode, and unsupported-object errors remain object-local.
+                failed = tuple(
+                    address
                     for address, value in zip(addresses, values, strict=True)
+                    if isinstance(value, HomeAssistantError)
+                    and (
+                        _read_error_class(value) == "session"
+                        or "link lost" in str(value).casefold()
+                    )
                 )
-            return values
+                if failed:
+                    # Retry only after a complete session boundary; preserve
+                    # successful results from the first pass.
+                    try:
+                        await self._recover_after_transport_loss()
+                    except Exception as error:
+                        record_failure("recovery_dispatch", error)
+                        raise
+                    recovered = await _read_objects_batched(
+                        self.client, failed, node=node
+                    )
+                    recovered_by_address = dict(zip(failed, recovered, strict=True))
+                    values = tuple(
+                        recovered_by_address.get(address, value)
+                        for address, value in zip(addresses, values, strict=True)
+                    )
+                outcome = (
+                    "partial_error"
+                    if any(isinstance(value, HomeAssistantError) for value in values)
+                    else "success"
+                )
+                if capture_failure and failure and outcome != "success":
+                    await self._finish_batch_failure_trace(
+                        operation_id, failure, before
+                    )
+                return values
+            except Exception as error:
+                if capture_failure:
+                    if not failure:
+                        record_failure("get_list_call", error)
+                    await self._finish_batch_failure_trace(
+                        operation_id, failure, before
+                    )
+                raise
+            finally:
+                self._end_read_operation(operation_id, "batch", outcome)
+
+    async def _finish_batch_failure_trace(
+        self,
+        operation_id: int,
+        failure: Mapping[str, str],
+        before: Mapping[str, Any],
+    ) -> None:
+        """Store one bounded, payload-free fast-poll failure attribution."""
+        if self._batch_failure_trace_captured or not failure:
+            return
+        self._batch_failure_trace_captured = True
+        if isinstance(self.channel, HomeAssistantThinGattChannel):
+            self.channel.trace_operation_id = None
+        try:
+            after = await self.channel.diagnostics() if self.channel is not None else {}
+        except Exception:  # noqa: BLE001 - diagnostics must not mask poll outcome
+            after = {}
+        frames = getattr(self, "frame_trace", None) or ()
+        correlated = [
+            item for item in frames
+            if isinstance(item, dict) and item.get("read_operation_id") == operation_id
+        ]
+        last = correlated[-1] if correlated else {}
+        record: dict[str, Any] = {
+            "operation_id": operation_id,
+            "stage": failure.get("stage"),
+            "exception_class": failure.get("exception_class"),
+            "before": _safe_proxy_read_counters(before),
+            "after": _safe_proxy_read_counters(after),
+        }
+        for key in ("request_id", "epoch"):
+            value = last.get(key)
+            if type(value) is not int:
+                # The diagnostic frame ring stops accepting rows when its
+                # fixed capacity is full.  Under the read lock the proxy's
+                # last request token still belongs to this operation window.
+                value = (
+                    after.get("last_rpc_request_id")
+                    if key == "request_id"
+                    else after.get("epoch")
+                )
+            if type(value) is int and 0 <= value <= 4_294_967_295:
+                record[key] = value
+        self._last_batch_failure_trace = record
+
+    def _begin_read_operation(self, kind: str) -> int:
+        """Tag the serialized bus operation without retaining its address."""
+        current_id = getattr(self, "_next_read_operation_id", 0)
+        self._next_read_operation_id = (
+            1
+            if current_id >= 4_294_967_295
+            else current_id + 1
+        )
+        operation_id = self._next_read_operation_id
+        if isinstance(getattr(self, "channel", None), HomeAssistantThinGattChannel):
+            self.channel.trace_operation_id = operation_id
+        return operation_id
+
+    def _end_read_operation(
+        self, operation_id: int, kind: str, outcome: str
+    ) -> None:
+        """Close one bounded trace interval and release the channel tag."""
+        if (
+            isinstance(getattr(self, "channel", None), HomeAssistantThinGattChannel)
+            and self.channel.trace_operation_id == operation_id
+        ):
+            self.channel.trace_operation_id = None
+        epoch = getattr(getattr(self, "session", None), "epoch", None)
+        record: dict[str, Any] = {
+            "operation_id": operation_id,
+            "kind": kind if kind in {"single", "batch"} else "other",
+            "outcome": outcome
+            if outcome in {"success", "partial_error", "error"}
+            else "error",
+        }
+        if type(epoch) is int and 0 <= epoch <= 4_294_967_295:
+            record["epoch"] = epoch
+        trace = getattr(self, "_read_operation_trace", None)
+        if not isinstance(trace, list):
+            trace = []
+            self._read_operation_trace = trace
+        trace.append(record)
+        del trace[:-MAX_READ_OPERATION_TRACE_ENTRIES]
+
+    async def async_read_object_with_transport_capture(
+        self, address: ObjectAddress, *, node: int = 0xFF
+    ) -> GenericRead:
+        """Read one object and bracket its transport with proxy counters.
+
+        This opt-in path is for a single read-only diagnostic probe. Holding
+        the backend read lock through the post-snapshot prevents another bus
+        read from replacing the proxy's last GATT callback/notification IDs.
+        """
+        async with self._read_lock:
+            await self._ensure_session_ready()
+            if not isinstance(self.channel, HomeAssistantThinGattChannel):
+                raise HomeAssistantError("Thin-RPC diagnostic capture is unavailable")
+            before = await self.channel.diagnostics()
+            operation_id = self._begin_read_operation("single")
+            outcome = "error"
+            try:
+                try:
+                    raw = await self.client.read_raw(node, address)
+                except TransportError as transport_error:
+                    try:
+                        await self._recover_after_transport_loss()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as recovery_error:  # noqa: BLE001
+                        transport_error.add_note(
+                            "Thin-RPC recovery failed: "
+                            f"{type(recovery_error).__name__}"
+                        )
+                        raise transport_error
+                    raw = await self.client.read_raw(node, address)
+                definition = _REGISTRY.get(address)
+                value = decode_value(definition, address, raw, registry=_REGISTRY)
+                outcome = "success"
+                return GenericRead(node, address, raw, value)
+            finally:
+                self._end_read_operation(operation_id, "single", outcome)
+                try:
+                    after = await self.channel.diagnostics()
+                except Exception:  # noqa: BLE001 - capture never changes read result
+                    after = {}
+                self._last_read_transport_capture = {
+                    "operation_id": operation_id,
+                    "outcome": outcome,
+                    "before": _safe_proxy_read_counters(before),
+                    "after": _safe_proxy_read_counters(after),
+                }
 
     async def _recover_after_transport_loss(self) -> None:
         """Fence one failed transport generation and prepare exactly one replacement."""
@@ -1793,15 +2249,30 @@ class ThinRpcBackend:
         # delivered, so no old identity, handles, or authorization proof can
         # be reused by the replacement session.
         fence_metrics = getattr(self, "_recovery_fence_metrics", None)
+        session_epoch = getattr(getattr(self, "session", None), "epoch", None)
         if fence_metrics is not None:
-            fence_metrics.begin_attempt()
+            fence_metrics.begin_attempt(session_epoch)
         dispatch_acknowledged = False
+        guard_outcome: str | None = None
         try:
-            dispatch_acknowledged = (
-                await self._force_disconnect_current_session()
-            ) is True
-        except Exception:  # noqa: BLE001 - physical state remains authoritative
+            guard_outcome = self._current_disconnect_guard_outcome()
+            if guard_outcome is None:
+                dispatch_acknowledged = (
+                    await self._force_disconnect_current_session()
+                ) is True
+            if fence_metrics is not None:
+                fence_metrics.record_disconnect_outcome(
+                    guard_outcome
+                    or (
+                        "service_completed"
+                        if dispatch_acknowledged
+                        else "service_not_acknowledged"
+                    )
+                )
+        except Exception as error:  # noqa: BLE001 - physical state remains authoritative
             dispatch_acknowledged = False
+            if fence_metrics is not None:
+                fence_metrics.record_disconnect_outcome("service_exception", error)
         if fence_metrics is not None:
             fence_metrics.record_dispatch(dispatch_acknowledged)
         if self.session is not None:
@@ -1814,9 +2285,61 @@ class ThinRpcBackend:
         # old link; its delayed disconnect event then invalidates the new
         # session.  Use the same physical boundary and bounded queue drain as
         # the controlled lifecycle paths before opening the new epoch.
+        if guard_outcome in {"missing_identity", "invalid_epoch", "missing_session"}:
+            # With no usable identity, a Thin DISCONNECT cannot name the
+            # physical connection. Use only the sibling action of the exact
+            # configured pairing action; its proxy template targets the same
+            # BLE client and clears the stale pairing arm before disconnect.
+            disconnect_action = self._configured_disconnect_action()
+            if disconnect_action is None or not _has_esphome_service(
+                self.hass, disconnect_action
+            ):
+                raise HomeAssistantError(
+                    "Thin-RPC recovery has no scoped ESPHome disconnect action"
+                )
+            try:
+                await self.hass.services.async_call(
+                    "esphome", disconnect_action, {}, blocking=True
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                raise HomeAssistantError(
+                    "Thin-RPC scoped physical disconnect action failed"
+                ) from error
+            if fence_metrics is not None:
+                fence_metrics.record_dispatch(True)
         await self._wait_for_physical_disconnect(recovery_fence=fence_metrics)
         await self._drain_stale_frames()
+        # openrbus_disconnect clears the proxy's passkey and armed flag. The
+        # ordinary pair action re-establishes that state and independently
+        # confirms its own physical disconnect boundary before CONNECT.
+        if guard_outcome in {"missing_identity", "invalid_epoch", "missing_session"}:
+            await self._arm_pairing_if_configured()
         await self._ensure_session_ready()
+
+    def _configured_disconnect_action(self) -> str | None:
+        """Return only the disconnect sibling of the configured pair action."""
+
+        pair_action = getattr(self, "pair_action", None)
+        capability = getattr(self, "capability", None)
+        request_service = getattr(capability, "request_service", None)
+        if (
+            not isinstance(pair_action, str)
+            or not pair_action.endswith(_PAIR_ACTION_SUFFIX)
+            or not isinstance(request_service, str)
+        ):
+            return None
+        pair_scope = _service_prefix(pair_action, _PAIR_ACTION_SUFFIX)
+        request_scope = _service_prefix(
+            request_service, "_openrbus_gatt_rpc_request"
+        )
+        # Bare service names carry no device identity. A fallback is safe
+        # only when both configured services have the same explicit ESPHome
+        # prefix, which binds the disconnect action to this RPC controller.
+        if not pair_scope or pair_scope != request_scope:
+            return None
+        return pair_action[: -len(_PAIR_ACTION_SUFFIX)] + _DISCONNECT_ACTION_SUFFIX
 
     async def _ensure_session_ready(self) -> None:
         """Start or reprepare the Thin-RPC session before a read."""
@@ -1828,22 +2351,15 @@ class ThinRpcBackend:
             return
         try:
             await self._establish_session(attach=True)
-        except Exception:
-            if self.session is not None and self.session.connected:
-                with contextlib.suppress(Exception):
-                    await self.session.disconnect()
-            # A failed reprepare has torn down the usable client.  Release the
-            # lifecycle ownership as well; otherwise ``async_start`` would
-            # short-circuit on this stale started flag and every later poll
-            # would fail permanently instead of making a fresh bounded setup
-            # attempt.
-            self._started = False
-            self._active_controllers.discard(self.controller_id)
-            self.session = None
-            self.link = None
-            self.authentication = None
-            self.transport = None
-            self.client = None
+        except Exception as error:
+            try:
+                async with self._lifecycle_lock:
+                    await self._cleanup_owned_session()
+            except BaseException as cleanup_error:  # noqa: BLE001 - preserve cancellation while reporting cleanup failure
+                error.add_note(
+                    "Thin-RPC reprepare cleanup did not prove physical disconnect: "
+                    f"{type(cleanup_error).__name__}; controller ownership retained"
+                )
             raise
 
     async def async_write_object(
@@ -2033,6 +2549,14 @@ class ThinRpcBackend:
             "setup_response": self.setup_metrics.diagnostics(),
             "recovery_fence": self._recovery_fence_metrics.diagnostics(),
             "batch_events": dict(self._batch_event_counts),
+            "thin_rpc_frame_trace": tuple(getattr(self, "frame_trace", None) or ()),
+            "read_operation_trace": tuple(getattr(self, "_read_operation_trace", ())),
+            "last_read_transport_capture": getattr(
+                self, "_last_read_transport_capture", None
+            ),
+            "last_batch_failure_trace": getattr(
+                self, "_last_batch_failure_trace", None
+            ),
         }
 
     def _record_batch_event(self, event: str) -> None:

@@ -18,7 +18,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from openrbus.catalog import catalog_for_node
 from openrbus.client import WritePlan
 from openrbus.discovery import DeviceIdentity, resolve_device_identity
-from openrbus.errors import OpenRBusError
+from openrbus.errors import CanOpenAbortError, OpenRBusError
 from openrbus.inventory import DeviceInventory, ObjectCapability, ObjectSupport
 from openrbus.protocol.canip import ObjectAddress
 from openrbus.registry import AccessOperation, Registry
@@ -59,10 +59,12 @@ from .const import (
 from .transport import (
     NativeBluetoothBackend,
     ThinRpcBackend,
+    _abort_category,
     _read_error_class,
     _read_error_subtype,
     controller_prefix,
     resolve_thin_rpc_capability,
+    safe_batch_exception_type,
 )
 from .validity import RegisterValidityTracker
 from .zones import (
@@ -77,11 +79,55 @@ _COORDINATOR_INSTANCE_IDS = itertools.count(1)
 _POLL_BATCH_SIZE = 32
 _DIAGNOSTIC_ITEM_FAILURE_LIMIT = 16
 _ERROR_CLASSES = ("abort", "item", "batch", "decode", "correlation", "session")
+_ABORT_CATEGORIES = frozenset(
+    {
+        "unsupported_access",
+        "read_not_supported",
+        "write_not_supported",
+        "object_missing",
+        "subindex_missing",
+        "type_length_mismatch",
+        "other_abort",
+    }
+)
+_DECODE_DETAILS = frozenset(
+    {"visible_string_non_ascii", "visible_string_overlength", "visible_string_other"}
+)
+_SAFE_BATCH_EXCEPTION_TYPES = frozenset(
+    {
+        "canopen_abort",
+        "request_timeout",
+        "transport_error",
+        "protocol_error",
+        "registry_error",
+        "validation_error",
+        "timeout",
+        "home_assistant_error",
+        "value_error",
+        "type_error",
+        "assertion_error",
+        "attribute_error",
+        "index_error",
+        "key_error",
+        "lookup_error",
+        "not_implemented_error",
+        "os_error",
+        "runtime_error",
+        "unicode_error",
+        "other_error",
+    }
+)
 _DIAGNOSTIC_COUNTER_MAX = 2_147_483_647
 
 
 def _tag_poll_error(
-    error: HomeAssistantError, error_class: str, error_subtype: str | None = None
+    error: HomeAssistantError,
+    error_class: str,
+    error_subtype: str | None = None,
+    *,
+    abort_category: str | None = None,
+    decode_subtype: str | None = None,
+    batch_exception_type: str | None = None,
 ) -> HomeAssistantError:
     if error_class in _ERROR_CLASSES:
         error._openrbus_error_class = error_class  # type: ignore[attr-defined]
@@ -92,6 +138,12 @@ def _tag_poll_error(
     )
     if error_subtype in allowed:
         error._openrbus_error_subtype = error_subtype  # type: ignore[attr-defined]
+    if abort_category in _ABORT_CATEGORIES:
+        error._openrbus_abort_category = abort_category  # type: ignore[attr-defined]
+    if decode_subtype in _DECODE_DETAILS:
+        error._openrbus_decode_subtype = decode_subtype  # type: ignore[attr-defined]
+    if batch_exception_type in _SAFE_BATCH_EXCEPTION_TYPES:
+        error._openrbus_batch_exception_type = batch_exception_type  # type: ignore[attr-defined]
     return error
 
 
@@ -141,7 +193,6 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         self._entry_id = entry.entry_id
         self._instance_id = next(_COORDINATOR_INSTANCE_IDS)
         self._diagnostic_error_counts = dict.fromkeys(_ERROR_CLASSES, 0)
-        self._diagnostic_item_failures: list[dict[str, int | str]] = []
         self._diagnostic_item_failures: list[dict[str, int | str]] = []
         self._diagnostic_poll_count = 0
         self.backend_mode = backend
@@ -283,7 +334,9 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
 
     async def async_start(self) -> None:
         started = asyncio.get_running_loop().time()
+        backend_start_invoked = False
         try:
+            backend_start_invoked = True
             await self._backend.async_start()
             effective = getattr(self._backend, "effective_access_level", None)
             if effective is not None:
@@ -306,12 +359,28 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 self._inventory_for(identity) for identity in self.devices
             )
             await self._async_discover_zone_profiles()
-        except asyncio.CancelledError:
-            setup_metrics = getattr(self._backend, "setup_metrics", None)
-            record_cancel = getattr(setup_metrics, "record_setup_cancellation", None)
-            if callable(record_cancel):
-                elapsed = (asyncio.get_running_loop().time() - started) * 1000
-                record_cancel(elapsed)
+        except BaseException as error:
+            # Backend setup can succeed before the remaining discovery and
+            # catalog projection steps fail. Stop the partially initialized
+            # backend before Home Assistant retries this entry. Thin-RPC stop
+            # retains controller ownership unless its physical disconnect
+            # fence succeeds, so a cleanup failure remains fail-closed.
+            if backend_start_invoked:
+                try:
+                    await self._backend.async_stop()
+                except BaseException as cleanup_error:  # noqa: BLE001 - preserve cancellation while reporting cleanup failure
+                    error.add_note(
+                        "OpenRBus backend cleanup failed after startup error: "
+                        f"{type(cleanup_error).__name__}"
+                    )
+            if isinstance(error, asyncio.CancelledError):
+                setup_metrics = getattr(self._backend, "setup_metrics", None)
+                record_cancel = getattr(
+                    setup_metrics, "record_setup_cancellation", None
+                )
+                if callable(record_cancel):
+                    elapsed = (asyncio.get_running_loop().time() - started) * 1000
+                    record_cancel(elapsed)
             raise
 
     async def _async_discover_zone_profiles(self) -> None:
@@ -380,7 +449,43 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         return inventory
 
     async def async_shutdown(self) -> None:
-        await self._backend.async_stop()
+        backend = self._backend
+        session = getattr(backend, "session", None)
+        epoch = getattr(session, "epoch", None)
+        if type(epoch) is not int or not 0 <= epoch <= _DIAGNOSTIC_COUNTER_MAX:
+            epoch = None
+        _LOGGER.warning(
+            "UNLOAD_TRACE event=coordinator_shutdown_begin controller_owned=%s "
+            "backend_started=%s session_epoch=%s link_connected=%s",
+            bool(getattr(backend, "_owns_controller", False)),
+            bool(getattr(backend, "started", False)),
+            epoch,
+            bool(getattr(getattr(backend, "link", None), "is_connected", False)),
+        )
+        try:
+            await backend.async_stop()
+        except BaseException as error:
+            flags = getattr(backend, "_last_disconnect_snapshot", {})
+            _LOGGER.warning(
+                "UNLOAD_TRACE event=coordinator_shutdown_error error_type=%s "
+                "controller_owned=%s physical_link_active=%s "
+                "physical_parent_connected=%s physical_epoch=%s",
+                type(error).__name__,
+                bool(getattr(backend, "_owns_controller", False)),
+                flags.get("link_active") if isinstance(flags, dict) else None,
+                flags.get("parent_connected") if isinstance(flags, dict) else None,
+                flags.get("epoch") if isinstance(flags, dict) else None,
+            )
+            raise
+        flags = getattr(backend, "_last_disconnect_snapshot", {})
+        _LOGGER.warning(
+            "UNLOAD_TRACE event=coordinator_shutdown_complete controller_owned=%s "
+            "physical_link_active=%s physical_parent_connected=%s physical_epoch=%s",
+            bool(getattr(backend, "_owns_controller", False)),
+            flags.get("link_active") if isinstance(flags, dict) else None,
+            flags.get("parent_connected") if isinstance(flags, dict) else None,
+            flags.get("epoch") if isinstance(flags, dict) else None,
+        )
         await super().async_shutdown()
 
     async def async_read_object(
@@ -388,14 +493,27 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
     ) -> GenericRead:
         return await self._backend.async_read_object(address, node=node)
 
+    async def async_read_object_with_transport_capture(
+        self, address: ObjectAddress, *, node: int = 0xFF
+    ) -> GenericRead:
+        capture = getattr(self._backend, "async_read_object_with_transport_capture", None)
+        if not callable(capture):
+            raise HomeAssistantError("Transport capture requires Thin-RPC")
+        return await capture(address, node=node)
+
     async def read_raw(
         self, node: int, address: ObjectAddress, *, timeout=None
     ) -> bytes:
         return (await self.async_read_object(address, node=node)).raw_value
 
     async def async_read_objects(
-        self, addresses: tuple[ObjectAddress, ...], *, node: int = 0xFF
+        self, addresses: tuple[ObjectAddress, ...], *, node: int = 0xFF,
+        trace_failure: bool = False,
     ) -> tuple[GenericRead | HomeAssistantError, ...]:
+        if trace_failure and isinstance(self._backend, ThinRpcBackend):
+            return await self._backend.async_read_objects(
+                addresses, node=node, trace_failure=True
+            )
         return await self._backend.async_read_objects(addresses, node=node)
 
     async def async_write_object(
@@ -546,6 +664,7 @@ class OpenRBusPollingCoordinator(
             ),
             0,
         )
+        self._diagnostic_item_failures: list[dict[str, int | str]] = []
         self._diagnostic_available_items = 0
         self._diagnostic_total_items = 0
         self._diagnostic_availability_delta = 0
@@ -566,7 +685,45 @@ class OpenRBusPollingCoordinator(
             ),
             "availability_delta": self._diagnostic_availability_delta,
             "item_failures": tuple(self._diagnostic_item_failures),
+            "quarantined_count": self.validity.quarantined_count,
+            "quarantined_items": self.validity.quarantined_snapshot(),
         }
+
+    def _object_failure_scope(self, node: int) -> object | None:
+        """Scope deterministic failures to identity, access, and session epoch."""
+
+        if getattr(self.parent, "backend_mode", None) != BACKEND_THIN_RPC:
+            return None
+        identity = next(
+            (
+                getattr(inventory, "identity", None)
+                for inventory in getattr(self.parent, "inventories", ())
+                if getattr(getattr(inventory, "identity", None), "node", None)
+                == node
+            ),
+            None,
+        )
+        access = getattr(self.parent, "effective_access_levels", {}).get(node)
+        backend = getattr(self.parent, "_backend", None)
+        session = getattr(backend, "session", None)
+        epoch = getattr(session, "epoch", None)
+        generation = getattr(backend, "_session_generation", None)
+        if (
+            identity is None
+            or type(access) is not int
+            or not 1 <= access <= 3
+            or type(epoch) is not int
+            or epoch <= 0
+            or type(generation) is not int
+            or generation <= 0
+        ):
+            return None
+        scope = (access, identity, generation, epoch)
+        try:
+            hash(scope)
+        except TypeError:
+            return None
+        return scope
 
     @staticmethod
     def _bump(value: int, amount: int = 1) -> int:
@@ -616,6 +773,8 @@ class OpenRBusPollingCoordinator(
         self,
     ) -> dict[tuple[int, ObjectAddress], GenericRead | HomeAssistantError]:
         grouped: dict[int, list[ObjectAddress]] = defaultdict(list)
+        scopes: dict[tuple[int, ObjectAddress], object | None] = {}
+        quarantined_keys: set[tuple[int, ObjectAddress]] = set()
         try:
             entity_registry = er.async_get(self.hass)
         except (AttributeError, TypeError):
@@ -650,6 +809,12 @@ class OpenRBusPollingCoordinator(
                             entries.append(entry)
             if not _should_poll_registry_entries(tuple(entries)):
                 continue
+            key = (node, address)
+            scope = self._object_failure_scope(node)
+            scopes[key] = scope
+            if self.validity.is_quarantined(key, scope):
+                quarantined_keys.add(key)
+                continue
             grouped[node].append(address)
         result: dict[tuple[int, ObjectAddress], GenericRead | HomeAssistantError] = {}
         self._diagnostic_poll_count = self._bump(self._diagnostic_poll_count)
@@ -666,10 +831,20 @@ class OpenRBusPollingCoordinator(
             for start in range(0, len(addresses), _POLL_BATCH_SIZE):
                 chunk = tuple(addresses[start : start + _POLL_BATCH_SIZE])
                 try:
-                    values = await self.parent.async_read_objects(chunk, node=node)
+                    if self.group == "fast":
+                        values = await self.parent.async_read_objects(
+                            chunk, node=node, trace_failure=True
+                        )
+                    else:
+                        values = await self.parent.async_read_objects(chunk, node=node)
                 except Exception as error:  # noqa: BLE001 - keep one batch isolated
                     error_class = _read_error_class(error)
                     error_subtype = _read_error_subtype(error, error_class)
+                    abort_category = (
+                        _abort_category(error)
+                        if isinstance(error, CanOpenAbortError)
+                        else None
+                    )
                     if error_class in {"abort", "item"}:
                         error_subtype = (
                             "abort" if error_class == "abort" else "fallback"
@@ -682,6 +857,8 @@ class OpenRBusPollingCoordinator(
                             HomeAssistantError("OpenRBus poll batch failed"),
                             error_class,
                             error_subtype,
+                            abort_category=abort_category,
+                            batch_exception_type=safe_batch_exception_type(error),
                         )
                         for _ in chunk
                     )
@@ -741,6 +918,21 @@ class OpenRBusPollingCoordinator(
                             }
                             if error_subtype:
                                 failure["error_subtype"] = error_subtype
+                            abort_category = getattr(
+                                value, "_openrbus_abort_category", None
+                            )
+                            if abort_category in _ABORT_CATEGORIES:
+                                failure["abort_category"] = abort_category
+                            decode_subtype = getattr(
+                                value, "_openrbus_decode_subtype", None
+                            )
+                            if decode_subtype in _DECODE_DETAILS:
+                                failure["decode_subtype"] = decode_subtype
+                            batch_exception_type = getattr(
+                                value, "_openrbus_batch_exception_type", None
+                            )
+                            if batch_exception_type in _SAFE_BATCH_EXCEPTION_TYPES:
+                                failure["batch_exception_type"] = batch_exception_type
                             self._diagnostic_item_failures.append(failure)
                             del self._diagnostic_item_failures[
                                 :-_DIAGNOSTIC_ITEM_FAILURE_LIMIT
@@ -752,6 +944,9 @@ class OpenRBusPollingCoordinator(
                         (node, address),
                         value,
                         self.register_metadata.get((node, address)),
+                    )
+                    self.validity.quarantine_deterministic_failure(
+                        (node, address), value, scopes.get((node, address))
                     )
                     if observation.expired:
                         self._disable_expired_entities(node, address)
@@ -768,7 +963,7 @@ class OpenRBusPollingCoordinator(
             min(_DIAGNOSTIC_COUNTER_MAX, available - old_available),
         )
         self._diagnostic_available_items = available
-        self._diagnostic_total_items = len(result)
+        self._diagnostic_total_items = len(result) + len(quarantined_keys)
         return result
 
     def _disable_expired_entities(self, node: int, address: ObjectAddress) -> None:

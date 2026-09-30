@@ -46,6 +46,21 @@ retains it after disconnect. A replacement connection is not prepared until
 both live connection booleans are false. These fields report the final sample
 from a bounded wait and do not alter that gate.
 
+When the current Thin session has no usable identity or epoch, recovery may
+use one sibling `openrbus_disconnect` action only when its explicit ESPHome
+service prefix matches the configured Thin-RPC request service prefix. Bare
+or mismatched service names do not establish proxy scope and fail closed. The
+proxy action clears its pairing PIN/armed state and requests disconnect;
+neither its service response nor local session retirement proves the physical
+boundary. Recovery waits until both connection booleans are false, drains the
+old frame queue, then invokes the configured pair action to restore pairing
+state and confirm that action's own physical disconnect boundary before
+preparing the replacement session. A missing action, action error,
+cancellation, or physical-boundary timeout prevents reprepare. Writes remain
+single-attempt operations. If read recovery fails, the triggering transport
+error remains the reported error and receives only the fixed recovery
+exception class as a note.
+
 ## Initial setup service-response evidence
 
 Config-entry diagnostics also include `coordinator.setup_response` while the

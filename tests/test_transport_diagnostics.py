@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from homeassistant.exceptions import HomeAssistantError
+from openrbus.discovery import DeviceIdentity
 from openrbus.errors import (
     CanOpenAbortError,
     RequestTimeoutError,
@@ -24,9 +25,13 @@ from custom_components.openrbus.coordinator import (
     OpenRBusPollingCoordinator,
 )
 from custom_components.openrbus.diagnostics import (
+    _safe_batch_failure_trace,
     _safe_poll_snapshot,
+    _safe_read_operation_trace,
+    _safe_read_transport_capture,
     _safe_recovery_fence,
     _safe_setup_response,
+    _safe_thin_rpc_frame_trace,
     async_get_config_entry_diagnostics,
 )
 from custom_components.openrbus.setup_observability import (
@@ -34,11 +39,193 @@ from custom_components.openrbus.setup_observability import (
     SetupResponseMetrics,
 )
 from custom_components.openrbus.transport import (
+    _abort_category,
     _read_error_class,
     _read_error_subtype,
     _tag_read_error,
+    _visible_string_decode_subtype,
+    safe_batch_exception_type,
 )
 from custom_components.openrbus.validity import RegisterValidityTracker
+
+
+def test_thin_rpc_frame_trace_allows_only_bounded_categorical_fields() -> None:
+    trace = _safe_thin_rpc_frame_trace(
+        [
+            {
+                "direction": "request",
+                "kind": "request",
+                "op": "WRITE_CHAR",
+                "seq": 4,
+                "epoch": 2,
+                "request_id_present": True,
+                "request_id": 17,
+                "context": "discovery",
+                "read_operation_id": 9,
+                "status": "OK",
+                "state_category": "connected",
+                "payload": "private bytes",
+                "peer": "private identity",
+            },
+            {
+                "direction": "private",
+                "kind": "private",
+                "op": "private",
+                "request_id": -1,
+                "context": "private",
+            },
+        ]
+    )
+
+    assert trace == [
+        {
+            "direction": "request",
+            "kind": "request",
+            "op": "WRITE_CHAR",
+            "request_id_present": True,
+            "seq": 4,
+            "epoch": 2,
+            "request_id": 17,
+            "status": "OK",
+            "state_category": "connected",
+            "context": "discovery",
+            "read_operation_id": 9,
+        },
+        {"direction": "other", "kind": "other", "op": "other", "request_id_present": False},
+    ]
+
+
+def test_read_transport_diagnostics_retain_only_safe_join_fields() -> None:
+    operations = _safe_read_operation_trace(
+        [
+            {
+                "operation_id": 7,
+                "kind": "single",
+                "outcome": "success",
+                "epoch": 12,
+                "address": "private object",
+            },
+            {"operation_id": -1, "address": "private object"},
+        ]
+    )
+    capture = _safe_read_transport_capture(
+        {
+            "operation_id": 7,
+            "outcome": "success",
+            "before": {
+                "epoch": 12,
+                "rpc_requests": 25,
+                "att_write_char_calls": 10,
+                "last_notification_seq": 4,
+                "notification_callbacks": 40,
+                "total_frames_enqueued": 39,
+                "poll_frame_calls": 75,
+                "poll_nonempty_returns": 38,
+                "poll_empty_returns": 37,
+                "event_queue_depth": 1,
+                "last_enqueued_kind": "response",
+                "last_enqueued_op": "WRITE_CHAR",
+                "peer": "private device",
+            },
+            "after": {
+                "epoch": 12,
+                "rpc_requests": 26,
+                "last_rpc_request_id": 26,
+                "last_att_write_request_id": 26,
+                "last_att_write_status": "success",
+                "last_notification_epoch": 12,
+                "last_notification_seq": 5,
+                "last_notification_request_id": 0,
+                "last_notification_nonempty": True,
+                "last_notification_matched_request": False,
+                "notification_callbacks": 41,
+                "total_frames_enqueued": 40,
+                "poll_frame_calls": 76,
+                "poll_nonempty_returns": 39,
+                "poll_empty_returns": 37,
+                "event_queue_depth": 0,
+                "last_enqueued_kind": "response",
+                "last_enqueued_op": "WRITE_CHAR",
+                "value": "private payload",
+                "raw_frame": "private payload",
+                "last_enqueued_op_with_payload": "private payload",
+            },
+        }
+    )
+    assert operations == [
+        {"operation_id": 7, "kind": "single", "outcome": "success", "epoch": 12}
+    ]
+    assert capture["operation_id"] == 7
+    assert capture["before"]["epoch"] == 12
+    assert capture["after"]["last_att_write_request_id"] == 26
+    assert capture["after"]["last_notification_seq"] == 5
+    assert capture["before"]["total_frames_enqueued"] == 39
+    assert capture["after"]["poll_nonempty_returns"] == 39
+    assert capture["after"]["last_enqueued_kind"] == "response"
+    assert capture["after"]["last_enqueued_op"] == "WRITE_CHAR"
+    assert "peer" not in repr(capture)
+    assert "value" not in repr(capture)
+    assert "raw_frame" not in repr(capture)
+    assert "last_enqueued_op_with_payload" not in repr(capture)
+
+
+def test_safe_batch_failure_trace_is_payload_free_and_bounded() -> None:
+    safe = _safe_batch_failure_trace(
+        {
+            "operation_id": 23,
+            "stage": "single_fallback",
+            "exception_class": "transport_error",
+            "request_id": 81,
+            "epoch": 7,
+            "before": {"notification_callbacks": 5, "payload": "secret"},
+            "after": {"notification_callbacks": 6, "last_notification_request_id": 81},
+            "message": "private details",
+        }
+    )
+    assert safe == {
+        "operation_id": 23,
+        "stage": "single_fallback",
+        "exception_class": "transport_error",
+        "request_id": 81,
+        "epoch": 7,
+        "before": {"notification_callbacks": 5},
+        "after": {
+            "notification_callbacks": 6,
+            "last_notification_request_id": 81,
+        },
+    }
+    assert _safe_batch_failure_trace(
+        {"operation_id": 23, "stage": "private_stage", "exception_class": "transport_error"}
+    ) == {}
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_reads_pollers_from_hass_entry_registry_fallback() -> None:
+    poller = SimpleNamespace(
+        diagnostics=lambda: {
+            "poll_count": 2,
+            "failed_items": 3,
+            "availability_delta": -3,
+            "error_counts": {"item": 3},
+        }
+    )
+    coordinator = SimpleNamespace(
+        devices=(), inventories=(), discovery_error=None, _backend=None,
+        _cycle_id=0, last_update_success=True, _diagnostic_poll_count=0,
+    )
+    entry = SimpleNamespace(
+        runtime_data=coordinator,
+        entry_id="entry-1",
+        domain="openrbus",
+        data={"backend": "esphome_thin_rpc"},
+        options={},
+    )
+    hass = SimpleNamespace(
+        data={"openrbus_polling_coordinators": {"entry-1": {"fast": poller}}}
+    )
+    result = await async_get_config_entry_diagnostics(hass, entry)
+    assert result["coordinator"]["poll_groups"]["fast"]["error_counts"]["item"] == 3
+    assert result["coordinator"]["poll_groups"]["fast"]["availability_delta"] == -3
 
 
 @pytest.mark.parametrize(
@@ -71,6 +258,41 @@ def test_session_error_subtype_is_fixed_and_redacted(error, expected) -> None:
     assert _read_error_subtype(error, "session") == expected
 
 
+@pytest.mark.parametrize(
+    ("code", "expected"),
+    [
+        (0x06010000, "unsupported_access"),
+        (0x06010001, "read_not_supported"),
+        (0x06020000, "object_missing"),
+        (0x06090011, "subindex_missing"),
+        (0xDEADBEEF, "other_abort"),
+    ],
+)
+def test_abort_code_is_reduced_to_allowlisted_category(code, expected) -> None:
+    assert _abort_category(CanOpenAbortError(code, "private message")) == expected
+
+
+def test_visible_string_decode_subtype_uses_only_shape_and_exception_class() -> None:
+    with pytest.raises(UnicodeDecodeError) as caught:
+        b"\xff".decode("ascii")
+    non_ascii = ValidationError("private address and value")
+    non_ascii.__cause__ = caught.value
+    assert _visible_string_decode_subtype(non_ascii, b"\xff", 20) == "visible_string_non_ascii"
+    assert (
+        _visible_string_decode_subtype(ValidationError("private"), b"x" * 21, 20)
+        == "visible_string_overlength"
+    )
+    assert (
+        _visible_string_decode_subtype(ValidationError("private"), b"x", 20)
+        == "visible_string_other"
+    )
+    assert safe_batch_exception_type(RequestTimeoutError("private target")) == "request_timeout"
+    assert safe_batch_exception_type(HomeAssistantError("private details")) == "home_assistant_error"
+    assert safe_batch_exception_type(RuntimeError("private details")) == "runtime_error"
+    assert safe_batch_exception_type(AttributeError("private details")) == "attribute_error"
+    assert safe_batch_exception_type(NotImplementedError("private details")) == "not_implemented_error"
+
+
 def test_poll_snapshot_keeps_only_bounded_redacted_numbers() -> None:
     snapshot = _safe_poll_snapshot(
         {
@@ -98,6 +320,9 @@ def test_poll_snapshot_keeps_only_bounded_redacted_numbers() -> None:
                     "error": "private abort text",
                     "payload": "private bytes",
                     "device": "private identity",
+                    "abort_category": "object_missing",
+                    "decode_subtype": "visible_string_non_ascii",
+                    "batch_exception_type": "request_timeout",
                 }
             ],
             "message": "private controller identifier",
@@ -121,6 +346,17 @@ def test_poll_snapshot_keeps_only_bounded_redacted_numbers() -> None:
     }
     opted_in = _safe_poll_snapshot(
         {
+            "quarantined_count": 1,
+            "quarantined_items": [
+                {
+                    "node": 1,
+                    "index": 0x430E,
+                    "subindex": 0,
+                    "error_class": "abort",
+                    "subtype": "unsupported_access",
+                    "scope": "private identity/access/session",
+                }
+            ],
             "item_failures": [
                 {
                     "node": 4,
@@ -128,15 +364,36 @@ def test_poll_snapshot_keeps_only_bounded_redacted_numbers() -> None:
                     "subindex": 2,
                     "error_class": "item",
                     "error": "private abort text",
+                    "abort_category": "object_missing",
+                    "decode_subtype": "visible_string_non_ascii",
+                    "batch_exception_type": "request_timeout",
                 }
             ]
         },
         include_item_failures=True,
     )
     assert opted_in == {
+        "quarantined_count": 1,
         "item_failures": [
-            {"node": 4, "index": 0x1234, "subindex": 2, "error_class": "item"}
-        ]
+            {
+                "node": 4,
+                "index": 0x1234,
+                "subindex": 2,
+                "error_class": "item",
+                "abort_category": "object_missing",
+                "decode_subtype": "visible_string_non_ascii",
+                "batch_exception_type": "request_timeout",
+            }
+        ],
+        "quarantined_items": [
+            {
+                "node": 1,
+                "index": 0x430E,
+                "subindex": 0,
+                "error_class": "abort",
+                "subtype": "unsupported_access",
+            }
+        ],
     }
     assert "private" not in repr(opted_in)
 
@@ -212,6 +469,12 @@ def test_recovery_fence_metrics_are_bounded_and_privacy_safe() -> None:
             "state_unavailable": 0,
         },
         "last_timeout_class": "parent_connected",
+        "disconnect_attempt": {
+            "attempt_id": 1,
+            "session_epoch": None,
+            "outcome": None,
+            "exception_class": None,
+        },
     }
     assert _safe_recovery_fence({**snapshot, "identity": "private"}) == snapshot
 
@@ -282,6 +545,13 @@ async def test_entry_diagnostics_add_only_redacted_transport_metrics() -> None:
                         "state_unavailable": 0,
                     },
                     "last_timeout_class": "link_active",
+                    "disconnect_attempt": {
+                        "attempt_id": 2,
+                        "session_epoch": 17,
+                        "outcome": "service_exception",
+                        "exception_class": "TimeoutError",
+                        "exception_message": "private detail",
+                    },
                     "private": "must not escape",
                 },
                 "target_address": "AA:BB:CC:DD:EE:FF",
@@ -312,6 +582,12 @@ async def test_entry_diagnostics_add_only_redacted_transport_metrics() -> None:
                 "state_unavailable": 0,
             },
             "last_timeout_class": "link_active",
+            "disconnect_attempt": {
+                "attempt_id": 2,
+                "session_epoch": 17,
+                "outcome": "service_exception",
+                "exception_class": "TimeoutError",
+            },
         },
     }
     assert diagnostics["coordinator"]["coordinator_error_counts"]["correlation"] == 2
@@ -417,6 +693,103 @@ async def test_poll_group_tracks_fixed_error_classes_and_availability_delta() ->
         }
         for index, error_class in enumerate(classes)
     )
+
+
+@pytest.mark.asyncio
+async def test_poll_group_quarantines_object_failures_until_scope_changes() -> None:
+    address = ObjectAddress(0x430E, 0)
+    abort = HomeAssistantError("private detail")
+    abort._openrbus_error_class = "abort"
+    abort._openrbus_abort_category = "unsupported_access"
+    identity = DeviceIdentity(
+        node=1,
+        device_code=4,
+        parameter_number=7,
+        name="private identity label",
+    )
+    backend = SimpleNamespace(
+        _session_generation=2, session=SimpleNamespace(epoch=7)
+    )
+
+    class _Parent:
+        config_entry = SimpleNamespace(
+            entry_id="entry", options={"diagnostics_enabled": True}
+        )
+        backend_mode = "esphome_thin_rpc"
+        inventories = (SimpleNamespace(identity=identity),)
+        _backend = backend
+
+        def __init__(self):
+            self.effective_access_levels = {1: 1}
+            self.read_calls = 0
+
+        async def async_read_objects(self, addresses, *, node):
+            assert node == 1
+            assert addresses == (address,)
+            self.read_calls += 1
+            return (abort,)
+
+    parent = _Parent()
+    poller = OpenRBusPollingCoordinator.__new__(OpenRBusPollingCoordinator)
+    poller.hass = SimpleNamespace()
+    poller.parent = parent
+    poller.group = "standard"
+    poller.registers = ((1, address),)
+    poller.register_metadata = {}
+    poller.validity = RegisterValidityTracker(__import__("datetime").timedelta(hours=1))
+    poller._diagnostic_poll_count = 0
+    poller._diagnostic_success_items = 0
+    poller._diagnostic_failed_items = 0
+    poller._diagnostic_error_counts = dict.fromkeys(
+        ("abort", "item", "batch", "decode", "correlation", "session"), 0
+    )
+    poller._diagnostic_subtype_counts = dict.fromkeys(
+        (
+            "session.not_ready",
+            "session.link_lost",
+            "session.timeout",
+            "session.not_secure",
+            "session.transport",
+            "batch.malformed",
+            "batch.abort",
+            "batch.fallback",
+        ),
+        0,
+    )
+    poller._diagnostic_item_failures = []
+    poller._diagnostic_available_items = 0
+    poller._diagnostic_total_items = 0
+    poller._diagnostic_availability_delta = 0
+    poller._poll_in_progress_count = 0
+
+    first = await poller._async_poll_data()
+    assert isinstance(first[(1, address)], HomeAssistantError)
+    assert parent.read_calls == 1
+    assert poller.diagnostics()["error_counts"]["abort"] == 1
+    assert poller.diagnostics()["quarantined_items"] == (
+        {
+            "node": 1,
+            "index": 0x430E,
+            "subindex": 0,
+            "error_class": "abort",
+            "subtype": "unsupported_access",
+        },
+    )
+
+    # An unchanged access, identity, and epoch leaves the object unavailable
+    # without issuing another bus read or adding another poll error.
+    second = await poller._async_poll_data()
+    assert second == {}
+    assert parent.read_calls == 1
+    assert poller.diagnostics()["error_counts"]["abort"] == 1
+    assert poller.diagnostics()["unavailable_items"] == 1
+
+    # A new transport epoch forces one fresh read and records any repeat.
+    backend.session.epoch = 8
+    third = await poller._async_poll_data()
+    assert isinstance(third[(1, address)], HomeAssistantError)
+    assert parent.read_calls == 2
+    assert poller.diagnostics()["error_counts"]["abort"] == 2
 
 
 @pytest.mark.asyncio

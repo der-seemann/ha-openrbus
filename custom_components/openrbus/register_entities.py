@@ -469,6 +469,13 @@ def ensure_polling_coordinators(
     if cache is None:
         cache = {}
         parent._openrbus_polling_coordinators = cache
+    # Diagnostics may receive a config-entry runtime object that is not the
+    # same platform setup object on every supported Home Assistant version.
+    # Keep the live pollers in the integration's HA-owned registry as the
+    # authoritative fallback, keyed by entry ID.
+    hass.data.setdefault(f"{DOMAIN}_polling_coordinators", {})[
+        parent.config_entry.entry_id
+    ] = cache
     for group, group_addresses in addresses.items():
         existing = cache.get(group)
         if existing is None:
