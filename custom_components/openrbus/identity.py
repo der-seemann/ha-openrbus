@@ -9,18 +9,23 @@ from .const import CONF_BLE_DEVICE
 
 
 def stable_gateway_id(parent: Any) -> str:
-    """Hash the configured physical BLE gateway address for stable HA IDs."""
+    """Hash the configured BLE target identifier for stable HA IDs."""
     configured = dict(parent.config_entry.data)
     configured.update(getattr(parent.config_entry, "options", {}))
     target = configured.get(CONF_BLE_DEVICE)
     if not isinstance(target, str) or not target.strip():
         raise ValueError("OpenRBus stable entity IDs require a configured BLE target")
-    canonical = target.strip().replace(":", "").replace("-", "").casefold()
-    if len(canonical) != 12 or any(
-        char not in "0123456789abcdef" for char in canonical
-    ):
-        raise ValueError("OpenRBus stable entity IDs require a valid BLE MAC target")
-    digest = hashlib.sha256(bytes.fromhex(canonical)).hexdigest()[:32]
+    canonical = target.strip().casefold()
+    compact = canonical.replace(":", "").replace("-", "")
+    if len(compact) == 12 and all(char in "0123456789abcdef" for char in compact):
+        # Preserve IDs already assigned to conventional Bluetooth MACs.
+        identity = bytes.fromhex(compact)
+    else:
+        # HA adapters may expose stable platform identifiers such as UUIDs.
+        # These are valid BLE targets in the config flow and must produce the
+        # same deterministic IDs without exposing the identifier itself.
+        identity = canonical.encode("utf-8")
+    digest = hashlib.sha256(identity).hexdigest()[:32]
     return f"gateway:{digest}"
 
 

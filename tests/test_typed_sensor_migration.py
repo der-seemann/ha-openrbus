@@ -51,6 +51,7 @@ def _row(address="346a:00"):
     return SimpleNamespace(
         readable=True,
         writable=True,
+        safety="validated",
         address=ObjectAddress.parse(address),
         access_level_evidence={
             "write": {"known": True, "complete": True, "levels": ["User"]}

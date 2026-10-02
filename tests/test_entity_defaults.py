@@ -111,6 +111,178 @@ def test_manual_entity_override_changes_default_but_keeps_zone_safety(
     assert not register_entities.entity_enabled_by_default(parent, identity, row)
 
 
+def test_inferred_source_rw_rows_default_off_until_capability_is_discovered(
+    monkeypatch,
+) -> None:
+    address = ObjectAddress.parse("346a:04")
+    row = _register("346a:04", levels=("User",))
+    row.writable = True
+    row.write_declared = True
+    row.safety = "source_supported"
+    identity = SimpleNamespace(node=3)
+    runtime_node = SimpleNamespace(identity=identity, capabilities={})
+    parent = SimpleNamespace(
+        inventories=(runtime_node,),
+        entity_overrides={},
+        zone_profiles={},
+        zone_overrides={},
+    )
+    monkeypatch.setattr(register_entities, "entity_unique_id", lambda *_args: "uid")
+
+    assert not register_entities.entity_enabled_by_default(parent, identity, row)
+    runtime_node.capabilities[address] = object()
+    assert register_entities.entity_enabled_by_default(parent, identity, row)
+
+
+@pytest.mark.parametrize(
+    ("read_level", "write_enabled"),
+    ((1, False), (1, True), (3, False), (3, True)),
+)
+def test_unobserved_source_write_declaration_is_independent_of_control_projection(
+    monkeypatch, read_level: int, write_enabled: bool
+) -> None:
+    """Poll defaults use source facts through all HA access projections."""
+    row = _register("346a:04", levels=("User",))
+    # The HA write option determines sensor vs control projection; it does not
+    # change the source declaration that controls absent-slot poll defaults.
+    row.writable = write_enabled
+    row.write_declared = True  # Core source evidence retains the base fact.
+    row.safety = "source_supported"
+    identity = SimpleNamespace(node=3)
+    runtime_node = SimpleNamespace(
+        identity=identity,
+        capabilities={ObjectAddress.parse("346a:00"): object()},
+    )
+    parent = SimpleNamespace(
+        inventories=(runtime_node,),
+        entity_overrides={},
+        zone_profiles={},
+        zone_overrides={},
+        configured_access_level=read_level,
+        write_enabled=write_enabled,
+    )
+    monkeypatch.setattr(register_entities, "entity_unique_id", lambda *_args: "uid")
+
+    # The canonical array head does not prove that concrete subindex 04 exists.
+    assert not register_entities.entity_enabled_by_default(parent, identity, row)
+    # A stale enabled registry projection must not bypass the poll-selection
+    # guard for this absent inferred write.
+    assert not register_entities._poll_row_selected(parent, identity, row)
+
+    runtime_node.capabilities[ObjectAddress.parse("346a:04")] = object()
+    assert register_entities.entity_enabled_by_default(parent, identity, row)
+    assert register_entities._poll_row_selected(parent, identity, row)
+
+
+def test_readonly_array_rows_keep_normal_basic_read_default(monkeypatch) -> None:
+    row = _register("346a:04", levels=("User",))
+    row.writable = False
+    row.write_declared = False
+    row.safety = "read_only"
+    identity = SimpleNamespace(node=3)
+    parent = SimpleNamespace(
+        inventories=(SimpleNamespace(identity=identity, capabilities={}),),
+        entity_overrides={},
+        zone_profiles={},
+        zone_overrides={},
+    )
+    monkeypatch.setattr(register_entities, "entity_unique_id", lambda *_args: "uid")
+
+    assert register_entities.entity_enabled_by_default(parent, identity, row)
+    # An explicit saved picker enable is the only absent-slot bypass.
+    assert register_entities._poll_row_selected(parent, identity, row)
+
+
+def test_manual_override_can_select_an_inferred_source_rw_row(monkeypatch) -> None:
+    row = _register("346a:04", levels=("User",))
+    row.writable = True
+    row.write_declared = True
+    row.safety = "source_supported"
+    identity = SimpleNamespace(node=3)
+    parent = SimpleNamespace(
+        inventories=(SimpleNamespace(identity=identity, capabilities={}),),
+        entity_overrides={"uid": True},
+        zone_profiles={},
+        zone_overrides={},
+    )
+    monkeypatch.setattr(register_entities, "entity_unique_id", lambda *_args: "uid")
+
+    assert register_entities.entity_enabled_by_default(parent, identity, row)
+
+
+def test_existing_inferred_rw_rows_reconcile_defaults_and_preserve_user_choices(
+    monkeypatch,
+) -> None:
+    identity = SimpleNamespace(node=3)
+    runtime_node = SimpleNamespace(identity=identity, capabilities={})
+    row = _register("346a:04", levels=("User",))
+    row.writable = True
+    row.write_declared = True
+    row.safety = "source_supported"
+    auto_enabled = SimpleNamespace(
+        platform=DOMAIN,
+        config_entry_id="entry",
+        unique_id="catalog-row",
+        entity_id="number.inferred",
+        disabled_by=None,
+    )
+    user_disabled = SimpleNamespace(
+        platform=DOMAIN,
+        config_entry_id="entry",
+        unique_id="catalog-row",
+        entity_id="number.user_disabled",
+        disabled_by="user",
+    )
+
+    class Registry:
+        def __init__(self):
+            self.entities = {
+                auto_enabled.entity_id: auto_enabled,
+                user_disabled.entity_id: user_disabled,
+            }
+
+        def async_update_entity(self, entity_id, **changes):
+            self.entities[entity_id].disabled_by = changes["disabled_by"]
+
+    registry = Registry()
+    monkeypatch.setattr(register_entities.er, "async_get", lambda _hass: registry)
+    monkeypatch.setattr(
+        register_entities,
+        "rows_for_parent",
+        lambda *_args, **_kwargs: ((identity, row, "standard", True),),
+    )
+    monkeypatch.setattr(
+        register_entities, "entity_unique_id", lambda *_args: "catalog-row"
+    )
+    monkeypatch.setattr(register_entities, "entity_group_key", lambda *_args: "group")
+    monkeypatch.setattr(
+        register_entities, "entity_category_key", lambda *_args: "category"
+    )
+    monkeypatch.setattr(register_entities, "control_kind", lambda *_args: None)
+    parent = SimpleNamespace(
+        config_entry=SimpleNamespace(entry_id="entry", data={}, options={}),
+        inventories=(runtime_node,),
+        devices=(),
+        entity_overrides={},
+        effective_access_levels={},
+        language="en",
+        configured_access_level=1,
+        zone_profiles={},
+        zone_overrides={},
+        write_enabled=True,
+    )
+
+    register_entities.async_apply_entity_overrides(object(), parent)
+    assert auto_enabled.disabled_by == "integration"
+    assert user_disabled.disabled_by == "user"
+
+    parent.entity_overrides["catalog-row"] = True
+    auto_enabled.disabled_by = None
+    register_entities.async_apply_entity_overrides(object(), parent)
+    assert auto_enabled.disabled_by is None
+    assert user_disabled.disabled_by == "user"
+
+
 def test_entity_selection_precedence_is_entity_then_group_then_node(
     monkeypatch,
 ) -> None:

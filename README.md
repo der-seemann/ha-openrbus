@@ -61,7 +61,7 @@ The integration creates one Home Assistant device per discovered OpenRBus node a
 - Selects expose complete enumerations with translated option labels.
 - Switches are created only for explicitly boolean enumerations.
 
-The basic set is enabled by default. Less common or noisy catalog rows are present in the entity registry but disabled by default. Unique IDs include the config entry, node, and protocol object address, so multiple nodes do not collide. Polling is grouped into fast, standard, and slow intervals; change those intervals in the Options flow rather than editing YAML.
+The basic set is enabled by default. Less common or noisy catalog rows are present in the entity registry but disabled by default. Writable catalog rows whose exact address is absent from the connected device's discovered capabilities also start disabled, even when comparable rows exist on other models. To activate one that applies to your device, open **Configure entity selection** in the Options flow and enable it for that device. This changes entity selection; the existing write enable and access checks still govern whether a control can write. Registers without an explicit read-only declaration require the separate, default-off experimental write option as well. Unique IDs include the config entry, node, and protocol object address, so multiple nodes do not collide. Polling is grouped into fast, standard, and slow intervals; change those intervals in the Options flow rather than editing YAML.
 
 The integration polls readable rows independently of write permission. Batch responses are correlated by node and object address. Unsupported or partial items use a bounded single-object fallback, so one malformed response does not hide otherwise healthy entities. Reconnects and reloads close the old coordinator before new platform listeners are created.
 
@@ -112,7 +112,7 @@ Remove the OpenRBus config entry from **Settings → Devices & services**, then 
 
 ## Development and release validation
 
-The release candidate is version `0.4.2`. The HA integration and the `openrbus` protocol core are versioned independently but the HA manifest pins the compatible Core release exactly. Run the test suite in a Home Assistant development environment with the pinned dependencies in `requirements-test.txt`:
+The release is version `0.4.3`. The HA integration and the `openrbus` protocol core are versioned independently but the HA manifest pins the compatible Core release exactly. Run the test suite in a Home Assistant development environment with the pinned dependencies in `requirements-test.txt`:
 
 ```console
 python -m pip install -r requirements-test.txt
@@ -120,7 +120,7 @@ python -m pytest -q
 python -m compileall -q custom_components
 ```
 
-The repository also runs HACS validation and Home Assistant Hassfest in GitHub Actions. See [CHANGELOG.md](CHANGELOG.md) and [RELEASE_HA_OPENRBUS_0.4.2.md](RELEASE_HA_OPENRBUS_0.4.2.md) for the release scope, quality-scale matrix, privacy review, and remaining external release actions.
+The repository also runs HACS validation and Home Assistant Hassfest in GitHub Actions. See [CHANGELOG.md](CHANGELOG.md) and [RELEASE_HA_OPENRBUS_0.4.3.md](RELEASE_HA_OPENRBUS_0.4.3.md) for the release scope, quality-scale matrix, privacy review, and remaining external release actions.
 
 ## License
 

@@ -1,6 +1,19 @@
 # Changelog
 
-## 0.4.2 — release candidate
+## 0.4.3 — release
+
+### Added
+
+- Project IAE/RXDX writable declarations and compatible bounded zone slots as regular controls when write access is enabled. A separate default-off experimental option exposes otherwise eligible registers without an explicit read-only declaration.
+- Persist the experimental option across setup and options flows; writes still require configured and effective access authorization.
+- Default catalog writable rows that are absent from the device's discovered capabilities to disabled. Use **Configure entity selection** in the Options flow to enable a comparable row only when it applies to the connected device.
+
+### Safety
+
+- Explicit read-only declarations, unresolved device wire-type conflicts, ambiguous access levels, and invalid values remain blocked.
+- HA and its exact Core dependency are versioned together at 0.4.3.
+
+## 0.4.2 — release
 
 ### Added
 
@@ -15,7 +28,7 @@
 ### Security and safety
 
 - Potential controls require explicit write opt-in, positive effective access,
-  and complete Core write evidence. The public catalog currently enables no
+  and complete Core write evidence. The published 0.4.2 catalog enabled no
   register writes.
 - The integration pins the matching `openrbus==0.4.2` Core package.
 

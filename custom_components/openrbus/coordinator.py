@@ -36,6 +36,7 @@ from .const import (
     CONF_BLE_SOURCE,
     CONF_DIAGNOSTICS_ENABLED,
     CONF_ENTITY_OVERRIDES,
+    CONF_EXPERIMENTAL_WRITES,
     CONF_INVALID_VALUE_DISABLE_AFTER,
     CONF_LANGUAGE,
     CONF_PAIR_ACTION,
@@ -230,6 +231,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             self.configured_read_access_level, self.configured_write_access_level
         )
         self.write_enabled = bool(configured.get(CONF_WRITE_ENABLED, False))
+        self.experimental_writes = bool(configured.get(CONF_EXPERIMENTAL_WRITES, False))
         self.language = str(configured.get(CONF_LANGUAGE, "de"))
         self.poll_intervals = {
             "fast": timedelta(
@@ -420,7 +422,11 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             node = getattr(identity, "node", None)
             if not isinstance(node, int):
                 continue
-            rows = catalog_for_node(runtime_node, _REGISTRY)
+            rows = catalog_for_node(
+                runtime_node,
+                _REGISTRY,
+                experimental_writes=self.write_enabled and self.experimental_writes,
+            )
             slots = zone_function_slots(rows)
             for slot in slots:
                 try:
@@ -562,6 +568,8 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             raise HomeAssistantError("OpenRBus write access level is set to no write")
         if not self.write_enabled:
             raise HomeAssistantError("OpenRBus write access is disabled")
+        if allow_unsafe and not self.experimental_writes:
+            raise HomeAssistantError("Experimental OpenRBus writes are disabled")
         # The configured role is only a request.  Never let it elevate a
         # write when Core could not establish the node's effective role (the
         # missing authorization-channel path is intentionally fail-closed).

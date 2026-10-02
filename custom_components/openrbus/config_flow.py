@@ -36,6 +36,7 @@ from .const import (
     CONF_COOLING_ENABLED,
     CONF_DIAGNOSTICS_ENABLED,
     CONF_ENTITY_OVERRIDES,
+    CONF_EXPERIMENTAL_WRITES,
     CONF_FLOW_ACTION,
     CONF_GROUP_OVERRIDES,
     CONF_INVALID_VALUE_DISABLE_AFTER,
@@ -63,6 +64,7 @@ from .const import (
     CONF_ZONE_OVERRIDES,
     DEFAULT_COOLING_ENABLED,
     DEFAULT_DIAGNOSTICS_ENABLED,
+    DEFAULT_EXPERIMENTAL_WRITES,
     DEFAULT_INVALID_VALUE_DISABLE_AFTER,
     DEFAULT_LANGUAGE,
     DEFAULT_POLL_INTERVALS,
@@ -84,7 +86,6 @@ from .register_entities import (
     entity_enabled_by_default,
     entity_group_key,
     entity_unique_id,
-    recommended_addresses,
     register_name,
     rows_for_parent,
     write_access_allowed,
@@ -944,6 +945,9 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_WRITE_ACCESS_LEVEL: _write_access_level(user_input),
                     CONF_LANGUAGE: user_input.get(CONF_LANGUAGE, DEFAULT_LANGUAGE),
                     CONF_WRITE_ENABLED: bool(user_input.get(CONF_WRITE_ENABLED, False)),
+                    CONF_EXPERIMENTAL_WRITES: bool(
+                        user_input.get(CONF_EXPERIMENTAL_WRITES, False)
+                    ),
                     CONF_DIAGNOSTICS_ENABLED: bool(
                         user_input.get(
                             CONF_DIAGNOSTICS_ENABLED, DEFAULT_DIAGNOSTICS_ENABLED
@@ -987,6 +991,9 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
             vol.Optional(CONF_BACKEND, default=BACKEND_NATIVE): vol.In(BACKEND_OPTIONS),
             vol.Optional(CONF_ACCESS_LEVEL, default=1): vol.In(ACCESS_LEVEL_OPTIONS),
             vol.Optional(CONF_WRITE_ENABLED, default=False): cv.boolean,
+            vol.Optional(
+                CONF_EXPERIMENTAL_WRITES, default=DEFAULT_EXPERIMENTAL_WRITES
+            ): cv.boolean,
             vol.Optional(CONF_LANGUAGE, default=DEFAULT_LANGUAGE): vol.In(
                 LANGUAGE_OPTIONS
             ),
@@ -1351,19 +1358,8 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                 default = False
                 if row:
                     identity, register = row
-                    read_levels = (
-                        register.access_level_evidence.get("read", {}) or {}
-                    ).get("levels", ())
-                    default = zone_row_enabled(runtime, identity, register) and (
-                        register.address in recommended_addresses(identity)
-                        or (
-                            register.readable
-                            and register.datatype not in {"STRUCT", "OCTETSTRING"}
-                            and any(
-                                str(level).casefold() in {"level 0", "user"}
-                                for level in read_levels
-                            )
-                        )
+                    default = entity_enabled_by_default(
+                        runtime, identity, register, unique_id=base_uid
                     )
                 selected = stored.get(uid)
                 if selected is None:
@@ -1708,6 +1704,9 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             # Read and write policy are independently persisted.  A higher
             # read policy must not silently become write permission.
             _normalize_access_policies(user_input)
+            options_scan_complete = bool(
+                user_input.pop("_options_scan_complete", False)
+            )
             level = max(_read_access_level(user_input), _write_access_level(user_input))
             if user_input.get(CONF_BACKEND, BACKEND_NATIVE) == BACKEND_NATIVE:
                 # The source is intentionally hidden from the public options
@@ -1719,7 +1718,6 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                 if existing and not user_input.get(CONF_BLE_SOURCE):
                     user_input[CONF_BLE_SOURCE] = existing
             self._remember_native_source(user_input)
-            user_input.pop("_options_scan_complete", None)
             if _warning_required(
                 level, user_input.get(CONF_WRITE_ENABLED, False)
             ) and not user_input.get(CONF_ACCESS_ACK):
@@ -1782,7 +1780,7 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                     # initial setup.  If the proxy is offline, retain the
                     # existing/manual target and let the normal validation
                     # path continue.
-                    if not user_input.get("_options_scan_complete"):
+                    if not options_scan_complete:
                         try:
                             devices = await async_scan_thin_rpc_devices(
                                 self.hass, capability
@@ -1870,6 +1868,12 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             vol.Required(
                 CONF_WRITE_ENABLED,
                 default=current.get(CONF_WRITE_ENABLED, False),
+            ): cv.boolean,
+            vol.Required(
+                CONF_EXPERIMENTAL_WRITES,
+                default=current.get(
+                    CONF_EXPERIMENTAL_WRITES, DEFAULT_EXPERIMENTAL_WRITES
+                ),
             ): cv.boolean,
             vol.Required(
                 CONF_DIAGNOSTICS_ENABLED,

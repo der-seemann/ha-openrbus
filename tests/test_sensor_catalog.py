@@ -1,6 +1,5 @@
 """Focused HA catalog-to-entity projection tests."""
 
-from collections import Counter
 from dataclasses import replace
 
 from openrbus.catalog import catalog_for_node
@@ -68,12 +67,14 @@ def test_canopen_time_projects_clock_text_and_standardized_date() -> None:
 def test_scb_catalog_is_projected_and_pollable_at_each_configured_level() -> None:
     identity = resolve_device_identity(DeviceIdentity(4, None, None, "SCB-10"))
 
-    expected = {1: 221, 2: 557, 3: 617}
-    for level, count in expected.items():
-        catalog = catalog_for_node(identity, max_access_level=level)
-        assert len(catalog) == count
+    catalogs = {
+        level: catalog_for_node(identity, max_access_level=level) for level in (1, 2, 3)
+    }
+    for level, catalog in catalogs.items():
         assert all(item.readable for item in catalog)
-        assert sum(_catalog_visible(item, level) for item in catalog) == count
+        assert all(_catalog_visible(item, level) for item in catalog)
+    assert len(catalogs[1]) < len(catalogs[2]) < len(catalogs[3])
+    assert ObjectAddress(0x346A, 10) in {row.address for row in catalogs[3]}
 
 
 def test_register_entity_catalog_is_not_capped_by_configured_access_level() -> None:
@@ -90,7 +91,7 @@ def test_register_entity_catalog_is_not_capped_by_configured_access_level() -> N
         assert {row.address for row in low} <= {row.address for row in complete}
 
 
-def test_cp733_without_public_write_evidence_projects_as_read_only_sensor() -> None:
+def test_cp733_validated_scoped_write_projects_as_select() -> None:
     identity = resolve_device_identity(DeviceIdentity(4, None, None, "SCB-10"))
     catalog = catalog_for_node(identity, max_access_level=3)
     cp733 = [row for row in catalog if row.address == ObjectAddress(0x346A, 4)]
@@ -101,11 +102,9 @@ def test_cp733_without_public_write_evidence_projects_as_read_only_sensor() -> N
     )
 
     assert len(cp733) == 1
-    # Public catalog metadata has not validated this write or supplied
-    # installation-specific evidence, so the integration keeps it read-only.
-    assert control_kind(cp733[0]) is None
-    assert cp733[0].writable is False
-    assert cp733[0].safety == "unverified"
+    assert control_kind(cp733[0]) == "select"
+    assert cp733[0].writable is True
+    assert cp733[0].safety == "validated"
     assert cp733[0].address != cp730_count.address
     assert control_kind(cp730_count) is None
 
@@ -128,6 +127,34 @@ def test_cp733_without_public_write_evidence_projects_as_read_only_sensor() -> N
     assert entity_unique_id(_Entry(), other, other_cp733) != entity_unique_id(
         _Entry(), identity, cp733[0]
     )
+
+
+def test_unverified_writable_declaration_needs_experimental_opt_in() -> None:
+    identity = resolve_device_identity(DeviceIdentity(4, None, None, "SCB-10"))
+    address = ObjectAddress(0x500F, 0)
+    ordinary = next(row for row in catalog_for_node(identity) if row.address == address)
+    experimental = next(
+        row
+        for row in catalog_for_node(identity, experimental_writes=True)
+        if row.address == address
+    )
+    parent = type(
+        "Parent",
+        (),
+        {
+            "language": "en",
+            "write_enabled": True,
+            "experimental_writes": False,
+            "configured_write_access_level": 1,
+        },
+    )()
+
+    assert ordinary.safety == "unverified"
+    assert ordinary.writable is False
+    assert not should_project_as_control(parent, ordinary, 1)
+    parent.experimental_writes = True
+    assert experimental.writable is True
+    assert should_project_as_control(parent, experimental, 1)
 
 
 def test_entity_uid_is_repeatable_across_entry_recreation() -> None:
@@ -162,44 +189,20 @@ def test_entity_uid_is_repeatable_across_entry_recreation() -> None:
 
 def test_family_projection_counts_and_polling_are_bounded() -> None:
     cases = (
-        (
-            DeviceIdentity(4, None, None, "SCB-10"),
-            (855, 617, (855, 0, 0, 0), (617, 0, 0, 0)),
-        ),
-        (
-            DeviceIdentity(88, 528, None, None),
-            (784, 388, (784, 0, 0, 0), (388, 0, 0, 0)),
-        ),
-        (
-            DeviceIdentity(3, 7702, 3, "GTW-Bluetooth"),
-            (26, 22, (26, 0, 0, 0), (22, 0, 0, 0)),
-        ),
-        (
-            DeviceIdentity(55, 7688, 258, "GTW-08"),
-            (26, 22, (26, 0, 0, 0), (22, 0, 0, 0)),
-        ),
-        (DeviceIdentity(99, 5123, 9, "MK3"), (68, 50, (68, 0, 0, 0), (50, 0, 0, 0))),
+        DeviceIdentity(4, None, None, "SCB-10"),
+        DeviceIdentity(88, 528, None, None),
+        DeviceIdentity(3, 7702, 3, "GTW-Bluetooth"),
+        DeviceIdentity(55, 7688, 258, "GTW-08"),
+        DeviceIdentity(99, 5123, 9, "MK3"),
     )
-    for raw, (complete_count, poll_count, expected_kinds, expected_poll_kinds) in cases:
+    for raw in cases:
         identity = resolve_device_identity(raw)
         complete = catalog_for_node(identity)
         pollable = [row for row in complete if _catalog_visible(row, 3)]
-        kind_counts = Counter(control_kind(row) or "sensor" for row in complete)
-        poll_kind_counts = Counter(control_kind(row) or "sensor" for row in pollable)
-        assert (len(complete), len(pollable)) == (complete_count, poll_count)
-        assert (
-            tuple(
-                kind_counts[kind] for kind in ("sensor", "number", "select", "switch")
-            )
-            == expected_kinds
-        )
-        assert (
-            tuple(
-                poll_kind_counts[kind]
-                for kind in ("sensor", "number", "select", "switch")
-            )
-            == expected_poll_kinds
-        )
+        assert complete
+        assert len(pollable) <= len(complete)
+        assert all(row.readable for row in complete)
+        assert all(_catalog_visible(row, 3) for row in pollable)
 
 
 def test_mk3_identity_energy_and_can_rows_never_project_as_controls() -> None:

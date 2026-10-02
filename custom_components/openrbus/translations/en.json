@@ -51,7 +51,8 @@
           "screed_drying_enabled": "Enable screed drying",
           "diagnostics_enabled": "Enable diagnostic data",
           "flow_action": "Navigation",
-          "cooling_enabled": "Enable cooling functions"
+          "cooling_enabled": "Enable cooling functions",
+          "experimental_writes": "Expose additional registers without an explicit IsReadOnly declaration as experimental controls. Requires write access to be enabled; these registers are not confirmed as regular writable parameters."
         },
         "data_description": {
           "read_access_level": "Choose the highest register level whose values should be exposed.",
@@ -59,7 +60,8 @@
           "write_enabled": "Allow supported controls to send changes to the heating system.",
           "diagnostics_enabled": "Add diagnostic entities with transport and communication status for troubleshooting.",
           "screed_drying_enabled": "Add entities for the screed-drying program when the controller provides them.",
-          "cooling_enabled": "Include registers in the reviewed cooling-function map. When disabled, those exact registers are excluded before entity selection and creation."
+          "cooling_enabled": "Include registers in the reviewed cooling-function map. When disabled, those exact registers are excluded before entity selection and creation.",
+          "experimental_writes": "Expose additional registers without an explicit IsReadOnly declaration as experimental controls. Requires write access to be enabled; these registers are not confirmed as regular writable parameters."
         },
         "description": "Choose independent read and write access policies. A higher read policy does not enable writes."
       },
@@ -146,7 +148,8 @@
           "poll_interval_standard": "Standard polling interval (seconds)",
           "poll_interval_slow": "Slow polling interval (seconds)",
           "cooling_enabled": "Enable cooling functions",
-          "_openrbus_entity_picker": "Configure entity selection"
+          "_openrbus_entity_picker": "Configure entity selection",
+          "experimental_writes": "Expose additional registers without an explicit IsReadOnly declaration as experimental controls. Requires write access to be enabled; these registers are not confirmed as regular writable parameters."
         },
         "data_description": {
           "language": "Choose the language used for entity names and descriptions.",
@@ -165,7 +168,8 @@
           "ble_device": "Select or enter the Bluetooth address of the heating gateway.",
           "passkey": "PIN used to pair with the gateway over Bluetooth.",
           "cooling_enabled": "Include registers in the reviewed cooling-function map. When disabled, those exact registers are excluded before entity selection and creation.",
-          "_openrbus_entity_picker": "Open the three-step selector: Device, Category, then Entities. Existing entity identities and saved choices are retained."
+          "_openrbus_entity_picker": "Open the three-step selector: Device, Category, then Entities. Existing entity identities and saved choices are retained.",
+          "experimental_writes": "Expose additional registers without an explicit IsReadOnly declaration as experimental controls. Requires write access to be enabled; these registers are not confirmed as regular writable parameters."
         }
       },
       "access_warning": {

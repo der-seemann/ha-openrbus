@@ -257,7 +257,19 @@ def rows_for_parent(
             else (1 if configured == 1 else None)
         )
         recommended = recommended_addresses(identity)
-        for register in catalog_for_node(runtime_node, CATALOG_REGISTRY):
+        experimental = bool(
+            getattr(parent, "write_enabled", False)
+            and getattr(parent, "experimental_writes", False)
+        )
+        if experimental:
+            registers = catalog_for_node(
+                runtime_node,
+                CATALOG_REGISTRY,
+                experimental_writes=True,
+            )
+        else:
+            registers = catalog_for_node(runtime_node, CATALOG_REGISTRY)
+        for register in registers:
             if not include_diagnostics and is_diagnostic_register(register):
                 continue
             if not include_screed_drying and is_optional_filter_register(
@@ -290,6 +302,40 @@ def zone_row_enabled(
     return slot is None or zone_enabled(parent, identity.node, slot)
 
 
+def _unobserved_source_rw_row(
+    parent: OpenRBusCoordinator,
+    identity: DeviceIdentity,
+    register: RegisterCatalogEntry,
+) -> bool:
+    """Identify newly writable catalog rows absent from runtime discovery.
+
+    Family and bounded-array metadata makes comparable registers selectable,
+    but does not establish that an object exists on this installation. Keep
+    those newly writable rows out of the initial poll set until the user
+    selects them or discovery confirms them.
+    """
+
+    # ``writable`` is the active write projection.  It is false when HA's
+    # write option is off and for experimental rows while their opt-in is off;
+    # neither state erases the underlying source declaration.  Use Core's
+    # declaration fact so read-only catalog rows keep their normal defaults.
+    if not getattr(register, "write_declared", False):
+        return False
+    for runtime_node in runtime_nodes(parent):
+        if identity_for_runtime(runtime_node).node != identity.node:
+            continue
+        capabilities = getattr(runtime_node, "capabilities", None)
+        if capabilities is None:
+            return False
+        addresses = (
+            capabilities.keys()
+            if isinstance(capabilities, Mapping)
+            else (getattr(item, "address", item) for item in capabilities)
+        )
+        return register.address not in addresses
+    return False
+
+
 def _poll_selection_filter_counts(
     parent: OpenRBusCoordinator,
     complete_rows: tuple[tuple[DeviceIdentity, RegisterCatalogEntry, str, bool], ...],
@@ -312,6 +358,123 @@ def _poll_selection_filter_counts(
             counts["screed_filtered"] += 1
         if not cooling_enabled(parent) and is_cooling_register(register):
             counts["cooling_filtered"] += 1
+    return counts
+
+
+def _poll_activation_counts(
+    hass: HomeAssistant,
+    parent: OpenRBusCoordinator,
+    rows: tuple[tuple[DeviceIdentity, RegisterCatalogEntry, str, bool], ...],
+) -> dict[str, int]:
+    """Return payload-free attribution for default and registry poll activation."""
+    counts = {
+        "runtime_capabilities_supported": 0,
+        "runtime_capabilities_not_supported": 0,
+        "runtime_capabilities_unknown": 0,
+        "runtime_capabilities_temporary_failed": 0,
+        "runtime_capability_exact_matches": 0,
+        "runtime_capability_absent_rows": 0,
+        "write_declared_rows": 0,
+        "unobserved_declared_write_rows": 0,
+        "unobserved_guard_rows": 0,
+        "default_enabled_rows": 0,
+        "default_disabled_rows": 0,
+        "registry_uid_matches": 0,
+        "registry_uid_missing": 0,
+        "registry_enabled_matches": 0,
+        "registry_integration_disabled_matches": 0,
+        "registry_user_disabled_matches": 0,
+    }
+    for group in ("fast", "standard", "slow"):
+        for suffix in (
+            "default_enabled",
+            "default_disabled",
+            "declared_write_absent",
+            "registry_enabled",
+            "registry_missing",
+        ):
+            counts[f"{group}_{suffix}"] = 0
+    for runtime_node in runtime_nodes(parent):
+        capabilities = getattr(runtime_node, "capabilities", None) or ()
+        items = (
+            capabilities.values() if isinstance(capabilities, Mapping) else capabilities
+        )
+        for item in items:
+            status = getattr(item, "status", None)
+            status_name = str(getattr(status, "value", status) or "unknown").casefold()
+            key = {
+                "supported": "runtime_capabilities_supported",
+                "not_supported": "runtime_capabilities_not_supported",
+                "unknown": "runtime_capabilities_unknown",
+                "temporarily_failed": "runtime_capabilities_temporary_failed",
+            }.get(status_name, "runtime_capabilities_unknown")
+            counts[key] += 1
+
+    try:
+        registry = er.async_get(hass)
+    except (AttributeError, TypeError):
+        registry = None
+    platforms = ("sensor", "number", "select", "switch", "binary_sensor")
+    for identity, register, _group, _allowed in rows:
+        declared = bool(getattr(register, "write_declared", False))
+        absent = _unobserved_source_rw_row(parent, identity, register)
+        enabled_default = entity_enabled_by_default(parent, identity, register)
+        counts["write_declared_rows"] += int(declared)
+        counts["unobserved_declared_write_rows"] += int(declared and absent)
+        counts["unobserved_guard_rows"] += int(absent)
+        counts["default_enabled_rows"] += int(enabled_default)
+        counts["default_disabled_rows"] += int(not enabled_default)
+        counts[
+            f"{_group}_{'default_enabled' if enabled_default else 'default_disabled'}"
+        ] += 1
+        counts[f"{_group}_declared_write_absent"] += int(declared and absent)
+        matching_entries = []
+        if registry is not None:
+            uid = entity_unique_id(parent, identity, register)
+            for platform in platforms:
+                entity_id = registry.async_get_entity_id(platform, DOMAIN, uid)
+                if entity_id:
+                    entry = registry.entities.get(entity_id)
+                    if entry is not None:
+                        matching_entries.append(entry)
+        if not matching_entries:
+            counts["registry_uid_missing"] += 1
+            counts[f"{_group}_registry_missing"] += 1
+            continue
+        counts["registry_uid_matches"] += 1
+        if any(
+            getattr(entry, "disabled_by", None) is None for entry in matching_entries
+        ):
+            counts["registry_enabled_matches"] += 1
+            counts[f"{_group}_registry_enabled"] += 1
+        if any(
+            str(getattr(entry, "disabled_by", "")).casefold() == "integration"
+            for entry in matching_entries
+        ):
+            counts["registry_integration_disabled_matches"] += 1
+        if any(
+            str(getattr(entry, "disabled_by", "")).casefold() == "user"
+            for entry in matching_entries
+        ):
+            counts["registry_user_disabled_matches"] += 1
+    exact_by_node: dict[int, set[ObjectAddress]] = {}
+    for runtime_node in runtime_nodes(parent):
+        capabilities = getattr(runtime_node, "capabilities", None) or ()
+        addresses = (
+            capabilities.keys()
+            if isinstance(capabilities, Mapping)
+            else (getattr(item, "address", item) for item in capabilities)
+        )
+        exact_by_node[identity_for_runtime(runtime_node).node] = set(addresses)
+    counts["runtime_capability_exact_matches"] = sum(
+        register.address in exact_by_node.get(identity.node, set())
+        for identity, register, _group, _allowed in rows
+    )
+    counts["runtime_capability_absent_rows"] = sum(
+        identity.node in exact_by_node
+        and register.address not in exact_by_node[identity.node]
+        for identity, register, _group, _allowed in rows
+    )
     return counts
 
 
@@ -453,19 +616,23 @@ def entity_enabled_by_default(
 ) -> bool:
     """Combine conservative register defaults with discovered zone policy."""
 
-    default = zone_row_enabled(parent, identity, register) and (
-        register.address in recommended_addresses(identity)
-        or (
-            register.readable
-            and getattr(register, "datatype", None) not in {"STRUCT", "OCTETSTRING"}
-            and any(
-                str(level).casefold() in {"level 0", "user"}
-                for level in (
-                    (getattr(register, "access_level_evidence", {}) or {}).get(
-                        "read", {}
-                    )
-                    or {}
-                ).get("levels", ())
+    default = (
+        zone_row_enabled(parent, identity, register)
+        and not _unobserved_source_rw_row(parent, identity, register)
+        and (
+            register.address in recommended_addresses(identity)
+            or (
+                register.readable
+                and getattr(register, "datatype", None) not in {"STRUCT", "OCTETSTRING"}
+                and any(
+                    str(level).casefold() in {"level 0", "user"}
+                    for level in (
+                        (getattr(register, "access_level_evidence", {}) or {}).get(
+                            "read", {}
+                        )
+                        or {}
+                    ).get("levels", ())
+                )
             )
         )
     )
@@ -480,6 +647,25 @@ def entity_enabled_by_default(
         and register.readable
         and zone_row_enabled(parent, identity, register)
     )
+
+
+def _poll_row_selected(
+    parent: OpenRBusCoordinator,
+    identity: DeviceIdentity,
+    register: RegisterCatalogEntry,
+) -> bool:
+    """Keep absent inferred writes out of polling unless the picker opts in.
+
+    An older sensor or typed projection can remain enabled in HA's registry
+    after the catalog's default changes.  Since the poller intentionally
+    accepts any enabled projection sharing a stable ID, enforce this safety
+    default before rows enter the polling coordinator.  Explicit persisted
+    picker choices still work through ``entity_enabled_by_default``.
+    """
+
+    return not _unobserved_source_rw_row(
+        parent, identity, register
+    ) or entity_enabled_by_default(parent, identity, register)
 
 
 def normalized_entity_overrides(value: object) -> dict[str, bool | None]:
@@ -502,12 +688,11 @@ def async_apply_entity_overrides(
         return
     overrides = normalized_entity_overrides(getattr(parent, "entity_overrides", {}))
     node_overrides, group_overrides = _configured_selection_overrides(parent)
-    if not overrides and not node_overrides and not group_overrides:
-        return
     entry_id = parent.config_entry.entry_id
     safe: dict[str, bool] = {}
     rows_by_uid: dict[str, tuple[DeviceIdentity, RegisterCatalogEntry]] = {}
     explicitly_scoped: set[str] = set()
+    reconcile_defaults: set[str] = set()
     node_overrides, group_overrides = _configured_selection_overrides(parent)
     for identity, register, _group, allowed in rows_for_parent(
         parent,
@@ -517,6 +702,8 @@ def async_apply_entity_overrides(
     ):
         uid = entity_unique_id(parent, identity, register)
         rows_by_uid[uid] = (identity, register)
+        if _unobserved_source_rw_row(parent, identity, register):
+            reconcile_defaults.add(uid)
         group_key = entity_group_key(parent, identity, register)
         if (
             uid in overrides
@@ -569,7 +756,11 @@ def async_apply_entity_overrides(
             getattr(entity, "platform", None) != DOMAIN
             or getattr(entity, "config_entry_id", None) != entry_id
             or (uid not in safe and uid not in overrides)
-            or (uid not in overrides and uid not in explicitly_scoped)
+            or (
+                uid not in overrides
+                and uid not in explicitly_scoped
+                and uid not in reconcile_defaults
+            )
         ):
             continue
         disabled_by = str(getattr(entity, "disabled_by", "") or "").casefold()
@@ -693,8 +884,10 @@ def ensure_polling_coordinators(
     rows = rows_for_parent(parent)
     selection_counts = {
         **_poll_selection_filter_counts(parent, complete_rows, rows),
+        **_poll_activation_counts(hass, parent, rows),
         "read_access_excluded": 0,
         "zone_excluded": 0,
+        "unobserved_declared_write_not_selected": 0,
         "not_recommended": 0,
         "pollable_fast": 0,
         "pollable_standard": 0,
@@ -716,6 +909,9 @@ def ensure_polling_coordinators(
             continue
         if not zone_row_enabled(parent, identity, register):
             selection_counts["zone_excluded"] += 1
+            continue
+        if not _poll_row_selected(parent, identity, register):
+            selection_counts["unobserved_declared_write_not_selected"] += 1
             continue
         effective = parent.effective_access_levels.get(identity.node)
         structure = bitfield_structure(register)
@@ -1161,6 +1357,10 @@ def write_access_allowed(
         or not register.writable
         or effective_access_level is None
         or effective_access_level < parent.configured_write_access_level
+    ):
+        return False
+    if getattr(register, "safety", "unverified") == "unverified" and not getattr(
+        parent, "experimental_writes", False
     ):
         return False
     evidence = register.access_level_evidence.get("write", {})

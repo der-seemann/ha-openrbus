@@ -723,3 +723,67 @@ async def test_options_warning_back_does_not_create_entry(monkeypatch) -> None:
     assert result["step_id"] == "init"
     assert CONF_ACCESS_ACK not in flow._pending_options_input
     assert result["type"].value == "form"
+
+
+@pytest.mark.asyncio
+async def test_options_thin_scan_completion_skips_a_second_scan(monkeypatch) -> None:
+    """A completed BLE scan must survive the return to the options form."""
+    entry = SimpleNamespace(
+        data={
+            CONF_BACKEND: BACKEND_THIN_RPC,
+            CONF_BLE_DEVICE: "existing-target",
+            CONF_ACCESS_LEVEL: 1,
+            CONF_READ_ACCESS_LEVEL: 1,
+            CONF_WRITE_ACCESS_LEVEL: 1,
+            CONF_WRITE_ENABLED: False,
+            "thin_rpc_controller": "controller",
+        },
+        options={},
+        runtime_data=SimpleNamespace(zone_profiles={}),
+    )
+    flow = OpenRBusOptionsFlowHandler(entry)
+    flow._pending_options_input = {
+        CONF_BACKEND: BACKEND_THIN_RPC,
+        CONF_BLE_DEVICE: "existing-target",
+        CONF_ACCESS_LEVEL: 1,
+        CONF_READ_ACCESS_LEVEL: 1,
+        CONF_WRITE_ACCESS_LEVEL: 1,
+        CONF_WRITE_ENABLED: False,
+        CONF_ACCESS_ACK: False,
+        "thin_rpc_controller": "controller",
+    }
+    flow._options_scan_devices = {"existing-target": {"address_type": 0}}
+    monkeypatch.setattr(
+        OpenRBusOptionsFlowHandler, "_entity_choices", lambda *_a, **_k: {}
+    )
+    monkeypatch.setattr(
+        OpenRBusOptionsFlowHandler, "_zone_choices", lambda *_a, **_k: {}
+    )
+    scan = AsyncMock(return_value=())
+    monkeypatch.setattr(config_flow_module, "async_scan_thin_rpc_devices", scan)
+    monkeypatch.setattr(
+        config_flow_module,
+        "thin_rpc_controller_choices",
+        lambda *_args, **_kwargs: {
+            "controller": SimpleNamespace(
+                request_service="request",
+                poll_service="poll",
+                diagnostics_service="diagnostics",
+            )
+        },
+    )
+    monkeypatch.setattr(config_flow_module, "_async_apply_mac_profile", AsyncMock())
+    monkeypatch.setattr(config_flow_module, "async_save_access_profile", AsyncMock())
+    monkeypatch.setattr(config_flow_module, "_transport_route", lambda _data: "same")
+    monkeypatch.setattr(
+        flow,
+        "async_create_entry",
+        lambda *, title, data: {"title": title, "data": data},
+    )
+
+    result = await flow.async_step_thin_scan({CONF_BLE_DEVICE: "existing-target"})
+
+    assert result["title"] == ""
+    assert result["data"][CONF_BLE_DEVICE] == "existing-target"
+    assert "_options_scan_complete" not in result["data"]
+    scan.assert_not_awaited()

@@ -6,11 +6,24 @@ Membership is conservative. Active CP02x configuration evidence can assign confi
 
 Choices persist at three scopes: entity unique IDs, `device:<node>:category:<category>` keys stored in `group_overrides`, and node keys. Entity choice takes precedence over current category, legacy General category, legacy `node:<node>:zone/object:<...>` group choice, node choice, then the automatic default. Legacy node and group keys remain stored and effective for compatibility.
 
-Entity IDs use one deterministic rule across platforms: a SHA-256 prefix of the configured physical BLE target address, CANopen node, and object index/subindex. The raw address is not exposed in entity IDs. Different gateways therefore receive distinct IDs, while reinstalling the integration against the same target and bus identities recreates the same IDs regardless of Home Assistant's random config-entry ID. Entries without a valid configured BLE MAC fail setup rather than silently use an installation-specific service name.
+Entity IDs use one deterministic rule across platforms: a SHA-256 prefix of the configured BLE target identifier, CANopen node, and object index/subindex. Conventional MAC addresses retain their existing canonical byte hash; opaque adapter identifiers such as UUIDs are hashed as normalized UTF-8 text. The raw identifier is not exposed in entity IDs. Different gateways therefore receive distinct IDs, while reinstalling the integration against the same target and bus identities recreates the same IDs regardless of Home Assistant's random config-entry ID. Entries without a configured BLE target fail setup rather than silently use an installation-specific service name.
 
 At setup, legacy entry-scoped entity unique IDs and device identifiers are migrated in place. Home Assistant retains each entity's `entity_id`, so recorder history and entity customizations remain attached; registry `disabled_by: user` is preserved. Legacy per-entity picker overrides are translated in the coordinator's runtime view. The regression suite covers identity repeatability across recreated entries and in-place registry migration with a custom entity ID and user disable.
 
 Read access remains independently configured as level 1 Benutzer, level 2 Installateur, or level 3 Fachhandwerker. Write access remains subject to the existing independent access-level, explicit-enable, and Core evidence gates; the picker cannot enable a write.
+
+Source-supported and experimental writable catalog rows that are absent from
+the node's exact runtime capability list remain available in this picker, but
+default to disabled so a comparable parameter is not polled as though it were
+installed. A concrete discovered address follows the normal default policy.
+The guard uses Core's base `write_declared` metadata, which is independent of
+whether HA currently projects the row as a sensor or an enabled write control.
+The entity registry applies the same default during setup while preserving
+`disabled_by: user` and explicit saved picker selections. Poll selection also
+enforces the absent-row default before consulting legacy registry projections,
+so an old enabled sensor/control cannot activate an absent inferred write. Use
+the Options Flow entity picker to opt into such a row. A catalog array head
+does not prove that a concrete subindex exists.
 
 ## Global optional filters
 

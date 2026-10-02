@@ -15,6 +15,7 @@ from custom_components.openrbus.const import (
     BACKEND_NATIVE,
     BACKEND_THIN_RPC,
     CONF_BACKEND,
+    CONF_EXPERIMENTAL_WRITES,
     CONF_LANGUAGE,
     CONF_POLL_FAST,
     CONF_POLL_SLOW,
@@ -192,7 +193,7 @@ async def test_coordinator_dispatches_core_gated_write(monkeypatch) -> None:
         lambda *a, **k: backend,
     )
     entry = _entry(BACKEND_NATIVE)
-    entry.data[CONF_WRITE_ENABLED] = True
+    entry.data.update({CONF_WRITE_ENABLED: True, CONF_EXPERIMENTAL_WRITES: True})
     coordinator = OpenRBusCoordinator(_hass(), entry)
     address = ObjectAddress(0x346A, 0x04)
     result = await coordinator.async_write_object(
@@ -229,7 +230,9 @@ async def test_coordinator_blocks_requested_elevated_write_without_effective_lev
         lambda *a, **k: backend,
     )
     entry = _entry(BACKEND_NATIVE)
-    entry.data.update({CONF_WRITE_ENABLED: True, "access_level": 3})
+    entry.data.update(
+        {CONF_WRITE_ENABLED: True, CONF_EXPERIMENTAL_WRITES: True, "access_level": 3}
+    )
     coordinator = OpenRBusCoordinator(_hass(), entry)
     with pytest.raises(HomeAssistantError, match="effective access level"):
         await coordinator.async_write_object(
@@ -248,6 +251,7 @@ async def test_higher_read_policy_does_not_raise_write_policy(monkeypatch) -> No
     entry.data.update(
         {
             CONF_WRITE_ENABLED: True,
+            CONF_EXPERIMENTAL_WRITES: True,
             CONF_READ_ACCESS_LEVEL: 3,
             CONF_WRITE_ACCESS_LEVEL: 1,
         }
@@ -282,7 +286,9 @@ async def test_coordinator_refreshes_node_access_before_elevated_write(
         lambda *a, **k: backend,
     )
     entry = _entry(BACKEND_NATIVE)
-    entry.data.update({CONF_WRITE_ENABLED: True, "access_level": 3})
+    entry.data.update(
+        {CONF_WRITE_ENABLED: True, CONF_EXPERIMENTAL_WRITES: True, "access_level": 3}
+    )
     coordinator = OpenRBusCoordinator(_hass(), entry)
 
     await coordinator.async_write_object(
@@ -291,6 +297,43 @@ async def test_coordinator_refreshes_node_access_before_elevated_write(
 
     assert backend.reads == [(ObjectAddress(0x4002, 0x00), 4)]
     assert coordinator.effective_access_levels == {4: 3}
+
+
+@pytest.mark.asyncio
+async def test_independent_level_three_write_policy_reaches_backend(
+    monkeypatch,
+) -> None:
+    backend = _Backend()
+
+    async def read_access(address, *, node=0xFF):
+        backend.reads.append((address, node))
+        return GenericRead(node, address, b"\x03", 3)
+
+    backend.async_read_object = read_access
+    monkeypatch.setattr(
+        "custom_components.openrbus.coordinator.NativeBluetoothBackend",
+        lambda *a, **k: backend,
+    )
+    entry = _entry(BACKEND_NATIVE)
+    entry.data.update(
+        {
+            CONF_READ_ACCESS_LEVEL: 1,
+            CONF_WRITE_ACCESS_LEVEL: 3,
+            CONF_WRITE_ENABLED: True,
+            CONF_EXPERIMENTAL_WRITES: True,
+        }
+    )
+    coordinator = OpenRBusCoordinator(_hass(), entry)
+
+    result = await coordinator.async_write_object(
+        ObjectAddress(0x346A, 0x04), 1, node=4, allow_unsafe=True
+    )
+
+    assert coordinator.configured_read_access_level == 1
+    assert coordinator.configured_write_access_level == 3
+    assert coordinator.configured_access_level == 3
+    assert backend.reads == [(ObjectAddress(0x4002, 0x00), 4)]
+    assert result.value == 1
 
 
 def test_invalid_coordinator_backend_fails_closed() -> None:
