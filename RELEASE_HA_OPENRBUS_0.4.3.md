@@ -1,6 +1,6 @@
 # HA OpenRBus 0.4.3 release preflight
 
-Status: **FINAL TEST-HA READ-ONLY GATE PASSED; PUBLICATION IN PROGRESS.** The
+Status: **PUBLISHED AND VERIFIED.** The
 0.4.2 release history remains in `RELEASE_HA_OPENRBUS_0.4.2.md`.
 
 ## Scope
@@ -28,10 +28,24 @@ The exact HA workflow now installs Core from public source commit
 `d4bfcc02fe04bd410e669165822d882e562e249f`; Core will be published before
 the HA release.
 
-## Publication
+## Publication verification — 2026-10-02
 
-HA publication follows Core publication and the passing exact-commit Tests,
-HACS, and Hassfest workflows.
+The exact HA tag `v0.4.3` resolves to
+`ee8a35b4263e34f0a152149f7780aea226394f47`. Tests run
+[37036075913](https://github.com/der-seemann/ha-openrbus/actions/runs/37036075913)
+and Validate run
+[37036076299](https://github.com/der-seemann/ha-openrbus/actions/runs/37036076299)
+passed on that SHA; Validate includes HACS and Hassfest. Core's exact tested
+source commit `d4bfcc02fe04bd410e669165822d882e562e249f` was published as
+`openrbus==0.4.3` on PyPI before this release. The manifest and HACS metadata
+were validated and identify integration version 0.4.3 and minimum Home
+Assistant 2026.8.0.
+
+Public HA GitHub Release:
+https://github.com/der-seemann/ha-openrbus/releases/tag/v0.4.3. It uses
+GitHub's source archive; no binary or firmware asset applies. The release
+tree contains no private evidence, local paths, credentials, or raw runtime
+exports.
 ## Final exact-candidate gate update (2026-10-02 16:15 CEST)
 
 The Core `write_declared` fix was built into a fresh 0.4.3 wheel (SHA-256 `d88e6697141abfc1662445de68b4ee516068b37719b41e77c7fccd96595da714`) and HA's full suite passed **286 tests** against it. HA source/style/compile gates previously passed; the candidate component matched 27/27 deployed files during the live check.
