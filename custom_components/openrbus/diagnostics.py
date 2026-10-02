@@ -77,6 +77,20 @@ _FENCE_TIMEOUT_CLASSES = (
     "state_unavailable",
 )
 _COUNTER_MAX = 2_147_483_647
+_POLL_SELECTION_COUNTS = (
+    "runtime_nodes",
+    "catalog_rows",
+    "diagnostics_filtered",
+    "screed_filtered",
+    "cooling_filtered",
+    "rows_after_optional_filters",
+    "read_access_excluded",
+    "zone_excluded",
+    "not_recommended",
+    "pollable_fast",
+    "pollable_standard",
+    "pollable_slow",
+)
 
 
 def _safe_poll_snapshot(
@@ -92,6 +106,7 @@ def _safe_poll_snapshot(
         "failed_items",
         "available_items",
         "unavailable_items",
+        "registry_disabled_count",
     ):
         value = snapshot.get(key)
         if type(value) is int and 0 <= value <= _COUNTER_MAX:
@@ -183,13 +198,29 @@ def _safe_poll_snapshot(
                 and type(item.get("subindex")) is int
                 and 0 <= item["subindex"] <= 255
                 and (
-                    (item.get("error_class") == "abort"
-                     and item.get("subtype") in {"unsupported_access", "read_not_supported"})
-                    or (item.get("error_class") == "decode"
-                        and item.get("subtype") == "visible_string_non_ascii")
+                    (
+                        item.get("error_class") == "abort"
+                        and item.get("subtype")
+                        in {"unsupported_access", "read_not_supported"}
+                    )
+                    or (
+                        item.get("error_class") == "decode"
+                        and item.get("subtype") == "visible_string_non_ascii"
+                    )
                 )
             ]
     return safe
+
+
+def _safe_poll_selection_snapshot(snapshot: object) -> dict[str, int]:
+    """Expose only allowlisted aggregate selection counts."""
+    if not isinstance(snapshot, dict):
+        return {}
+    return {
+        key: snapshot[key]
+        for key in _POLL_SELECTION_COUNTS
+        if type(snapshot.get(key)) is int and 0 <= snapshot[key] <= _COUNTER_MAX
+    }
 
 
 def _safe_setup_response(snapshot: object) -> dict[str, Any]:
@@ -266,14 +297,15 @@ def _safe_recovery_fence(snapshot: object) -> dict[str, Any]:
         outcome = attempt.get("outcome")
         if outcome is None or (
             isinstance(outcome, str)
-            and outcome in {
-            "missing_channel",
-            "missing_session",
-            "missing_identity",
-            "invalid_epoch",
-            "service_completed",
-            "service_not_acknowledged",
-            "service_exception",
+            and outcome
+            in {
+                "missing_channel",
+                "missing_session",
+                "missing_identity",
+                "invalid_epoch",
+                "service_completed",
+                "service_not_acknowledged",
+                "service_exception",
             }
         ):
             safe_attempt["outcome"] = outcome
@@ -311,16 +343,41 @@ def _safe_thin_rpc_frame_trace(snapshot: object) -> list[dict[str, Any]]:
     if not isinstance(snapshot, (tuple, list)):
         return []
     operations = {
-        "CAPABILITY", "CANCEL", "CONNECT", "CONNECTION_STATE", "DISCONNECT",
-        "DISCONNECTED", "DISCOVER", "ENCRYPTION_STATE", "FLOW_CONTROL",
-        "HANDLE_LOOKUP", "NOTIFICATION", "PAIR_ENCRYPT", "SUBSCRIBE", "WRITE",
-        "WRITE_CHAR", "WRITE_DESCRIPTOR", "READ_CHAR", "READ_DESCRIPTOR",
-        "SCAN", "SCAN_RESULT", "SCAN_DONE",
+        "CAPABILITY",
+        "CANCEL",
+        "CONNECT",
+        "CONNECTION_STATE",
+        "DISCONNECT",
+        "DISCONNECTED",
+        "DISCOVER",
+        "ENCRYPTION_STATE",
+        "FLOW_CONTROL",
+        "HANDLE_LOOKUP",
+        "NOTIFICATION",
+        "PAIR_ENCRYPT",
+        "SUBSCRIBE",
+        "WRITE",
+        "WRITE_CHAR",
+        "WRITE_DESCRIPTOR",
+        "READ_CHAR",
+        "READ_DESCRIPTOR",
+        "SCAN",
+        "SCAN_RESULT",
+        "SCAN_DONE",
     }
     kinds = {"request", "response", "event"}
     statuses = {
-        "OK", "ACCEPTED", "ERROR", "WRITE_FAILED", "CANCELLED", "success",
-        "failed", "timeout", "terminal_success", "terminal_error", "late_callback",
+        "OK",
+        "ACCEPTED",
+        "ERROR",
+        "WRITE_FAILED",
+        "CANCELLED",
+        "success",
+        "failed",
+        "timeout",
+        "terminal_success",
+        "terminal_error",
+        "late_callback",
     }
     states = {"connected", "disconnected", "encrypted", "failed"}
     safe: list[dict[str, Any]] = []
@@ -386,14 +443,24 @@ def _safe_read_transport_capture(snapshot: object) -> dict[str, Any]:
     if snapshot.get("outcome") in {"success", "error"}:
         safe["outcome"] = snapshot["outcome"]
     counters = (
-        "epoch", "epoch_count", "rpc_requests", "last_rpc_request_id",
-        "att_write_char_calls", "att_write_char_callbacks",
-        "last_att_write_request_id", "notification_callbacks",
-        "last_notification_epoch", "last_notification_seq",
+        "epoch",
+        "epoch_count",
+        "rpc_requests",
+        "last_rpc_request_id",
+        "att_write_char_calls",
+        "att_write_char_callbacks",
+        "last_att_write_request_id",
+        "notification_callbacks",
+        "last_notification_epoch",
+        "last_notification_seq",
         "last_notification_request_id",
-        "event_queue_depth", "poll_frame_calls", "poll_nonempty_returns",
-        "poll_empty_returns", "poll_queue_depth_before",
-        "poll_queue_depth_after", "total_frames_enqueued",
+        "event_queue_depth",
+        "poll_frame_calls",
+        "poll_nonempty_returns",
+        "poll_empty_returns",
+        "poll_queue_depth_before",
+        "poll_queue_depth_after",
+        "total_frames_enqueued",
     )
     statuses = {"none", "WRITE_CHAR", "success", "failed", "waiting_notification"}
     safe_enums = {
@@ -414,8 +481,11 @@ def _safe_read_transport_capture(snapshot: object) -> dict[str, Any]:
         },
     }
     booleans = {
-        "host_ready", "parent_connected", "link_active",
-        "last_att_write_waiting_notification", "last_notification_nonempty",
+        "host_ready",
+        "parent_connected",
+        "link_active",
+        "last_att_write_waiting_notification",
+        "last_notification_nonempty",
         "last_notification_matched_request",
     }
     for phase in ("before", "after"):
@@ -428,8 +498,10 @@ def _safe_read_transport_capture(snapshot: object) -> dict[str, Any]:
             if type(value) is int and 0 <= value <= 4_294_967_295:
                 projected[key] = value
         for key in (
-            "last_att_write_status", "last_rpc_request_op",
-            "last_enqueued_kind", "last_enqueued_op",
+            "last_att_write_status",
+            "last_rpc_request_op",
+            "last_enqueued_kind",
+            "last_enqueued_op",
         ):
             value = values.get(key)
             allowed = (
@@ -453,14 +525,24 @@ def _safe_proxy_read_counters(snapshot: object) -> dict[str, Any]:
         return {}
     safe: dict[str, Any] = {}
     for key in (
-        "epoch", "epoch_count", "rpc_requests", "last_rpc_request_id",
-        "att_write_char_calls", "att_write_char_callbacks",
-        "last_att_write_request_id", "notification_callbacks",
-        "last_notification_epoch", "last_notification_seq",
+        "epoch",
+        "epoch_count",
+        "rpc_requests",
+        "last_rpc_request_id",
+        "att_write_char_calls",
+        "att_write_char_callbacks",
+        "last_att_write_request_id",
+        "notification_callbacks",
+        "last_notification_epoch",
+        "last_notification_seq",
         "last_notification_request_id",
-        "event_queue_depth", "poll_frame_calls", "poll_nonempty_returns",
-        "poll_empty_returns", "poll_queue_depth_before",
-        "poll_queue_depth_after", "total_frames_enqueued",
+        "event_queue_depth",
+        "poll_frame_calls",
+        "poll_nonempty_returns",
+        "poll_empty_returns",
+        "poll_queue_depth_before",
+        "poll_queue_depth_after",
+        "total_frames_enqueued",
     ):
         value = snapshot.get(key)
         if type(value) is int and 0 <= value <= 4_294_967_295:
@@ -468,7 +550,11 @@ def _safe_proxy_read_counters(snapshot: object) -> dict[str, Any]:
     for key in ("last_att_write_status", "last_rpc_request_op"):
         value = snapshot.get(key)
         if isinstance(value, str) and value in {
-            "none", "WRITE_CHAR", "success", "failed", "waiting_notification"
+            "none",
+            "WRITE_CHAR",
+            "success",
+            "failed",
+            "waiting_notification",
         }:
             safe[key] = value
     last_enqueued_kind = snapshot.get("last_enqueued_kind")
@@ -476,14 +562,26 @@ def _safe_proxy_read_counters(snapshot: object) -> dict[str, Any]:
         safe["last_enqueued_kind"] = last_enqueued_kind
     last_enqueued_op = snapshot.get("last_enqueued_op")
     if last_enqueued_op in {
-        "none", "NOTIFICATION", "CONNECTED", "DISCONNECTED", "CONNECT",
-        "DISCONNECT", "WRITE_CHAR", "READ_CHAR", "PAIR_ENCRYPT",
-        "CAPABILITY", "ERROR", "INVALID_REQUEST",
+        "none",
+        "NOTIFICATION",
+        "CONNECTED",
+        "DISCONNECTED",
+        "CONNECT",
+        "DISCONNECT",
+        "WRITE_CHAR",
+        "READ_CHAR",
+        "PAIR_ENCRYPT",
+        "CAPABILITY",
+        "ERROR",
+        "INVALID_REQUEST",
     }:
         safe["last_enqueued_op"] = last_enqueued_op
     for key in (
-        "host_ready", "parent_connected", "link_active",
-        "last_att_write_waiting_notification", "last_notification_nonempty",
+        "host_ready",
+        "parent_connected",
+        "link_active",
+        "last_att_write_waiting_notification",
+        "last_notification_nonempty",
         "last_notification_matched_request",
     ):
         value = snapshot.get(key)
@@ -499,9 +597,7 @@ def _safe_batch_failure_trace(snapshot: object) -> dict[str, Any]:
     operation_id = snapshot.get("operation_id")
     if type(operation_id) is not int or not 1 <= operation_id <= 4_294_967_295:
         return {}
-    stages = {
-        "get_list_call", "response_parse", "single_fallback", "recovery_dispatch"
-    }
+    stages = {"get_list_call", "response_parse", "single_fallback", "recovery_dispatch"}
     exception_types = _BATCH_EXCEPTION_TYPES
     stage = snapshot.get("stage")
     exception_class = snapshot.get("exception_class")
@@ -671,6 +767,9 @@ async def async_get_config_entry_diagnostics(
             "read_transport_capture": read_transport_capture,
             "batch_failure_trace": batch_failure_trace,
             "poll_groups": poll_diagnostics,
+            "poll_selection": _safe_poll_selection_snapshot(
+                getattr(coordinator, "_openrbus_poll_selection_diagnostics", None)
+            ),
             "poller_registry": poller_registry,
             "coordinator_poll_count": min(
                 _COUNTER_MAX,

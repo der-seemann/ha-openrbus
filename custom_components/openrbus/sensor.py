@@ -19,13 +19,13 @@ from openrbus.registry import Registry
 from openrbus.value_codec import CanOpenTimeOfDay
 
 from .bridge import GenericRead
-from .const import CONF_ACCESS_LEVEL, DOMAIN
+from .const import CONF_READ_ACCESS_LEVEL, DOMAIN
 from .coordinator import OpenRBusCoordinator, OpenRBusPollingCoordinator
+from .identity import stable_node_id, stable_object_id
 from .register_entities import (
     async_apply_diagnostic_visibility,
     async_apply_entity_overrides,
     cleanup_legacy_sensor_entities,
-    control_kind,
     diagnostics_enabled,
     ensure_polling_coordinators,
     entity_enabled_by_default,
@@ -34,6 +34,7 @@ from .register_entities import (
     register_name,
     restore_migrated_sensor_entities,
     rows_for_parent,
+    should_project_as_control,
 )
 from .zones import profile_for, zone_device_name, zone_enabled, zone_subindex
 
@@ -57,7 +58,17 @@ async def async_setup_entry(
     configured = dict(entry.data)
     configured.update(getattr(entry, "options", {}))
     try:
-        configured_level = max(1, min(3, int(configured.get(CONF_ACCESS_LEVEL, 1))))
+        configured_level = max(
+            1,
+            min(
+                3,
+                int(
+                    configured.get(
+                        CONF_READ_ACCESS_LEVEL, configured.get("access_level", 1)
+                    )
+                ),
+            ),
+        )
     except (TypeError, ValueError):
         configured_level = 1
     runtime_nodes = coordinator.inventories or tuple(coordinator.devices)
@@ -85,7 +96,12 @@ async def async_setup_entry(
     # Register every readable row, but let typed control platforms own rows
     # whose registry metadata proves a Number/Select/Switch projection.
     for identity, register, group, _poll_allowed in rows:
-        if not register.readable or control_kind(register, coordinator.language):
+        effective_level = coordinator.effective_access_levels.get(identity.node)
+        if effective_level is None and coordinator.configured_access_level == 1:
+            effective_level = 1
+        if not register.readable or should_project_as_control(
+            coordinator, register, effective_level
+        ):
             continue
         # A legacy typed projection may already own this stable object ID even
         # when the expanded Core catalogue no longer has enough wire evidence
@@ -226,7 +242,7 @@ class OpenRBusDeviceTypeSensor(CoordinatorEntity[OpenRBusCoordinator], SensorEnt
     def __init__(self, coordinator: OpenRBusCoordinator) -> None:
         super().__init__(coordinator)
         self._attr_name = "Device type" if coordinator.language == "en" else "Gerätetyp"
-        self._attr_unique_id = f"{coordinator.config_entry.entry_id}_2001_02"
+        self._attr_unique_id = stable_object_id(coordinator, 0xFF, 0x2001, 0x02)
 
     @property
     def native_value(self) -> int | str | None:
@@ -272,7 +288,7 @@ class OpenRBusIdentitySensor(CoordinatorEntity[OpenRBusCoordinator], SensorEntit
         english, german = labels[field]
         self._attr_name = english if language == "en" else german
         self._attr_unique_id = (
-            f"{coordinator.config_entry.entry_id}_node_{identity.node}_{field}"
+            f"{stable_node_id(coordinator, identity.node)}:identity:{field}"
         )
 
     @property
@@ -289,7 +305,7 @@ class OpenRBusIdentitySensor(CoordinatorEntity[OpenRBusCoordinator], SensorEntit
             identifiers={
                 (
                     "openrbus",
-                    f"{self.coordinator.config_entry.entry_id}:node:{self._identity.node}",
+                    stable_node_id(self.coordinator, self._identity.node),
                 )
             },
             name=_identity_display_name(self._identity),
@@ -348,9 +364,8 @@ class OpenRBusRegisterSensor(
         address = register.address
         # Node number is a stable protocol identity.  Include the concrete
         # object address, never a localized/display name, in the unique ID.
-        self._attr_unique_id = (
-            f"{parent.config_entry.entry_id}:node:{identity.node}:"
-            f"object:{address.index:04x}:{address.subindex:02x}"
+        self._attr_unique_id = stable_object_id(
+            parent, identity.node, address.index, address.subindex
         )
 
     @property
@@ -386,14 +401,17 @@ class OpenRBusRegisterSensor(
             if slot is not None
             else None
         )
-        if profile is not None and zone_enabled(self._parent, profile.node, profile.subindex):
-            node_identifier = f"{self._parent.config_entry.entry_id}:node:{self._identity.node}"
+        if profile is not None and zone_enabled(
+            self._parent, profile.node, profile.subindex
+        ):
+            node_identifier = stable_node_id(self._parent, self._identity.node)
             return DeviceInfo(
                 identifiers={
                     ("openrbus", f"{node_identifier}:zone:{profile.subindex}")
                 },
-                name=zone_device_name(profile),
-                manufacturer=getattr(self._identity, "manufacturer", None) or "OpenRBus",
+                name=zone_device_name(profile, self._parent.language),
+                manufacturer=getattr(self._identity, "manufacturer", None)
+                or "OpenRBus",
                 model=getattr(self._identity, "model", None)
                 or getattr(self._identity, "family", None),
                 via_device=("openrbus", node_identifier),
@@ -402,7 +420,7 @@ class OpenRBusRegisterSensor(
             identifiers={
                 (
                     "openrbus",
-                    f"{self._parent.config_entry.entry_id}:node:{self._identity.node}",
+                    stable_node_id(self._parent, self._identity.node),
                 )
             },
             name=_identity_display_name(self._identity),

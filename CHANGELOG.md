@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.2 — release candidate
+
+### Added
+
+- Independent read and write access-level selection, including an explicit
+  no-write level and safe read-only projection when writes are unavailable.
+- Multi-step node, object-group, and entity selection with persistent
+  precedence, plus default-off global cooling and screed-drying filters from
+  reviewed exact-register maps.
+- Localized diagnostic, screed-drying, group, and access-level labels and
+  descriptions.
+
+### Security and safety
+
+- Potential controls require explicit write opt-in, positive effective access,
+  and complete Core write evidence. The public catalog currently enables no
+  register writes.
+- The integration pins the matching `openrbus==0.4.2` Core package.
+
 ## 0.4.1 — release candidate
 
 ### Added

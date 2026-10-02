@@ -8,7 +8,7 @@ from pathlib import Path
 
 from homeassistant.exceptions import HomeAssistantError
 
-PROXY_SOURCE_VERSION = "0.4.1"
+PROXY_SOURCE_VERSION = "0.4.2"
 MIN_RPC_SCHEMA_VERSION = 3
 SUPPORTED_PAIR_CONTRACT = "pair_terminal_v3"
 CAPABILITY_MARKER = "openrbus_thin_gatt.v1"

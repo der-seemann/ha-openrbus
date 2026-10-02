@@ -28,18 +28,34 @@ class _Registry:
 
     def async_update_entity(self, entity_id, **changes):
         for field, value in changes.items():
+            if field == "new_unique_id":
+                field = "unique_id"
             setattr(self.entities[entity_id], field, value)
 
 
 def _parent(entry_id="entry-current"):
     return SimpleNamespace(
         language="de",
-        config_entry=SimpleNamespace(entry_id=entry_id),
+        config_entry=SimpleNamespace(
+            entry_id=entry_id, data={"ble_device": "00:11:22:33:44:55"}, options={}
+        ),
+        effective_access_levels={4: 3},
+        configured_access_level=3,
+        configured_read_access_level=3,
+        configured_write_access_level=1,
+        write_enabled=True,
     )
 
 
 def _row(address="346a:00"):
-    return SimpleNamespace(readable=True, address=ObjectAddress.parse(address))
+    return SimpleNamespace(
+        readable=True,
+        writable=True,
+        address=ObjectAddress.parse(address),
+        access_level_evidence={
+            "write": {"known": True, "complete": True, "levels": ["User"]}
+        },
+    )
 
 
 def _entity(entity_id, *, domain, platform, unique_id, entry_id, **kwargs):
@@ -60,6 +76,33 @@ def _entity(entity_id, *, domain, platform, unique_id, entry_id, **kwargs):
     }
     values.update(kwargs)
     return SimpleNamespace(**values)
+
+
+def test_registry_uid_migration_retains_entity_id_and_user_disable(monkeypatch):
+    parent = _parent()
+    entity = _entity(
+        "sensor.my_existing_name",
+        domain="sensor",
+        platform="openrbus",
+        unique_id="entry-current:node:4:object:346a:04",
+        entry_id="entry-current",
+        disabled_by="user",
+    )
+    registry = _Registry([entity])
+    monkeypatch.setattr(register_entities.er, "async_get", lambda _hass: registry)
+    monkeypatch.setattr(
+        register_entities.dr,
+        "async_get",
+        lambda _hass: SimpleNamespace(devices={}),
+    )
+
+    register_entities.migrate_stable_registry_ids(object(), parent)
+
+    assert entity.entity_id == "sensor.my_existing_name"
+    assert entity.unique_id == register_entities.entity_unique_id(
+        parent, SimpleNamespace(node=4), _row("346a:04")
+    )
+    assert entity.disabled_by == "user"
 
 
 def test_old_typed_rows_are_removed_only_for_current_entry_and_identity(monkeypatch):

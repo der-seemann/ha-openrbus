@@ -1,6 +1,7 @@
 """Focused HA catalog-to-entity projection tests."""
 
 from collections import Counter
+from dataclasses import replace
 
 from openrbus.catalog import catalog_for_node
 from openrbus.discovery import DeviceIdentity, resolve_device_identity
@@ -10,6 +11,7 @@ from openrbus.value_codec import CanOpenTimeOfDay
 from custom_components.openrbus.register_entities import (
     control_kind,
     entity_unique_id,
+    should_project_as_control,
 )
 from custom_components.openrbus.sensor import (
     _catalog_visible,
@@ -17,11 +19,46 @@ from custom_components.openrbus.sensor import (
 )
 
 
+def test_synthetic_confirmed_register_projects_as_control_only_after_both_gates() -> (
+    None
+):
+    identity = resolve_device_identity(DeviceIdentity(3, 7702, 3, "GTW-Bluetooth"))
+    row = next(
+        candidate
+        for source in catalog_for_node(identity, max_access_level=3)
+        if (candidate := replace(source, writable=True))
+        and control_kind(candidate) == "number"
+    )
+    confirmed = replace(
+        row,
+        safety="validated",
+        access_level_evidence={
+            "write": {"known": True, "complete": True, "levels": ["User"]}
+        },
+    )
+    parent = type(
+        "Parent",
+        (),
+        {
+            "language": "en",
+            "write_enabled": False,
+            "configured_write_access_level": 1,
+        },
+    )()
+    assert not should_project_as_control(parent, confirmed, 1)
+
+    parent.write_enabled = True
+    assert should_project_as_control(parent, confirmed, 1)
+    parent.configured_write_access_level = 0
+    assert not should_project_as_control(parent, confirmed, 1)
+
+
 def test_canopen_time_projects_clock_text_and_standardized_date() -> None:
     milliseconds = (23 * 3600 + 59 * 60 + 58) * 1000 + 123
-    assert _time_of_day_native_value(
-        CanOpenTimeOfDay(milliseconds=milliseconds, days=42)
-    ) == "23:59:58.123"
+    assert (
+        _time_of_day_native_value(CanOpenTimeOfDay(milliseconds=milliseconds, days=42))
+        == "23:59:58.123"
+    )
     protocol_date = CanOpenTimeOfDay(
         milliseconds=milliseconds, days=42
     ).protocol_date.isoformat()
@@ -73,10 +110,14 @@ def test_cp733_without_public_write_evidence_projects_as_read_only_sensor() -> N
     assert control_kind(cp730_count) is None
 
     class _Entry:
-        config_entry = type("ConfigEntry", (), {"entry_id": "entry"})()
+        config_entry = type(
+            "ConfigEntry",
+            (),
+            {"entry_id": "entry", "data": {"ble_device": "00:11:22:33:44:55"}},
+        )()
 
     assert entity_unique_id(_Entry(), identity, cp733[0]) == (
-        "entry:node:4:object:346a:04"
+        "gateway:48f4634d1002f9f3c7570cb43e00dd86:node:4:object:346a:04"
     )
     other = resolve_device_identity(DeviceIdentity(77, None, None, "SCB-10"))
     other_cp733 = next(
@@ -87,6 +128,36 @@ def test_cp733_without_public_write_evidence_projects_as_read_only_sensor() -> N
     assert entity_unique_id(_Entry(), other, other_cp733) != entity_unique_id(
         _Entry(), identity, cp733[0]
     )
+
+
+def test_entity_uid_is_repeatable_across_entry_recreation() -> None:
+    identity = resolve_device_identity(DeviceIdentity(4, None, None, "SCB-10"))
+    row = next(
+        item
+        for item in catalog_for_node(identity)
+        if item.address == ObjectAddress(0x346A, 4)
+    )
+
+    def parent(entry_id: str, target: str):
+        return type(
+            "Parent",
+            (),
+            {
+                "config_entry": type(
+                    "Entry",
+                    (),
+                    {"entry_id": entry_id, "data": {"ble_device": target}},
+                )()
+            },
+        )()
+
+    original = entity_unique_id(parent("random-a", "00:11:22:33:44:55"), identity, row)
+    recreated = entity_unique_id(parent("random-b", "001122334455"), identity, row)
+    other_target = entity_unique_id(
+        parent("random-c", "00:11:22:33:44:56"), identity, row
+    )
+    assert original == recreated
+    assert original != other_target
 
 
 def test_family_projection_counts_and_polling_are_bounded() -> None:

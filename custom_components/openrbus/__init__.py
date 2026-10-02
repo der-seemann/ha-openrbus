@@ -313,8 +313,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Migrate registry rows before any platform is forwarded.  This is a
     # registry-only projection migration; it performs no transport reads or
     # writes and is safe to repeat on every reload.
-    from .register_entities import cleanup_legacy_sensor_entities
+    from .register_entities import (
+        cleanup_legacy_sensor_entities,
+        migrate_stable_registry_ids,
+    )
 
+    migrate_stable_registry_ids(hass, coordinator)
     cleanup_legacy_sensor_entities(hass, coordinator)
     if not hass.services.has_service(DOMAIN, "read_object"):
 
@@ -582,9 +586,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             "UNLOAD_TRACE event=coordinator_shutdown_complete controller_owned=%s",
             bool(getattr(backend, "_owns_controller", False)),
         )
-        hass.data.get(f"{DOMAIN}_polling_coordinators", {}).pop(
-            entry.entry_id, None
-        )
+        hass.data.get(f"{DOMAIN}_polling_coordinators", {}).pop(entry.entry_id, None)
     else:
         _LOGGER.warning("UNLOAD_TRACE event=coordinator_shutdown_skipped")
     if not hass.config_entries.async_entries(DOMAIN):

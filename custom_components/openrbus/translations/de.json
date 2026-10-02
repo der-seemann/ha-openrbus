@@ -13,14 +13,22 @@
         "data": {
           "backend": "Transport",
           "language": "Sprache der Entitäten",
-          "write_enabled": "Schreibzugriff aktivieren",
-          "diagnostics_enabled": "Diagnose- und Debug-Entitäten aktivieren",
-          "screed_drying_enabled": "Entitäten für Estrichtrocknung aktivieren",
           "access_level": "Zugriffsebene",
           "passkey": "Bluetooth-Kopplungs-PIN",
           "poll_interval_fast": "Schnelles Polling (Sekunden)",
           "poll_interval_standard": "Standard-Polling (Sekunden)",
-          "poll_interval_slow": "Langsames Polling (Sekunden)"
+          "poll_interval_slow": "Langsames Polling (Sekunden)",
+          "invalid_value_disable_after": "Entität nach dauerhaft ungültigen Werten deaktivieren nach (Minuten)"
+        },
+        "data_description": {
+          "backend": "Legt fest, wie Home Assistant eine Verbindung zur Heizungsanlage herstellt.",
+          "language": "Legt die Sprache für Namen und Beschreibungen der Entitäten fest.",
+          "poll_interval_fast": "Abstand zwischen häufigen Leseabfragen in Sekunden. Ein längerer Abstand verringert den Bluetooth-Datenverkehr.",
+          "poll_interval_standard": "Abstand zwischen regulären Leseabfragen in Sekunden.",
+          "poll_interval_slow": "Abstand zwischen seltenen Leseabfragen in Sekunden.",
+          "invalid_value_disable_after": "Deaktiviert eine Entität, wenn ihr Wert so viele Minuten dauerhaft ungültig war.",
+          "passkey": "PIN zum Koppeln des Gateways über Bluetooth.",
+          "access_level": "Höchste Registerebene auswählen, die beim Einrichten angefordert wird. Lese- und Schreibstufe lassen sich im nächsten Schritt getrennt festlegen."
         }
       },
       "ble_target": {
@@ -29,6 +37,9 @@
         "data": {
           "ble_device": "BLE-Gateway",
           "flow_action": "Navigation"
+        },
+        "data_description": {
+          "ble_device": "Das von Home Assistant oder dem ausgewählten Proxy erkannte Heizungs-Gateway auswählen."
         }
       },
       "access_level": {
@@ -38,9 +49,18 @@
           "read_access_level": "Lesezugriffsebene",
           "write_access_level": "Schreibzugriffsebene",
           "write_enabled": "Schreibzugriff aktivieren",
-          "screed_drying_enabled": "Entitäten für Estrichtrocknung aktivieren",
-          "diagnostics_enabled": "Diagnose- und Debug-Entitäten aktivieren",
-          "flow_action": "Navigation"
+          "screed_drying_enabled": "Estrichtrocknung aktivieren",
+          "diagnostics_enabled": "Diagnosedaten aktivieren",
+          "flow_action": "Navigation",
+          "cooling_enabled": "Kühlfunktionen aktivieren"
+        },
+        "data_description": {
+          "read_access_level": "Höchste Registerebene auswählen, deren Werte angezeigt werden sollen.",
+          "write_access_level": "Höchste Registerebene auswählen, auf die geschrieben werden darf. Dadurch wird Schreibzugriff allein nicht aktiviert.",
+          "write_enabled": "Erlaubt unterstützten Bedienelementen, Änderungen an die Heizungsanlage zu senden.",
+          "diagnostics_enabled": "Fügt Diagnose-Entitäten mit Transport- und Kommunikationsstatus zur Fehlersuche hinzu.",
+          "screed_drying_enabled": "Fügt Entitäten für das Estrichtrocknungsprogramm hinzu, sofern der Regler diese bereitstellt.",
+          "cooling_enabled": "Register aus der geprüften Funktionszuordnung Kühlung anzeigen. Ist die Option aus, werden genau diese Register vor Auswahl und Entitätserzeugung ausgeschlossen."
         }
       },
       "access_warning": {
@@ -49,6 +69,9 @@
         "data": {
           "access_level_acknowledged": "Ich verstehe die möglichen Auswirkungen und möchte diese Berechtigungen aktivieren.",
           "flow_action": "Navigation"
+        },
+        "data_description": {
+          "access_level_acknowledged": "Bestätigen, dass die oben angezeigten Zugriffs- und Schreiboptionen verstanden wurden."
         }
       },
       "credentials": {
@@ -57,6 +80,10 @@
           "passkey": "Bluetooth-Kopplungs-PIN",
           "auth_encryption_key": "Verschlüsselungskey",
           "flow_action": "Navigation"
+        },
+        "data_description": {
+          "passkey": "PIN zum Koppeln des Gateways über Bluetooth.",
+          "auth_encryption_key": "Achtstelliger Hexadezimal-Schlüssel zur Authentifizierung und Verschlüsselung der Verbindung."
         }
       },
       "thin_scan": {
@@ -65,6 +92,9 @@
         "data": {
           "ble_device": "BLE-Gerät",
           "flow_action": "Navigation"
+        },
+        "data_description": {
+          "ble_device": "Das Heizungs-Gateway auswählen, das über den ausgewählten ESPHome-Proxy gefunden wurde."
         }
       },
       "thin_controller": {
@@ -73,6 +103,9 @@
         "data": {
           "thin_rpc_controller": "Controller",
           "flow_action": "Navigation"
+        },
+        "data_description": {
+          "thin_rpc_controller": "Den ESPHome-Controller auswählen, der die zusammengehörigen Request-, Poll- und Diagnose-Services bereitstellt."
         }
       }
     },
@@ -82,7 +115,11 @@
       "no_esphome_entities": "Keine ESPHome-Sensoren für Rohantwort und Lese-Generation gefunden.",
       "access_confirmation_required": "Bitte bestätigen Sie die möglichen Auswirkungen, bevor Sie die ausgewählten Berechtigungen aktivieren.",
       "thin_rpc_scan_failed": "Remote-BLE-Scan über den ESP-Proxy fehlgeschlagen.",
-      "thin_rpc_no_ble_devices": "Keine BLE-Geräte am ESP-Proxy gefunden."
+      "thin_rpc_no_ble_devices": "Keine BLE-Geräte am ESP-Proxy gefunden.",
+      "invalid_thin_rpc_controller": "Der ausgewählte Thin-RPC-Controller ist nicht verfügbar.",
+      "no_thin_rpc_services": "Kein vollständiger Thin-RPC-Service-Verbund verfügbar.",
+      "thin_rpc_credentials_required": "Vor der Aktivierung von Thin-RPC den EHC-Schlüssel in secrets.yaml referenzieren.",
+      "thin_rpc_profile_required": "Für Thin-RPC ist ein Thin-GATT-Profil erforderlich."
     }
   },
   "options": {
@@ -97,7 +134,38 @@
           "write_access_level": "Schreibzugriffsebene",
           "write_enabled": "Schreibzugriff aktivieren",
           "entity_overrides": "Aktivierte Entitäten",
-          "zone_overrides": "Aktive Zonen"
+          "zone_overrides": "Aktive Zonen",
+          "diagnostics_enabled": "Diagnosedaten aktivieren",
+          "screed_drying_enabled": "Estrichtrocknung aktivieren",
+          "invalid_value_disable_after": "Entität nach dauerhaft ungültigen Werten deaktivieren nach (Minuten)",
+          "backend": "Transport",
+          "language": "Sprache der Entitäten",
+          "ble_device": "BLE-Gateway",
+          "passkey": "Bluetooth-Kopplungs-PIN",
+          "poll_interval_fast": "Schnelles Polling (Sekunden)",
+          "poll_interval_standard": "Standard-Polling (Sekunden)",
+          "poll_interval_slow": "Langsames Polling (Sekunden)",
+          "cooling_enabled": "Kühlfunktionen aktivieren",
+          "_openrbus_entity_picker": "Entitätsauswahl konfigurieren"
+        },
+        "data_description": {
+          "language": "Legt die Sprache für Namen und Beschreibungen der Entitäten fest.",
+          "write_enabled": "Erlaubt unterstützten Bedienelementen, Änderungen an die Heizungsanlage zu senden.",
+          "diagnostics_enabled": "Fügt Diagnose-Entitäten mit Transport- und Kommunikationsstatus zur Fehlersuche hinzu.",
+          "screed_drying_enabled": "Fügt Entitäten für das Estrichtrocknungsprogramm hinzu, sofern der Regler diese bereitstellt.",
+          "read_access_level": "Höchste Registerebene auswählen, deren Werte angezeigt werden sollen.",
+          "write_access_level": "Höchste Registerebene auswählen, auf die geschrieben werden darf. Dadurch wird Schreibzugriff allein nicht aktiviert.",
+          "poll_interval_fast": "Abstand zwischen häufigen Leseabfragen in Sekunden. Ein längerer Abstand verringert den Bluetooth-Datenverkehr.",
+          "poll_interval_standard": "Abstand zwischen regulären Leseabfragen in Sekunden.",
+          "poll_interval_slow": "Abstand zwischen seltenen Leseabfragen in Sekunden.",
+          "invalid_value_disable_after": "Deaktiviert eine Entität, wenn ihr Wert so viele Minuten dauerhaft ungültig war.",
+          "entity_overrides": "Auswählen, welche erkannten Entitäten angelegt werden sollen.",
+          "zone_overrides": "Zeigt zugehörigen Node und erkannte Herstellerfunktion; nur geräteseitig aktive Zonen können ausgewählt werden.",
+          "backend": "Legt fest, wie Home Assistant eine Verbindung zur Heizungsanlage herstellt.",
+          "ble_device": "Bluetooth-Adresse des Heizungs-Gateways auswählen oder eingeben.",
+          "passkey": "PIN zum Koppeln des Gateways über Bluetooth.",
+          "cooling_enabled": "Register aus der geprüften Funktionszuordnung Kühlung anzeigen. Ist die Option aus, werden genau diese Register vor Auswahl und Entitätserzeugung ausgeschlossen.",
+          "_openrbus_entity_picker": "Dreistufige Auswahl öffnen: Gerät, Kategorie, Entitäten. Vorhandene Entitätskennungen und gespeicherte Auswahl bleiben erhalten."
         }
       },
       "access_warning": {
@@ -106,6 +174,9 @@
         "data": {
           "access_level_acknowledged": "Ich verstehe die möglichen Auswirkungen und möchte diese Berechtigungen aktivieren.",
           "flow_action": "Navigation"
+        },
+        "data_description": {
+          "access_level_acknowledged": "Bestätigen, dass die oben angezeigten Zugriffs- und Schreiboptionen verstanden wurden."
         }
       },
       "credentials": {
@@ -113,6 +184,9 @@
         "data": {
           "auth_encryption_key": "Verschlüsselungskey",
           "flow_action": "Navigation"
+        },
+        "data_description": {
+          "auth_encryption_key": "Achtstelliger Hexadezimal-Schlüssel zur Authentifizierung und Verschlüsselung der Verbindung."
         }
       },
       "thin_controller": {
@@ -120,6 +194,9 @@
         "data": {
           "thin_rpc_controller": "Controller",
           "flow_action": "Navigation"
+        },
+        "data_description": {
+          "thin_rpc_controller": "Den ESPHome-Controller auswählen, der die zusammengehörigen Request-, Poll- und Diagnose-Services bereitstellt."
         }
       },
       "thin_scan": {
@@ -127,6 +204,54 @@
         "data": {
           "ble_device": "BLE-Gerät",
           "flow_action": "Navigation"
+        },
+        "data_description": {
+          "ble_device": "Das Heizungs-Gateway auswählen, das über den ausgewählten ESPHome-Proxy gefunden wurde."
+        }
+      },
+      "entity_nodes": {
+        "title": "Geräteauswahl",
+        "description": "Erkannte Geräte auswählen. Bekannte Modelle werden bei eindeutiger Erkennung benannt; weitere Geräte bleiben verfügbar.",
+        "data": {
+          "_openrbus_entity_nodes": "Geräte",
+          "_openrbus_entity_node_preset": "Bulk action",
+          "flow_action": "Navigation"
+        },
+        "data_description": {
+          "_openrbus_entity_nodes": "Erkannte Geräte auswählen. Die Liste enthält alle Geräte dieser Anlage.",
+          "_openrbus_entity_node_preset": "Set selected nodes to all, none, or their automatic defaults."
+        }
+      },
+      "entity_groups": {
+        "title": "Kategorieauswahl",
+        "description": "Eine Kategorie für eine Sammelaktion auswählen oder zur Auswahl einzelner Entitäten öffnen.",
+        "data": {
+          "_openrbus_entity_groups": "Kategorien",
+          "_openrbus_entity_group_preset": "Bulk action",
+          "_openrbus_entity_group_edit": "Group to edit",
+          "_openrbus_entity_group_action": "Next action",
+          "flow_action": "Navigation"
+        },
+        "data_description": {
+          "_openrbus_entity_groups": "Kategorien folgen der Original-App, soweit Katalog- oder CP020-Belege die Zuordnung stützen. Nicht zugeordnete Einträge bleiben unter Allgemein.",
+          "_openrbus_entity_group_preset": "Apply all, none, or defaults to selected groups.",
+          "_openrbus_entity_group_edit": "Eine Kategorie zur Auswahl einzelner Entitäten wählen.",
+          "_openrbus_entity_group_action": "Edit the chosen group or finish the selection."
+        }
+      },
+      "entity_items": {
+        "title": "Entitäten der Kategorie",
+        "description": "Nach Name, Objekt-/Register-ID, Gerät, Zone oder Kategorie suchen.",
+        "data": {
+          "_openrbus_entity_search": "Search",
+          "_openrbus_entity_preset": "Selection mode",
+          "_openrbus_entity_items": "Enabled entities",
+          "_openrbus_entity_item_nav": "Action"
+        },
+        "data_description": {
+          "_openrbus_entity_search": "Nach Name, Objekt-/Register-ID, Gerät, Zone oder Kategorie suchen.",
+          "_openrbus_entity_preset": "Use a bulk preset or edit individual checkboxes.",
+          "_openrbus_entity_items": "Einzelne Entitäten dieser Kategorie auswählen."
         }
       }
     }
@@ -136,6 +261,36 @@
       "options": {
         "next": "Weiter",
         "back": "Zurück"
+      }
+    },
+    "entity_selection_action": {
+      "options": {
+        "default": "Übergeordnete Vorgabe verwenden",
+        "all": "Alle auswählen",
+        "none": "Alle abwählen",
+        "keep": "Aktuelle Auswahl beibehalten"
+      }
+    },
+    "entity_group_action": {
+      "options": {
+        "edit": "Gruppe bearbeiten",
+        "done": "Auswahl abschließen"
+      }
+    },
+    "entity_item_action": {
+      "options": {
+        "custom": "Einzelauswahl verwenden",
+        "default": "Übergeordnete Vorgabe verwenden",
+        "all": "Alle auswählen",
+        "none": "Alle abwählen"
+      }
+    },
+    "entity_item_navigation": {
+      "options": {
+        "search": "Suche anwenden",
+        "next": "Speichern und zu Gruppen",
+        "done": "Auswahl abschließen",
+        "back": "Zurück zu Gruppen"
       }
     }
   }

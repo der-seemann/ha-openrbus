@@ -26,6 +26,7 @@ from custom_components.openrbus.coordinator import (
 )
 from custom_components.openrbus.diagnostics import (
     _safe_batch_failure_trace,
+    _safe_poll_selection_snapshot,
     _safe_poll_snapshot,
     _safe_read_operation_trace,
     _safe_read_transport_capture,
@@ -91,8 +92,29 @@ def test_thin_rpc_frame_trace_allows_only_bounded_categorical_fields() -> None:
             "context": "discovery",
             "read_operation_id": 9,
         },
-        {"direction": "other", "kind": "other", "op": "other", "request_id_present": False},
+        {
+            "direction": "other",
+            "kind": "other",
+            "op": "other",
+            "request_id_present": False,
+        },
     ]
+
+
+def test_poll_selection_diagnostics_allow_only_bounded_aggregate_counts() -> None:
+    assert _safe_poll_selection_snapshot(
+        {
+            "runtime_nodes": 5,
+            "catalog_rows": 17,
+            "read_access_excluded": 17,
+            "private_address": "must not escape",
+            "negative": -1,
+        }
+    ) == {
+        "runtime_nodes": 5,
+        "catalog_rows": 17,
+        "read_access_excluded": 17,
+    }
 
 
 def test_read_transport_diagnostics_retain_only_safe_join_fields() -> None:
@@ -194,9 +216,16 @@ def test_safe_batch_failure_trace_is_payload_free_and_bounded() -> None:
             "last_notification_request_id": 81,
         },
     }
-    assert _safe_batch_failure_trace(
-        {"operation_id": 23, "stage": "private_stage", "exception_class": "transport_error"}
-    ) == {}
+    assert (
+        _safe_batch_failure_trace(
+            {
+                "operation_id": 23,
+                "stage": "private_stage",
+                "exception_class": "transport_error",
+            }
+        )
+        == {}
+    )
 
 
 @pytest.mark.asyncio
@@ -210,8 +239,13 @@ async def test_diagnostics_reads_pollers_from_hass_entry_registry_fallback() -> 
         }
     )
     coordinator = SimpleNamespace(
-        devices=(), inventories=(), discovery_error=None, _backend=None,
-        _cycle_id=0, last_update_success=True, _diagnostic_poll_count=0,
+        devices=(),
+        inventories=(),
+        discovery_error=None,
+        _backend=None,
+        _cycle_id=0,
+        last_update_success=True,
+        _diagnostic_poll_count=0,
     )
     entry = SimpleNamespace(
         runtime_data=coordinator,
@@ -277,7 +311,10 @@ def test_visible_string_decode_subtype_uses_only_shape_and_exception_class() -> 
         b"\xff".decode("ascii")
     non_ascii = ValidationError("private address and value")
     non_ascii.__cause__ = caught.value
-    assert _visible_string_decode_subtype(non_ascii, b"\xff", 20) == "visible_string_non_ascii"
+    assert (
+        _visible_string_decode_subtype(non_ascii, b"\xff", 20)
+        == "visible_string_non_ascii"
+    )
     assert (
         _visible_string_decode_subtype(ValidationError("private"), b"x" * 21, 20)
         == "visible_string_overlength"
@@ -286,11 +323,23 @@ def test_visible_string_decode_subtype_uses_only_shape_and_exception_class() -> 
         _visible_string_decode_subtype(ValidationError("private"), b"x", 20)
         == "visible_string_other"
     )
-    assert safe_batch_exception_type(RequestTimeoutError("private target")) == "request_timeout"
-    assert safe_batch_exception_type(HomeAssistantError("private details")) == "home_assistant_error"
+    assert (
+        safe_batch_exception_type(RequestTimeoutError("private target"))
+        == "request_timeout"
+    )
+    assert (
+        safe_batch_exception_type(HomeAssistantError("private details"))
+        == "home_assistant_error"
+    )
     assert safe_batch_exception_type(RuntimeError("private details")) == "runtime_error"
-    assert safe_batch_exception_type(AttributeError("private details")) == "attribute_error"
-    assert safe_batch_exception_type(NotImplementedError("private details")) == "not_implemented_error"
+    assert (
+        safe_batch_exception_type(AttributeError("private details"))
+        == "attribute_error"
+    )
+    assert (
+        safe_batch_exception_type(NotImplementedError("private details"))
+        == "not_implemented_error"
+    )
 
 
 def test_poll_snapshot_keeps_only_bounded_redacted_numbers() -> None:
@@ -367,8 +416,8 @@ def test_poll_snapshot_keeps_only_bounded_redacted_numbers() -> None:
                     "abort_category": "object_missing",
                     "decode_subtype": "visible_string_non_ascii",
                     "batch_exception_type": "request_timeout",
-                }
-            ]
+                },
+            ],
         },
         include_item_failures=True,
     )
@@ -511,6 +560,7 @@ async def test_entry_diagnostics_add_only_redacted_transport_metrics() -> None:
             "available_items": 7,
             "unavailable_items": 1,
             "availability_delta": -1,
+            "registry_disabled_count": 2,
             "poll_in_progress": True,
             "error_counts": {"session": 2},
             "item_failures": [
@@ -598,6 +648,10 @@ async def test_entry_diagnostics_add_only_redacted_transport_metrics() -> None:
         diagnostics["coordinator"]["poll_groups"]["standard"]["error_counts"]["session"]
         == 2
     )
+    assert (
+        diagnostics["coordinator"]["poll_groups"]["standard"]["registry_disabled_count"]
+        == 2
+    )
     assert "item_failures" not in diagnostics["coordinator"]["poll_groups"]["standard"]
     assert "AA:BB:CC:DD:EE:FF" not in rendered
     assert "credential" not in rendered
@@ -619,7 +673,9 @@ async def test_poll_group_tracks_fixed_error_classes_and_availability_delta() ->
 
     class _Parent:
         config_entry = SimpleNamespace(
-            entry_id="entry", options={"diagnostics_enabled": True}
+            entry_id="entry",
+            data={"ble_device": "00:11:22:33:44:55"},
+            options={"diagnostics_enabled": True},
         )
 
         async def async_read_objects(self, _addresses, *, node):
@@ -657,6 +713,7 @@ async def test_poll_group_tracks_fixed_error_classes_and_availability_delta() ->
     poller._diagnostic_available_items = 0
     poller._diagnostic_total_items = 0
     poller._diagnostic_availability_delta = 0
+    poller._diagnostic_registry_disabled_count = 0
     poller_ref["poller"] = poller
 
     await poller._async_update_data()
@@ -707,13 +764,13 @@ async def test_poll_group_quarantines_object_failures_until_scope_changes() -> N
         parameter_number=7,
         name="private identity label",
     )
-    backend = SimpleNamespace(
-        _session_generation=2, session=SimpleNamespace(epoch=7)
-    )
+    backend = SimpleNamespace(_session_generation=2, session=SimpleNamespace(epoch=7))
 
     class _Parent:
         config_entry = SimpleNamespace(
-            entry_id="entry", options={"diagnostics_enabled": True}
+            entry_id="entry",
+            data={"ble_device": "00:11:22:33:44:55"},
+            options={"diagnostics_enabled": True},
         )
         backend_mode = "esphome_thin_rpc"
         inventories = (SimpleNamespace(identity=identity),)
@@ -760,6 +817,7 @@ async def test_poll_group_quarantines_object_failures_until_scope_changes() -> N
     poller._diagnostic_available_items = 0
     poller._diagnostic_total_items = 0
     poller._diagnostic_availability_delta = 0
+    poller._diagnostic_registry_disabled_count = 0
     poller._poll_in_progress_count = 0
 
     first = await poller._async_poll_data()

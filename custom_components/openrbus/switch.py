@@ -16,6 +16,7 @@ from .register_entities import (
     entity_enabled_by_default,
     enum_options,
     rows_for_parent,
+    should_project_as_control,
     write_access_allowed,
 )
 
@@ -32,14 +33,16 @@ async def async_setup_entry(
     polling = ensure_polling_coordinators(hass, parent)
     entities: list[OpenRBusSwitch] = []
     for identity, register, group, _poll_allowed in rows_for_parent(parent):
-        if control_kind(register, parent.language) != "switch":
+        effective = parent.effective_access_levels.get(identity.node)
+        if effective is None and parent.configured_access_level == 1:
+            effective = 1
+        if control_kind(register, parent.language) != "switch" or not (
+            should_project_as_control(parent, register, effective)
+        ):
             continue
         options = dict(enum_options(register, parent.language))
         if set(options) != {0, 1}:
             continue
-        effective = parent.effective_access_levels.get(identity.node)
-        if effective is None and parent.configured_access_level == 1:
-            effective = 1
         entities.append(
             OpenRBusSwitch(
                 parent,
@@ -59,10 +62,9 @@ class OpenRBusSwitch(OpenRBusRegisterEntity, SwitchEntity):
 
     def __init__(self, parent, coordinator, identity, register, **kwargs):
         super().__init__(parent, coordinator, identity, register, **kwargs)
-        self._attr_entity_registry_enabled_default = (
-            entity_enabled_by_default(parent, identity, register)
-            and write_access_allowed(parent, register, self._effective_access_level)
-        )
+        self._attr_entity_registry_enabled_default = entity_enabled_by_default(
+            parent, identity, register
+        ) and write_access_allowed(parent, register, self._effective_access_level)
 
     @property
     def available(self) -> bool:

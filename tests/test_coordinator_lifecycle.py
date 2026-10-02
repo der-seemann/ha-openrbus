@@ -180,6 +180,8 @@ async def test_coordinator_stops_backend_when_startup_discovery_fails(
 
     assert backend.started is True
     assert backend.stopped is True
+    assert coordinator._discovery_attempted is True
+    assert coordinator.discovery_error is failure
 
 
 @pytest.mark.asyncio
@@ -250,6 +252,7 @@ async def test_higher_read_policy_does_not_raise_write_policy(monkeypatch) -> No
             CONF_WRITE_ACCESS_LEVEL: 1,
         }
     )
+
     async def read_access(address, *, node=0xFF):
         return GenericRead(node, address, b"\x03", 3)
 
@@ -309,6 +312,43 @@ def test_entry_options_override_stale_data(monkeypatch) -> None:
     )
     coordinator = OpenRBusCoordinator(_hass(), entry)
     assert coordinator.backend_mode == BACKEND_NATIVE
+
+
+@pytest.mark.asyncio
+async def test_no_write_level_is_preserved_independently_of_read_authorization(
+    monkeypatch,
+) -> None:
+    backend = _Backend()
+
+    backend_options = {}
+
+    def make_backend(*args, **kwargs):
+        backend_options.update(kwargs)
+        return backend
+
+    monkeypatch.setattr(
+        "custom_components.openrbus.coordinator.NativeBluetoothBackend",
+        make_backend,
+    )
+    entry = _entry(BACKEND_NATIVE)
+    entry.options = {
+        CONF_READ_ACCESS_LEVEL: 3,
+        CONF_WRITE_ACCESS_LEVEL: 0,
+        CONF_WRITE_ENABLED: True,
+    }
+
+    coordinator = OpenRBusCoordinator(_hass(), entry)
+
+    assert coordinator.configured_read_access_level == 3
+    assert coordinator.configured_write_access_level == 0
+    # The Core transport still requests enough access for reads, while the
+    # local write policy retains its distinct no-write value.
+    assert coordinator.configured_access_level == 3
+    assert backend_options["access_level"] == 3
+    with pytest.raises(HomeAssistantError, match="set to no write"):
+        await coordinator.async_write_object(
+            ObjectAddress(0x346A, 0x04), 1, node=4, allow_unsafe=True
+        )
 
 
 def test_coordinator_persists_language_write_policy_and_poll_groups(

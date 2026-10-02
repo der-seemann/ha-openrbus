@@ -18,7 +18,10 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from openrbus.catalog import catalog_for_node
 from openrbus.client import WritePlan
 from openrbus.discovery import DeviceIdentity, resolve_device_identity
-from openrbus.errors import CanOpenAbortError, OpenRBusError
+from openrbus.errors import (
+    CanOpenAbortError,
+    OpenRBusError,
+)
 from openrbus.inventory import DeviceInventory, ObjectCapability, ObjectSupport
 from openrbus.protocol.canip import ObjectAddress
 from openrbus.registry import AccessOperation, Registry
@@ -56,6 +59,7 @@ from .const import (
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
 )
+from .identity import migrate_legacy_unique_id, stable_object_id
 from .transport import (
     NativeBluetoothBackend,
     ThinRpcBackend,
@@ -72,12 +76,15 @@ from .zones import (
     ZONE_FUNCTION_INDEX,
     ZoneProfile,
     normalized_overrides,
+    normalized_selection_overrides,
+    zone_function_slots,
 )
 
 _LOGGER = logging.getLogger(__name__)
 _COORDINATOR_INSTANCE_IDS = itertools.count(1)
 _POLL_BATCH_SIZE = 32
 _DIAGNOSTIC_ITEM_FAILURE_LIMIT = 16
+_REGISTRY = Registry.load_default()
 _ERROR_CLASSES = ("abort", "item", "batch", "decode", "correlation", "session")
 _ABORT_CATEGORIES = frozenset(
     {
@@ -195,13 +202,18 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         self._diagnostic_error_counts = dict.fromkeys(_ERROR_CLASSES, 0)
         self._diagnostic_item_failures: list[dict[str, int | str]] = []
         self._diagnostic_poll_count = 0
+        self._discovery_attempted = False
+        self.discovery_error: BaseException | None = None
         self.backend_mode = backend
 
-        def configured_level(key: str, fallback: object = 1) -> int:
+        def configured_level(
+            key: str, fallback: object = 1, *, allow_no_write: bool = False
+        ) -> int:
             try:
-                return max(1, min(3, int(configured.get(key, fallback))))
+                minimum = 0 if allow_no_write else 1
+                return max(minimum, min(3, int(configured.get(key, fallback))))
             except (TypeError, ValueError):
-                return 1
+                return 0 if allow_no_write else 1
 
         # A legacy single policy was both read and write policy.  New entries
         # carry explicit independent levels.  Core is requested at the
@@ -210,7 +222,9 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             CONF_READ_ACCESS_LEVEL, configured.get(CONF_ACCESS_LEVEL, 1)
         )
         self.configured_write_access_level = configured_level(
-            CONF_WRITE_ACCESS_LEVEL, configured.get(CONF_ACCESS_LEVEL, 1)
+            CONF_WRITE_ACCESS_LEVEL,
+            configured.get(CONF_ACCESS_LEVEL, 1),
+            allow_no_write=True,
         )
         self.configured_access_level = max(
             self.configured_read_access_level, self.configured_write_access_level
@@ -262,9 +276,12 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         # Entries are keyed by protocol identity, never display names.
         self.zone_profiles: dict[tuple[int, int], ZoneProfile] = {}
         self.zone_overrides = normalized_overrides(configured.get(CONF_ZONE_OVERRIDES))
-        self.entity_overrides = normalized_overrides(
-            configured.get(CONF_ENTITY_OVERRIDES)
-        )
+        self.entity_overrides = {
+            migrate_legacy_unique_id(self, key): value
+            for key, value in normalized_selection_overrides(
+                configured.get(CONF_ENTITY_OVERRIDES)
+            ).items()
+        }
         if backend == BACKEND_NATIVE:
             self._backend = NativeBluetoothBackend(
                 hass,
@@ -345,7 +362,12 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             # the lifecycle boundary so custom/legacy backends cannot omit the
             # evidence-backed family metadata needed by catalog_for_node().
             # This is a pure identity projection; it does not probe or infer.
-            discovered = await self._backend.async_discover_devices()
+            self._discovery_attempted = True
+            try:
+                discovered = await self._backend.async_discover_devices()
+            except BaseException as error:
+                self.discovery_error = error
+                raise
             self.devices = tuple(
                 resolve_device_identity(identity)
                 if isinstance(identity, DeviceIdentity)
@@ -398,14 +420,8 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             node = getattr(identity, "node", None)
             if not isinstance(node, int):
                 continue
-            rows = catalog_for_node(runtime_node, Registry.load_default())
-            slots = sorted(
-                {
-                    item.address.subindex
-                    for item in rows
-                    if item.address.index == ZONE_FUNCTION_INDEX
-                }
-            )
+            rows = catalog_for_node(runtime_node, _REGISTRY)
+            slots = zone_function_slots(rows)
             for slot in slots:
                 try:
                     function_read = await self.async_read_object(
@@ -424,7 +440,17 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                         friendly_name = name_read.value.strip("\x00 ") or None
                 except (HomeAssistantError, OpenRBusError, TypeError, ValueError):
                     pass
-                profile = ZoneProfile(node, slot, function_read.value, friendly_name)
+                # The device model/family is manufacturer identity evidence.
+                # Keep it on each profile so both the Options Flow and HA's
+                # zone child device show which bus node owns the slot.
+                node_name = (
+                    getattr(identity, "model", None)
+                    or getattr(identity, "family", None)
+                    or getattr(identity, "name", None)
+                )
+                profile = ZoneProfile(
+                    node, slot, function_read.value, friendly_name, node_name
+                )
                 profiles[(node, slot)] = profile
         self.zone_profiles = profiles
 
@@ -443,7 +469,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         # external evidence Core returns UNKNOWN, while capability addresses
         # remain valid node-scoped evidence for catalog_for_node().
         try:
-            inventory.resolve_registry(Registry.load_default())
+            inventory.resolve_registry(_REGISTRY)
         except (AttributeError, TypeError, ValueError):
             pass
         return inventory
@@ -496,7 +522,9 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
     async def async_read_object_with_transport_capture(
         self, address: ObjectAddress, *, node: int = 0xFF
     ) -> GenericRead:
-        capture = getattr(self._backend, "async_read_object_with_transport_capture", None)
+        capture = getattr(
+            self._backend, "async_read_object_with_transport_capture", None
+        )
         if not callable(capture):
             raise HomeAssistantError("Transport capture requires Thin-RPC")
         return await capture(address, node=node)
@@ -507,7 +535,10 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         return (await self.async_read_object(address, node=node)).raw_value
 
     async def async_read_objects(
-        self, addresses: tuple[ObjectAddress, ...], *, node: int = 0xFF,
+        self,
+        addresses: tuple[ObjectAddress, ...],
+        *,
+        node: int = 0xFF,
         trace_failure: bool = False,
     ) -> tuple[GenericRead | HomeAssistantError, ...]:
         if trace_failure and isinstance(self._backend, ThinRpcBackend):
@@ -527,6 +558,8 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
     ) -> WritePlan:
         """Run one Core-gated confirmed write through the selected backend."""
 
+        if self.configured_write_access_level not in (1, 2, 3):
+            raise HomeAssistantError("OpenRBus write access level is set to no write")
         if not self.write_enabled:
             raise HomeAssistantError("OpenRBus write access is disabled")
         # The configured role is only a request.  Never let it elevate a
@@ -558,7 +591,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 raise HomeAssistantError(
                     "OpenRBus effective access level does not meet the configured write policy"
                 )
-            definition = Registry.load_default().find(address)
+            definition = _REGISTRY.find(address)
             if definition is not None:
                 requirement = definition.access_requirement(
                     address, AccessOperation.WRITE, device_family=None
@@ -595,9 +628,8 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             coordinator.async_reactivate_register(node, address)
             try:
                 registry = er.async_get(self.hass)
-                unique_id = (
-                    f"{self.config_entry.entry_id}:node:{node}:"
-                    f"object:{address.index:04x}:{address.subindex:02x}"
+                unique_id = stable_object_id(
+                    self, node, address.index, address.subindex
                 )
                 for platform in ("sensor", "number", "select", "switch"):
                     entity_id = registry.async_get_entity_id(
@@ -669,6 +701,7 @@ class OpenRBusPollingCoordinator(
         self._diagnostic_total_items = 0
         self._diagnostic_availability_delta = 0
         self._poll_in_progress_count = 0
+        self._diagnostic_registry_disabled_count = 0
 
     def diagnostics(self) -> dict[str, Any]:
         """Return bounded, redacted poll statistics for config diagnostics."""
@@ -687,6 +720,7 @@ class OpenRBusPollingCoordinator(
             "item_failures": tuple(self._diagnostic_item_failures),
             "quarantined_count": self.validity.quarantined_count,
             "quarantined_items": self.validity.quarantined_snapshot(),
+            "registry_disabled_count": self._diagnostic_registry_disabled_count,
         }
 
     def _object_failure_scope(self, node: int) -> object | None:
@@ -698,8 +732,7 @@ class OpenRBusPollingCoordinator(
             (
                 getattr(inventory, "identity", None)
                 for inventory in getattr(self.parent, "inventories", ())
-                if getattr(getattr(inventory, "identity", None), "node", None)
-                == node
+                if getattr(getattr(inventory, "identity", None), "node", None) == node
             ),
             None,
         )
@@ -784,9 +817,8 @@ class OpenRBusPollingCoordinator(
         for node, address in self.registers:
             if self.validity.is_expired((node, address)):
                 continue
-            unique_id = (
-                f"{self.parent.config_entry.entry_id}:node:{node}:"
-                f"object:{address.index:04x}:{address.subindex:02x}"
+            unique_id = stable_object_id(
+                self.parent, node, address.index, address.subindex
             )
             # A row may have existed as a legacy sensor before its typed
             # projection was introduced.  Do not let a disabled stale sensor
@@ -808,6 +840,10 @@ class OpenRBusPollingCoordinator(
                         if entry is not None:
                             entries.append(entry)
             if not _should_poll_registry_entries(tuple(entries)):
+                self._diagnostic_registry_disabled_count = min(
+                    _DIAGNOSTIC_COUNTER_MAX,
+                    self._diagnostic_registry_disabled_count + 1,
+                )
                 continue
             key = (node, address)
             scope = self._object_failure_scope(node)
@@ -973,10 +1009,7 @@ class OpenRBusPollingCoordinator(
             registry = er.async_get(self.hass)
         except (AttributeError, TypeError):
             return
-        unique_id = (
-            f"{self.parent.config_entry.entry_id}:node:{node}:"
-            f"object:{address.index:04x}:{address.subindex:02x}"
-        )
+        unique_id = stable_object_id(self.parent, node, address.index, address.subindex)
         for platform in ("sensor", "number", "select", "switch"):
             entity_id = registry.async_get_entity_id(platform, DOMAIN, unique_id)
             if not entity_id:

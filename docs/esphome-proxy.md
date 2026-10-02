@@ -9,7 +9,7 @@ target values use `!secret` references. Obtain `secrets.yaml.example` and the
 required C++ headers from the same tagged Core source release; the YAML alone
 is not a complete firmware package.
 
-Pin all ESPHome source files to the immutable OpenRBus `v0.4.1` tag and use the
+Pin all ESPHome source files to the immutable OpenRBus `v0.4.2` tag and use the
 ESPHome version specified by that release's source README. Never use a moving
 branch for a deployed proxy. The integration requires RPC schema 3 and pairing
 contract `pair_terminal_v3`; missing, older, newer, or mismatched diagnostics

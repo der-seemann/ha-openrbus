@@ -25,7 +25,9 @@ def test_mac_normalization_rejects_non_gateway_identifiers() -> None:
 
 
 @pytest.mark.asyncio
-async def test_profile_survives_entry_lifecycle_and_merges_policies(monkeypatch) -> None:
+async def test_profile_survives_entry_lifecycle_and_merges_policies(
+    monkeypatch,
+) -> None:
     payload: dict[str, object] | None = None
 
     class MemoryStore:
@@ -48,18 +50,18 @@ async def test_profile_survives_entry_lifecycle_and_merges_policies(monkeypatch)
         CONF_PASSKEY: "123456",
         CONF_AUTH_KEY: "abcdef12",
         CONF_READ_ACCESS_LEVEL: 3,
-        CONF_WRITE_ACCESS_LEVEL: 1,
+        CONF_WRITE_ACCESS_LEVEL: 0,
         CONF_WRITE_ENABLED: True,
     }
     await async_save_access_profile(object(), first_entry)
 
     # The old config entry is intentionally absent: a fresh entry locates
-    # the same profile by MAC alone, including its non-elevating W=1 policy.
+    # the same profile by MAC alone, including the distinct no-write value.
     recreated = await async_load_access_profile(object(), "aa:bb:cc:dd:ee:ff")
     assert recreated == {
         CONF_PASSKEY: "123456",
         CONF_AUTH_KEY: "abcdef12",
         CONF_READ_ACCESS_LEVEL: 3,
-        CONF_WRITE_ACCESS_LEVEL: 1,
+        CONF_WRITE_ACCESS_LEVEL: 0,
         CONF_WRITE_ENABLED: True,
     }

@@ -6,7 +6,10 @@ from openrbus.protocol.canip import ObjectAddress
 from custom_components.openrbus import register_entities
 from custom_components.openrbus.bridge import GenericRead
 from custom_components.openrbus.const import (
+    CONF_COOLING_ENABLED,
     CONF_DIAGNOSTICS_ENABLED,
+    CONF_GROUP_OVERRIDES,
+    CONF_NODE_OVERRIDES,
     CONF_SCREED_DRYING_ENABLED,
     DOMAIN,
 )
@@ -15,6 +18,7 @@ from custom_components.openrbus.register_entities import OpenRBusRegisterEntity
 from custom_components.openrbus.select import OpenRBusSelect
 from custom_components.openrbus.sensor import _entity_enabled_by_default
 from custom_components.openrbus.switch import OpenRBusSwitch
+from custom_components.openrbus.zones import ZoneProfile
 
 
 def _register(
@@ -27,6 +31,10 @@ def _register(
     return SimpleNamespace(
         address=ObjectAddress.parse(address),
         datatype=datatype,
+        unit=None,
+        internal_code=None,
+        name_en=None,
+        name_de=None,
         readable=readable,
         access_level_evidence={"read": {"levels": list(levels)}},
     )
@@ -101,9 +109,70 @@ def test_manual_entity_override_changes_default_but_keeps_zone_safety(
     assert register_entities.entity_enabled_by_default(parent, identity, row)
     parent.entity_overrides["uid"] = False
     assert not register_entities.entity_enabled_by_default(parent, identity, row)
+
+
+def test_entity_selection_precedence_is_entity_then_group_then_node(
+    monkeypatch,
+) -> None:
+    row = _register("5501:01", levels=("Installer",))
+    identity = SimpleNamespace(node=3)
+    parent = SimpleNamespace(
+        entity_overrides={},
+        zone_profiles={},
+        zone_overrides={},
+        config_entry=SimpleNamespace(
+            data={},
+            options={
+                CONF_NODE_OVERRIDES: {"3": False},
+                CONF_GROUP_OVERRIDES: {"node:3:object:5501": True},
+            },
+        ),
+    )
+    monkeypatch.setattr(register_entities, "entity_unique_id", lambda *_args: "uid")
+
+    assert register_entities.entity_enabled_by_default(parent, identity, row)
+    parent.config_entry.options[CONF_GROUP_OVERRIDES]["device:3:category:general"] = (
+        False
+    )
+    assert not register_entities.entity_enabled_by_default(parent, identity, row)
+    parent.config_entry.options[CONF_GROUP_OVERRIDES].pop("device:3:category:general")
+    parent.entity_overrides["uid"] = False
+    assert not register_entities.entity_enabled_by_default(parent, identity, row)
+    parent.entity_overrides.clear()
+    parent.config_entry.options[CONF_GROUP_OVERRIDES]["node:3:object:5501"] = None
+    parent.config_entry.options[CONF_NODE_OVERRIDES]["3"] = True
+    assert register_entities.entity_enabled_by_default(parent, identity, row)
+    parent.config_entry.options[CONF_NODE_OVERRIDES]["3"] = None
+    assert not register_entities.entity_enabled_by_default(parent, identity, row)
     row.readable = False
     parent.entity_overrides["uid"] = True
     assert not register_entities.entity_enabled_by_default(parent, identity, row)
+
+
+def test_categories_follow_cp020_heating_dhw_and_disabled_profiles() -> None:
+    identity = SimpleNamespace(node=3)
+    row = SimpleNamespace(
+        address=ObjectAddress(0x3404, 0),
+        internal_code="CP020",
+        name_en="Zone function",
+        name_de="Zonenfunktion",
+    )
+    parent = SimpleNamespace(
+        zone_profiles={(3, 0): ZoneProfile(3, 0, 2)},
+        zone_overrides={},
+    )
+    assert register_entities.entity_category(parent, identity, row) == "zone"
+    parent.zone_profiles[(3, 0)] = ZoneProfile(3, 0, 6)
+    assert register_entities.entity_category(parent, identity, row) == "dhw"
+    parent.zone_profiles[(3, 0)] = ZoneProfile(3, 0, 0)
+    assert not register_entities.zone_row_enabled(parent, identity, row)
+    parent.zone_profiles[(3, 0)] = ZoneProfile(3, 0, None)
+    assert register_entities.entity_category(parent, identity, row) == "unclassified"
+    row.category = "Heat pump"
+    assert register_entities.entity_category(parent, identity, row) == "heat_pump"
+    row.category = None
+    row.name_en = "Heat pump status"
+    assert register_entities.entity_category(parent, identity, row) == "unclassified"
 
 
 def test_select_maps_polled_raw_enum_without_write_authorization() -> None:
@@ -129,6 +198,99 @@ def test_diagnostic_register_classification_is_explicit_only() -> None:
     assert not register_entities.is_diagnostic_register(operational)
 
 
+def test_cooling_rows_are_hidden_until_parent_option_is_enabled(monkeypatch) -> None:
+    entry = SimpleNamespace(data={}, options={})
+    parent = SimpleNamespace(
+        config_entry=entry,
+        inventories=(SimpleNamespace(identity=SimpleNamespace(node=1)),),
+        devices=(),
+        language="en",
+        effective_access_levels={1: 1},
+        configured_read_access_level=1,
+        configured_access_level=1,
+    )
+    cooling = _register("4321:00", levels=("User",))
+    cooling.node = 1
+    cooling.writable = False
+    cooling.safety = "read_only"
+    normal = SimpleNamespace(
+        **{
+            **cooling.__dict__,
+            "internal_code": "HeatingMode",
+            "name_en": "Heating mode",
+            "name_de": "Heizbetrieb",
+            # Same CANopen object index: filtering one cooling datapoint must
+            # not remove unrelated datapoints from a mixed object.
+            "address": ObjectAddress.parse("3482:02"),
+        }
+    )
+    unnamed = SimpleNamespace(
+        **{
+            **normal.__dict__,
+            "internal_code": "Mode2",
+            "name_en": "Mode 2",
+            "name_de": "Modus 2",
+            "address": ObjectAddress.parse("3500:02"),
+        }
+    )
+    monkeypatch.setattr(
+        register_entities,
+        "catalog_for_node",
+        lambda *_args: (cooling, normal, unnamed),
+    )
+
+    # Exact approved object identities determine the optional filter; labels
+    # alone never hide a row.
+    assert [row[1] for row in register_entities.rows_for_parent(parent)] == [
+        normal,
+        unnamed,
+    ]
+    entry.options[CONF_COOLING_ENABLED] = True
+    assert [row[1] for row in register_entities.rows_for_parent(parent)] == [
+        cooling,
+        normal,
+        unnamed,
+    ]
+
+
+def test_poll_selection_counts_report_aggregate_filter_reason(monkeypatch) -> None:
+    cooling = _register("513c:00", levels=("User",))
+    normal = _register("3482:02", levels=("User",))
+    identity = SimpleNamespace(node=5)
+    parent = SimpleNamespace(
+        config_entry=SimpleNamespace(data={}, options={}),
+        inventories=(SimpleNamespace(identity=identity),),
+        devices=(),
+        language="en",
+        effective_access_levels={5: 1},
+        configured_read_access_level=1,
+        configured_access_level=1,
+    )
+    monkeypatch.setattr(
+        register_entities,
+        "catalog_for_node",
+        lambda *_args: (cooling, normal),
+    )
+
+    complete = register_entities.rows_for_parent(
+        parent,
+        include_diagnostics=True,
+        include_screed_drying=True,
+        include_cooling=True,
+    )
+    selected = register_entities.rows_for_parent(parent)
+    counts = register_entities._poll_selection_filter_counts(parent, complete, selected)
+
+    assert counts == {
+        "runtime_nodes": 1,
+        "catalog_rows": 2,
+        "diagnostics_filtered": 0,
+        "screed_filtered": 0,
+        "cooling_filtered": 1,
+        "rows_after_optional_filters": 1,
+    }
+
+
 def test_diagnostic_visibility_toggles_only_integration_owned_registry_rows(
     monkeypatch,
 ) -> None:
@@ -137,14 +299,14 @@ def test_diagnostic_visibility_toggles_only_integration_owned_registry_rows(
     normal = SimpleNamespace(
         platform=DOMAIN,
         config_entry_id="entry",
-        unique_id="entry_2001_02",
+        unique_id="gateway:48f4634d1002f9f3c7570cb43e00dd86:node:255:object:2001:02",
         entity_id="sensor.openrbus_device_type",
         disabled_by=None,
     )
     user_disabled = SimpleNamespace(
         platform=DOMAIN,
         config_entry_id="entry",
-        unique_id="entry_2001_02",
+        unique_id="gateway:48f4634d1002f9f3c7570cb43e00dd86:node:255:object:2001:02",
         entity_id="sensor.openrbus_device_type_user",
         disabled_by="user",
     )
@@ -170,7 +332,9 @@ def test_diagnostic_visibility_toggles_only_integration_owned_registry_rows(
     monkeypatch.setattr(register_entities.er, "async_get", lambda _hass: registry)
     parent = SimpleNamespace(
         config_entry=SimpleNamespace(
-            entry_id="entry", data={}, options={CONF_DIAGNOSTICS_ENABLED: False}
+            entry_id="entry",
+            data={"ble_device": "00:11:22:33:44:55"},
+            options={CONF_DIAGNOSTICS_ENABLED: False},
         ),
         inventories=(),
         devices=(),
@@ -191,12 +355,86 @@ def test_diagnostic_visibility_toggles_only_integration_owned_registry_rows(
 
 def test_screed_classifier_is_narrow_and_uses_canonical_catalog_labels() -> None:
     assert register_entities.is_screed_drying_register(
+        _register("3483:00", levels=("User",))
+    )
+    assert not register_entities.is_screed_drying_register(
         SimpleNamespace(
             internal_code="ScreedStartTemp",
             name_en="Screed start temp 1",
             name_de="Estrich Starttemperatur 1",
         )
     )
+
+
+def test_reviewed_filter_map_covers_examples_across_device_families(
+    monkeypatch,
+) -> None:
+    assert register_entities.CATALOG_REGISTRY.find(
+        "4321:00"
+    ).evidence.device_families == ("Ehc-16",)
+    assert register_entities.CATALOG_REGISTRY.find(
+        "5140:00"
+    ).evidence.device_families == ("Mk-3",)
+    assert register_entities.CATALOG_REGISTRY.find(
+        "3504:00"
+    ).evidence.device_families == ("Scb-10",)
+    assert register_entities.CATALOG_REGISTRY.find(
+        "3483:00"
+    ).evidence.device_families == (
+        "Ehc-16",
+        "Scb-10",
+    )
+    identity = SimpleNamespace(node=5, family=None)
+    mk3_consumption = _register("513c:00", levels=("User",))
+    mk3_production = _register("5140:00", levels=("User",))
+    ehc_setpoint = _register("4321:00", levels=("User",))
+    zone_cooling = _register("341a:00", levels=("User",))
+    buffer_cooling = _register("3504:00", levels=("User",))
+    explicit_screed = _register("3483:00", levels=("User",))
+    screed_config = _register("344d:00", levels=("User",))
+    unrelated_heating = _register("3482:02", levels=("User",))
+    runtime_node = SimpleNamespace(identity=identity, capabilities={})
+    parent = SimpleNamespace(
+        inventories=(runtime_node,),
+        devices=(),
+        effective_access_levels={5: 1},
+        configured_access_level=1,
+        configured_read_access_level=1,
+        config_entry=SimpleNamespace(data={}, options={}),
+    )
+    monkeypatch.setattr(
+        register_entities,
+        "catalog_for_node",
+        lambda *_args: (
+            mk3_consumption,
+            mk3_production,
+            ehc_setpoint,
+            zone_cooling,
+            buffer_cooling,
+            explicit_screed,
+            screed_config,
+            unrelated_heating,
+        ),
+    )
+
+    filtered = register_entities.rows_for_parent(parent)
+    assert [row[1].address for row in filtered] == [unrelated_heating.address]
+
+    picker_rows = register_entities.rows_for_parent(
+        parent, include_cooling=True, include_screed_drying=True
+    )
+    cooling_group = register_entities.entity_group_key(parent, identity, mk3_production)
+    assert [row[1].address for row in picker_rows] == [
+        mk3_consumption.address,
+        mk3_production.address,
+        ehc_setpoint.address,
+        zone_cooling.address,
+        buffer_cooling.address,
+        explicit_screed.address,
+        screed_config.address,
+        unrelated_heating.address,
+    ]
+    assert cooling_group == "node:5:optional:cooling"
     assert not register_entities.is_screed_drying_register(
         SimpleNamespace(
             internal_code="HeatingProgram1",
@@ -206,18 +444,34 @@ def test_screed_classifier_is_narrow_and_uses_canonical_catalog_labels() -> None
     )
 
 
+def test_filter_classification_uses_object_and_not_matching_name_fragments() -> None:
+    assert register_entities.is_cooling_register(_register("4321:00", levels=("User",)))
+    assert register_entities.is_screed_drying_register(
+        _register("344d:00", levels=("User",))
+    )
+    # Heat-exchanger purge and solar tank recooling use cooling language but
+    # are separate functions from building cooling mode.
+    for address in ("2275:00", "2a0f:00", "2a10:00", "2a13:00"):
+        row = _register(address, levels=("User",))
+        assert not register_entities.is_cooling_register(row)
+        assert not register_entities.is_screed_drying_register(row)
+    for address in ("2304:00", "430e:00", "540c:00"):
+        row = _register(address, levels=("User",))
+        assert not register_entities.is_cooling_register(row)
+
+
 def test_screed_visibility_preserves_user_disable(monkeypatch) -> None:
     screed = SimpleNamespace(
         platform=DOMAIN,
         config_entry_id="entry",
-        unique_id="entry:node:1:object:348c:00",
+        unique_id="gateway:48f4634d1002f9f3c7570cb43e00dd86:node:1:object:348c:00",
         entity_id="switch.openrbus_screed_drying",
         disabled_by=None,
     )
     user_disabled = SimpleNamespace(
         platform=DOMAIN,
         config_entry_id="entry",
-        unique_id="entry:node:1:object:348c:00",
+        unique_id="gateway:48f4634d1002f9f3c7570cb43e00dd86:node:1:object:348c:00",
         entity_id="switch.openrbus_screed_drying_user",
         disabled_by="user",
     )
@@ -241,7 +495,9 @@ def test_screed_visibility_preserves_user_disable(monkeypatch) -> None:
 
     parent = SimpleNamespace(
         config_entry=SimpleNamespace(
-            entry_id="entry", data={}, options={CONF_SCREED_DRYING_ENABLED: False}
+            entry_id="entry",
+            data={"ble_device": "00:11:22:33:44:55"},
+            options={CONF_SCREED_DRYING_ENABLED: False},
         ),
         inventories=(SimpleNamespace(identity=SimpleNamespace(node=1)),),
         devices=(),

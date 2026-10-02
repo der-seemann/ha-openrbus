@@ -15,6 +15,7 @@ from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -26,11 +27,17 @@ from openrbus.registry import Registry
 
 from .bridge import GenericRead
 from .const import (
+    CONF_COOLING_ENABLED,
     CONF_DIAGNOSTICS_ENABLED,
+    CONF_GROUP_OVERRIDES,
+    CONF_NODE_OVERRIDES,
     CONF_SCREED_DRYING_ENABLED,
+    DEFAULT_COOLING_ENABLED,
     DOMAIN,
 )
 from .coordinator import OpenRBusCoordinator, OpenRBusPollingCoordinator
+from .identity import stable_gateway_id, stable_node_id, stable_object_id
+from .optional_register_filters import OPTIONAL_REGISTER_FILTERS
 from .zones import (
     entity_zone_label,
     profile_for,
@@ -173,19 +180,43 @@ def screed_drying_enabled(parent: OpenRBusCoordinator) -> bool:
 
 
 def is_screed_drying_register(register: RegisterCatalogEntry) -> bool:
-    """Identify only Core-catalogued screed-drying program rows.
+    """Return whether the reviewed exact register map classifies this row."""
 
-    The manufacturer catalogue uses the canonical ``Screed*`` codes and the
-    English/German labels ``screed``/``Estrich`` for enable, temperatures,
-    times and progress values. Generic heating programs, timers and
-    temperatures intentionally do not match this narrow classifier.
-    """
+    return "screed" in OPTIONAL_REGISTER_FILTERS.get(
+        getattr(register, "address", None), ()
+    )
 
-    semantic = " ".join(
-        str(getattr(register, field, "") or "")
-        for field in ("internal_code", "name_en", "name_de")
-    ).casefold()
-    return "screed" in semantic or "estrich" in semantic
+
+def cooling_enabled(parent: OpenRBusCoordinator) -> bool:
+    """Return the explicit parent-level cooling projection preference."""
+
+    configured = dict(getattr(parent.config_entry, "data", {}) or {})
+    configured.update(getattr(parent.config_entry, "options", {}) or {})
+    return bool(configured.get(CONF_COOLING_ENABLED, DEFAULT_COOLING_ENABLED))
+
+
+def is_cooling_register(register: RegisterCatalogEntry) -> bool:
+    """Return whether the reviewed exact register map classifies this row."""
+
+    return "cooling" in OPTIONAL_REGISTER_FILTERS.get(
+        getattr(register, "address", None), ()
+    )
+
+
+def is_optional_filter_register(
+    parent: OpenRBusCoordinator,
+    identity: DeviceIdentity,
+    register: RegisterCatalogEntry,
+    filter_name: str,
+) -> bool:
+    """Apply the reviewed exact-address classification."""
+
+    semantic_match = (
+        is_screed_drying_register(register)
+        if filter_name == "screed"
+        else is_cooling_register(register)
+    )
+    return semantic_match
 
 
 def rows_for_parent(
@@ -193,14 +224,29 @@ def rows_for_parent(
     *,
     include_diagnostics: bool | None = None,
     include_screed_drying: bool | None = None,
+    include_cooling: bool | None = None,
 ) -> tuple[tuple[DeviceIdentity, RegisterCatalogEntry, str, bool], ...]:
     """Project all known rows and their poll eligibility for this entry."""
 
-    configured = max(1, min(3, int(parent.configured_access_level)))
+    configured = max(
+        1,
+        min(
+            3,
+            int(
+                getattr(
+                    parent,
+                    "configured_read_access_level",
+                    getattr(parent, "configured_access_level", 1),
+                )
+            ),
+        ),
+    )
     if include_diagnostics is None:
         include_diagnostics = diagnostics_enabled(parent)
     if include_screed_drying is None:
         include_screed_drying = screed_drying_enabled(parent)
+    if include_cooling is None:
+        include_cooling = cooling_enabled(parent)
     rows: list[tuple[DeviceIdentity, RegisterCatalogEntry, str, bool]] = []
     for runtime_node in runtime_nodes(parent):
         identity = identity_for_runtime(runtime_node)
@@ -214,7 +260,13 @@ def rows_for_parent(
         for register in catalog_for_node(runtime_node, CATALOG_REGISTRY):
             if not include_diagnostics and is_diagnostic_register(register):
                 continue
-            if not include_screed_drying and is_screed_drying_register(register):
+            if not include_screed_drying and is_optional_filter_register(
+                parent, identity, register, "screed"
+            ):
+                continue
+            if not include_cooling and is_optional_filter_register(
+                parent, identity, register, "cooling"
+            ):
                 continue
             rows.append(
                 (
@@ -238,6 +290,160 @@ def zone_row_enabled(
     return slot is None or zone_enabled(parent, identity.node, slot)
 
 
+def _poll_selection_filter_counts(
+    parent: OpenRBusCoordinator,
+    complete_rows: tuple[tuple[DeviceIdentity, RegisterCatalogEntry, str, bool], ...],
+    rows: tuple[tuple[DeviceIdentity, RegisterCatalogEntry, str, bool], ...],
+) -> dict[str, int]:
+    """Summarize poll-row filtering without retaining object identities."""
+
+    counts = {
+        "runtime_nodes": len(runtime_nodes(parent)),
+        "catalog_rows": len(complete_rows),
+        "diagnostics_filtered": 0,
+        "screed_filtered": 0,
+        "cooling_filtered": 0,
+        "rows_after_optional_filters": len(rows),
+    }
+    for _identity, register, _group, _allowed in complete_rows:
+        if not diagnostics_enabled(parent) and is_diagnostic_register(register):
+            counts["diagnostics_filtered"] += 1
+        if not screed_drying_enabled(parent) and is_screed_drying_register(register):
+            counts["screed_filtered"] += 1
+        if not cooling_enabled(parent) and is_cooling_register(register):
+            counts["cooling_filtered"] += 1
+    return counts
+
+
+def entity_group_key(
+    parent: OpenRBusCoordinator,
+    identity: DeviceIdentity,
+    register: RegisterCatalogEntry,
+) -> str:
+    """Return the stable selector group key shared by UI and projection."""
+
+    node = identity.node
+    if is_diagnostic_register(register):
+        base = f"node:{node}:optional:diagnostics"
+    elif is_optional_filter_register(parent, identity, register, "screed"):
+        base = f"node:{node}:optional:screed"
+    elif is_optional_filter_register(parent, identity, register, "cooling"):
+        base = f"node:{node}:optional:cooling"
+    else:
+        slot = zone_subindex(register)
+        if slot is not None:
+            base = f"node:{node}:zone:{slot}"
+        else:
+            base = f"node:{node}:object:{int(register.address.index):04x}"
+    # Unverified write declarations remain read-only projections. Keep these
+    # groups separate so a picker never implies the writes were validated.
+    if getattr(register, "safety", None) == "unverified":
+        return f"{base}:write-unverified"
+    return base
+
+
+def entity_category_key(
+    parent: OpenRBusCoordinator,
+    identity: DeviceIdentity,
+    register: RegisterCatalogEntry,
+) -> str:
+    """Stable Device → Category scope, separate from legacy group identities."""
+
+    return (
+        f"device:{identity.node}:category:{entity_category(parent, identity, register)}"
+    )
+
+
+def entity_category_override_keys(
+    parent: OpenRBusCoordinator,
+    identity: DeviceIdentity,
+    register: RegisterCatalogEntry,
+) -> tuple[str, ...]:
+    """Return the current category key followed by pre-migration General."""
+
+    key = entity_category_key(parent, identity, register)
+    legacy_general = f"device:{identity.node}:category:general"
+    return (key,) if key == legacy_general else (key, legacy_general)
+
+
+def entity_category(
+    parent: OpenRBusCoordinator,
+    identity: DeviceIdentity,
+    register: RegisterCatalogEntry,
+) -> str:
+    """Classify from explicit catalogue category or an active CP02x function.
+
+    Register names and product aliases are deliberately not classifiers: a
+    label can mention a subsystem without proving category membership. Rows
+    lacking structured category or active function evidence stay explicitly
+    unclassified.
+    """
+
+    slot = zone_subindex(register)
+    if slot is not None:
+        from .zones import ZoneKind, profile_for
+
+        profile = profile_for(parent, identity.node, slot)
+        if profile is not None and profile.kind is ZoneKind.HEATING:
+            return "zone"
+        if profile is not None and profile.kind is ZoneKind.DHW:
+            return "dhw"
+    # Core may publish a typed category on catalogue entries. Only accept an
+    # exact normalized value; do not infer membership from register wording.
+    raw_category = str(getattr(register, "category", "") or "").strip().casefold()
+    category = " ".join(raw_category.replace("_", " ").replace("-", " ").split())
+    explicit_categories = {
+        "general": "general",
+        "heating system": "heating_system",
+        "zone": "zone",
+        "domestic hot water": "dhw",
+        "dhw": "dhw",
+        "heat pump": "heat_pump",
+    }
+    return explicit_categories.get(category, "unclassified")
+
+
+def _configured_selection_overrides(
+    parent: OpenRBusCoordinator,
+) -> tuple[dict[str, bool], dict[str, bool]]:
+    config_entry = getattr(parent, "config_entry", None)
+    configured = dict(getattr(config_entry, "data", {}) or {})
+    configured.update(getattr(config_entry, "options", {}) or {})
+    return (
+        normalized_entity_overrides(configured.get(CONF_NODE_OVERRIDES)),
+        normalized_entity_overrides(configured.get(CONF_GROUP_OVERRIDES)),
+    )
+
+
+def _selection_override(
+    parent: OpenRBusCoordinator,
+    identity: DeviceIdentity,
+    register: RegisterCatalogEntry,
+    unique_id: str,
+) -> bool | None:
+    entity_overrides = normalized_entity_overrides(
+        getattr(parent, "entity_overrides", {})
+    )
+    explicit_entity = entity_overrides.get(unique_id)
+    if explicit_entity is not None:
+        return explicit_entity
+    node_overrides, group_overrides = _configured_selection_overrides(parent)
+    group_key = entity_group_key(parent, identity, register)
+    explicit_group = next(
+        (
+            group_overrides[key]
+            for key in entity_category_override_keys(parent, identity, register)
+            if group_overrides.get(key) is not None
+        ),
+        None,
+    )
+    if explicit_group is None:
+        explicit_group = group_overrides.get(group_key)
+    if explicit_group is not None:
+        return explicit_group
+    return node_overrides.get(str(identity.node))
+
+
 def entity_enabled_by_default(
     parent: OpenRBusCoordinator,
     identity: DeviceIdentity,
@@ -251,21 +457,22 @@ def entity_enabled_by_default(
         register.address in recommended_addresses(identity)
         or (
             register.readable
-            and register.datatype not in {"STRUCT", "OCTETSTRING"}
+            and getattr(register, "datatype", None) not in {"STRUCT", "OCTETSTRING"}
             and any(
                 str(level).casefold() in {"level 0", "user"}
-                for level in (register.access_level_evidence.get("read", {}) or {}).get(
-                    "levels", ()
-                )
+                for level in (
+                    (getattr(register, "access_level_evidence", {}) or {}).get(
+                        "read", {}
+                    )
+                    or {}
+                ).get("levels", ())
             )
         )
     )
     # Manual choices may expose a non-recommended row, but cannot bypass
     # discovery/access, hidden-category, or zone safety gates.
     unique_id = unique_id or entity_unique_id(parent, identity, register)
-    explicit = normalized_entity_overrides(getattr(parent, "entity_overrides", {})).get(
-        unique_id
-    )
+    explicit = _selection_override(parent, identity, register, unique_id)
     if explicit is None:
         return default
     return (
@@ -275,11 +482,14 @@ def entity_enabled_by_default(
     )
 
 
-def normalized_entity_overrides(value: object) -> dict[str, bool]:
-    """Parse persistent per-entity selections, ignoring malformed values."""
+def normalized_entity_overrides(value: object) -> dict[str, bool | None]:
+    """Parse persistent entity and scope choices, including inherited reset markers."""
     if not isinstance(value, Mapping):
         return {}
-    return {str(key): bool(enabled) for key, enabled in value.items()}
+    return {
+        str(key): None if enabled is None or enabled == "default" else bool(enabled)
+        for key, enabled in value.items()
+    }
 
 
 def async_apply_entity_overrides(
@@ -291,19 +501,43 @@ def async_apply_entity_overrides(
     except (AttributeError, TypeError):
         return
     overrides = normalized_entity_overrides(getattr(parent, "entity_overrides", {}))
-    if not overrides:
+    node_overrides, group_overrides = _configured_selection_overrides(parent)
+    if not overrides and not node_overrides and not group_overrides:
         return
     entry_id = parent.config_entry.entry_id
     safe: dict[str, bool] = {}
+    rows_by_uid: dict[str, tuple[DeviceIdentity, RegisterCatalogEntry]] = {}
+    explicitly_scoped: set[str] = set()
+    node_overrides, group_overrides = _configured_selection_overrides(parent)
     for identity, register, _group, allowed in rows_for_parent(
-        parent, include_diagnostics=True, include_screed_drying=True
+        parent,
+        include_diagnostics=True,
+        include_screed_drying=True,
+        include_cooling=True,
     ):
         uid = entity_unique_id(parent, identity, register)
+        rows_by_uid[uid] = (identity, register)
+        group_key = entity_group_key(parent, identity, register)
+        if (
+            uid in overrides
+            or entity_category_key(parent, identity, register) in group_overrides
+            or group_key in group_overrides
+            or str(identity.node) in node_overrides
+        ):
+            explicitly_scoped.add(uid)
         # A manual enable is constrained by current access evidence and all
         # explicit opt-in categories. Zone selection also remains sovereign.
         category_visible = (
-            not is_diagnostic_register(register) or diagnostics_enabled(parent)
-        ) and (not is_screed_drying_register(register) or screed_drying_enabled(parent))
+            (not is_diagnostic_register(register) or diagnostics_enabled(parent))
+            and (
+                not is_optional_filter_register(parent, identity, register, "screed")
+                or screed_drying_enabled(parent)
+            )
+            and (
+                not is_optional_filter_register(parent, identity, register, "cooling")
+                or cooling_enabled(parent)
+            )
+        )
         effective = parent.effective_access_levels.get(identity.node)
         safe[uid] = bool(
             allowed
@@ -318,18 +552,35 @@ def async_apply_entity_overrides(
         if structure is not None:
             for field in structure.fields:
                 if field.bit_length == 1:
-                    safe[f"{uid}:bit:{field.name}"] = safe[uid]
+                    bit_uid = f"{uid}:bit:{field.name}"
+                    safe[bit_uid] = safe[uid]
+                    rows_by_uid[bit_uid] = (identity, register)
+                    if (
+                        bit_uid in overrides
+                        or entity_category_key(parent, identity, register)
+                        in group_overrides
+                        or group_key in group_overrides
+                        or str(identity.node) in node_overrides
+                    ):
+                        explicitly_scoped.add(bit_uid)
     for entity in tuple(registry.entities.values()):
         uid = getattr(entity, "unique_id", None)
         if (
             getattr(entity, "platform", None) != DOMAIN
             or getattr(entity, "config_entry_id", None) != entry_id
-            or uid not in overrides
+            or (uid not in safe and uid not in overrides)
+            or (uid not in overrides and uid not in explicitly_scoped)
         ):
             continue
         disabled_by = str(getattr(entity, "disabled_by", "") or "").casefold()
-        explicit = overrides[uid]
-        should_enable = explicit and safe.get(uid, False)
+        if uid not in safe:
+            should_enable = False
+        else:
+            identity, register = rows_by_uid[uid]
+            should_enable = (
+                entity_enabled_by_default(parent, identity, register, unique_id=uid)
+                and safe[uid]
+            )
         if not should_enable and not disabled_by:
             registry.async_update_entity(
                 entity.entity_id,
@@ -358,24 +609,35 @@ def async_apply_diagnostic_visibility(
         return
     diagnostics_visible = diagnostics_enabled(parent)
     screed_drying_visible = screed_drying_enabled(parent)
+    cooling_visible = cooling_enabled(parent)
     permitted: dict[str, bool] = {}
     visibility: dict[str, bool] = {}
     entry_id = parent.config_entry.entry_id
     # These two identity projections have Diagnostic category in HA and are
     # part of the same expert surface even though they are not catalog rows.
-    permitted[f"{entry_id}_2001_02"] = True
+    permitted[stable_object_id(parent, 0xFF, 0x2001, 0x02)] = True
     for runtime_node in runtime_nodes(parent):
         identity = identity_for_runtime(runtime_node)
         if getattr(identity, "device_code", None) is not None:
-            permitted[f"{entry_id}_node_{identity.node}_device_code"] = True
+            permitted[
+                f"{stable_node_id(parent, identity.node)}:identity:device_code"
+            ] = True
         if getattr(identity, "parameter_number", None) is not None:
-            permitted[f"{entry_id}_node_{identity.node}_parameter_number"] = True
+            permitted[
+                f"{stable_node_id(parent, identity.node)}:identity:parameter_number"
+            ] = True
     for identity, register, _group, _allowed in rows_for_parent(
-        parent, include_diagnostics=True, include_screed_drying=True
+        parent,
+        include_diagnostics=True,
+        include_screed_drying=True,
+        include_cooling=True,
     ):
         diagnostic = is_diagnostic_register(register)
-        screed_drying = is_screed_drying_register(register)
-        if not diagnostic and not screed_drying:
+        screed_drying = is_optional_filter_register(
+            parent, identity, register, "screed"
+        )
+        cooling = is_optional_filter_register(parent, identity, register, "cooling")
+        if not diagnostic and not screed_drying and not cooling:
             continue
         unique_id = entity_unique_id(parent, identity, register)
         permitted[unique_id] = control_kind(
@@ -387,8 +649,10 @@ def async_apply_diagnostic_visibility(
         )
         # A row can theoretically carry both classifications.  Both opt-ins
         # must then be enabled; a generic heating row never reaches this map.
-        visibility[unique_id] = (not diagnostic or diagnostics_visible) and (
-            not screed_drying or screed_drying_visible
+        visibility[unique_id] = (
+            (not diagnostic or diagnostics_visible)
+            and (not screed_drying or screed_drying_visible)
+            and (not cooling or cooling_visible)
         )
     for entity in tuple(registry.entities.values()):
         if (
@@ -420,7 +684,22 @@ def ensure_polling_coordinators(
 ) -> dict[str, OpenRBusPollingCoordinator]:
     """Create/reuse one polling coordinator per group for all HA platforms."""
 
+    complete_rows = rows_for_parent(
+        parent,
+        include_diagnostics=True,
+        include_screed_drying=True,
+        include_cooling=True,
+    )
     rows = rows_for_parent(parent)
+    selection_counts = {
+        **_poll_selection_filter_counts(parent, complete_rows, rows),
+        "read_access_excluded": 0,
+        "zone_excluded": 0,
+        "not_recommended": 0,
+        "pollable_fast": 0,
+        "pollable_standard": 0,
+        "pollable_slow": 0,
+    }
     addresses: dict[str, set[tuple[int, ObjectAddress]]] = {
         "fast": set(),
         "standard": set(),
@@ -433,8 +712,10 @@ def ensure_polling_coordinators(
     }
     for identity, register, group, allowed in rows:
         if not allowed:
+            selection_counts["read_access_excluded"] += 1
             continue
         if not zone_row_enabled(parent, identity, register):
+            selection_counts["zone_excluded"] += 1
             continue
         effective = parent.effective_access_levels.get(identity.node)
         structure = bitfield_structure(register)
@@ -461,9 +742,13 @@ def ensure_polling_coordinators(
                 str(level).casefold() in {"level 0", "user"} for level in levels
             )
             if register.address not in recommended and not safe_default:
+                selection_counts["not_recommended"] += 1
                 continue
         addresses[group].add((identity.node, register.address))
         metadata[group][(identity.node, register.address)] = register
+        selection_counts[f"pollable_{group}"] += 1
+
+    parent._openrbus_poll_selection_diagnostics = selection_counts
 
     cache = getattr(parent, "_openrbus_polling_coordinators", None)
     if cache is None:
@@ -540,7 +825,12 @@ def cleanup_legacy_sensor_entities(
         if not register.readable:
             continue
         unique_id = entity_unique_id(parent, identity, register)
-        if control_kind(register, parent.language) is None:
+        effective = parent.effective_access_levels.get(identity.node)
+        if effective is None and parent.configured_access_level == 1:
+            effective = 1
+        if control_kind(register, parent.language) is None or not write_access_allowed(
+            parent, register, effective
+        ):
             downgrade_rows.add(unique_id)
         else:
             typed_rows.add(unique_id)
@@ -668,10 +958,100 @@ def entity_unique_id(
 ) -> str:
     """Stable object identity shared by sensor and control projections."""
 
-    return (
-        f"{parent.config_entry.entry_id}:node:{identity.node}:"
-        f"object:{register.address.index:04x}:{register.address.subindex:02x}"
+    return stable_object_id(
+        parent,
+        identity.node,
+        register.address.index,
+        register.address.subindex,
     )
+
+
+def migrate_stable_registry_ids(
+    hass: HomeAssistant, parent: OpenRBusCoordinator
+) -> None:
+    """Move legacy entry-scoped IDs to the physical gateway/register rule.
+
+    Home Assistant keeps entity IDs and registry metadata when ``unique_id``
+    changes, so history and user customizations remain attached to the same
+    entity row. Conflicting destination IDs are left untouched for review.
+    """
+    try:
+        registry = er.async_get(hass)
+    except (AttributeError, TypeError):
+        return
+    entry_id = parent.config_entry.entry_id
+    gateway = stable_gateway_id(parent)
+    for entity in tuple(registry.entities.values()):
+        if (
+            getattr(entity, "platform", None) != DOMAIN
+            or getattr(entity, "config_entry_id", None) != entry_id
+        ):
+            continue
+        old = str(getattr(entity, "unique_id", ""))
+        new: str | None = None
+        prefix = f"{entry_id}:node:"
+        if old.startswith(prefix) and ":object:" in old:
+            tail = old[len(prefix) :]
+            node_text, object_text = tail.split(":object:", 1)
+            parts = object_text.split(":")
+            try:
+                node = int(node_text)
+                index = int(parts[0], 16)
+                subindex = int(parts[1], 16)
+            except (ValueError, IndexError):
+                continue
+            new = stable_object_id(parent, node, index, subindex)
+            if len(parts) > 2:
+                new += ":" + ":".join(parts[2:])
+        elif old == f"{entry_id}_2001_02":
+            new = stable_object_id(parent, 0xFF, 0x2001, 0x02)
+        elif old.startswith(f"{entry_id}_node_"):
+            tail = old[len(f"{entry_id}_node_") :]
+            node_text, separator, field = tail.partition("_")
+            if separator and field in {"device_code", "parameter_number"}:
+                try:
+                    new = f"{gateway}:node:{int(node_text)}:identity:{field}"
+                except ValueError:
+                    continue
+        if not new or new == old:
+            continue
+        collision = registry.async_get_entity_id(entity.domain, entity.platform, new)
+        if collision and collision != entity.entity_id:
+            continue
+        registry.async_update_entity(entity.entity_id, new_unique_id=new)
+    try:
+        devices = dr.async_get(hass)
+    except (AttributeError, TypeError):
+        return
+    device_prefix = f"{entry_id}:node:"
+    for device in tuple(devices.devices.values()):
+        if entry_id not in getattr(device, "config_entries", ()):
+            continue
+        replacements = set(device.identifiers)
+        changed = False
+        for domain, identifier in tuple(replacements):
+            if domain != DOMAIN or not identifier.startswith(device_prefix):
+                continue
+            tail = identifier[len(device_prefix) :]
+            node_text, separator, suffix = tail.partition(":zone:")
+            try:
+                node_identifier = stable_node_id(parent, int(node_text))
+            except ValueError:
+                continue
+            replacements.remove((domain, identifier))
+            replacements.add(
+                (
+                    domain,
+                    f"{node_identifier}:zone:{suffix}"
+                    if separator
+                    else node_identifier,
+                )
+            )
+            changed = True
+        if changed:
+            existing = devices.async_get_device(identifiers=replacements)
+            if existing is None or existing.id == device.id:
+                devices.async_update_device(device.id, new_identifiers=replacements)
 
 
 def definition_for(register: RegisterCatalogEntry):
@@ -777,6 +1157,7 @@ def write_access_allowed(
 
     if (
         not parent.write_enabled
+        or parent.configured_write_access_level not in (1, 2, 3)
         or not register.writable
         or effective_access_level is None
         or effective_access_level < parent.configured_write_access_level
@@ -797,6 +1178,18 @@ def write_access_allowed(
         len(levels) == 1
         and levels[0] is not None
         and levels[0] <= effective_access_level
+    )
+
+
+def should_project_as_control(
+    parent: OpenRBusCoordinator,
+    register: RegisterCatalogEntry,
+    effective_access_level: int | None,
+) -> bool:
+    """Use a typed HA control only when both policy and Core evidence allow writes."""
+
+    return control_kind(register, parent.language) is not None and write_access_allowed(
+        parent, register, effective_access_level
     )
 
 
@@ -907,14 +1300,12 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
         if profile is not None and zone_enabled(
             self._parent, profile.node, profile.subindex
         ):
-            node_identifier = (
-                f"{self._parent.config_entry.entry_id}:node:{self._identity.node}"
-            )
+            node_identifier = stable_node_id(self._parent, self._identity.node)
             return DeviceInfo(
                 identifiers={
                     ("openrbus", f"{node_identifier}:zone:{profile.subindex}")
                 },
-                name=zone_device_name(profile),
+                name=zone_device_name(profile, self._parent.language),
                 manufacturer=getattr(self._identity, "manufacturer", None)
                 or "OpenRBus",
                 model=getattr(self._identity, "model", None)
@@ -925,7 +1316,7 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
             identifiers={
                 (
                     "openrbus",
-                    f"{self._parent.config_entry.entry_id}:node:{self._identity.node}",
+                    stable_node_id(self._parent, self._identity.node),
                 )
             },
             name=(
@@ -1003,9 +1394,8 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
             self._register.address,
             value,
             node=self._identity.node,
-            # The integration's write option is the explicit unsafe opt-in for
-            # currently unverified registry writes.  Core still validates type,
-            # range, access and read-back before returning.
+            # Only a catalog control that passed Core's validated safety gate
+            # reaches this path. Core remains authoritative for every write.
             allow_unsafe=self._register.safety != "validated",
             verify=True,
         )

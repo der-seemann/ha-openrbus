@@ -9,6 +9,7 @@ import openrbus.authorization as core_authorization
 import pytest
 
 import custom_components.openrbus as integration
+from custom_components.openrbus import config_flow as config_flow_module
 from custom_components.openrbus.config_flow import (
     OpenRBusConfigFlow,
     OpenRBusOptionsFlowHandler,
@@ -24,6 +25,7 @@ from custom_components.openrbus.config_flow import (
     _transport_route,
     _transport_switch_is_safe,
     _warning_required,
+    _write_access_level,
 )
 from custom_components.openrbus.const import (
     ACCESS_LEVEL_LABELS,
@@ -34,6 +36,7 @@ from custom_components.openrbus.const import (
     CONF_AUTH_KEY,
     CONF_BACKEND,
     CONF_BLE_DEVICE,
+    CONF_COOLING_ENABLED,
     CONF_DIAGNOSTICS_ENABLED,
     CONF_FLOW_ACTION,
     CONF_PASSKEY,
@@ -45,12 +48,31 @@ from custom_components.openrbus.const import (
     FLOW_ACTION_BACK,
     LANGUAGE_OPTIONS,
 )
+from custom_components.openrbus.zones import ZoneProfile
 
 _WARNING_TRANSLATIONS = {
     f"component.{DOMAIN}.common.access_level_warning": "ACCESS",
     f"component.{DOMAIN}.common.write_access_warning": "WRITE",
     f"component.{DOMAIN}.common.optimization_note": "OPTIMIZATION",
 }
+
+
+def test_zone_options_identify_owning_node_and_function() -> None:
+    runtime = SimpleNamespace(
+        language="de",
+        zone_profiles={
+            (4, 0): ZoneProfile(4, 0, 0, node_name="SCB-10"),
+            (4, 1): ZoneProfile(4, 1, 6, node_name="SCB-10"),
+        },
+    )
+    flow = OpenRBusOptionsFlowHandler(SimpleNamespace(runtime_data=runtime))
+
+    choices = flow._zone_choices()
+
+    assert choices["4:0"] == "SCB-10 (Node 4) — Zone 1 — deaktiviert (Aus)"
+    assert choices["4:1"] == (
+        "SCB-10 (Node 4) — Zone 1 — Trinkwarmwasser (TWW-Speicher)"
+    )
 
 
 def test_config_flow_exposes_only_supported_transports() -> None:
@@ -83,6 +105,18 @@ def test_safe_access_level_uses_level_one_for_missing_or_invalid_values(value) -
     assert _safe_access_level(value) == 1
 
 
+@pytest.mark.parametrize(
+    "value, expected",
+    [(0, 0), ("0", 0), (1, 1), (2, 2), (3, 3), ("Installateur (2)", 2)],
+)
+def test_write_access_level_supports_no_write_and_saved_levels(value, expected) -> None:
+    assert _write_access_level({CONF_WRITE_ACCESS_LEVEL: value}) == expected
+
+
+def test_legacy_access_level_still_prefills_both_policies() -> None:
+    assert _write_access_level({CONF_ACCESS_LEVEL: 3}) == 3
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "stored, expected",
@@ -102,7 +136,6 @@ async def test_options_form_uses_normalized_current_access_level_default(
         "_ble_target_choices",
         staticmethod(lambda hass, include_thin=True: {}),
     )
-
     result = await flow.async_step_init()
     access_marker = next(
         marker
@@ -110,6 +143,131 @@ async def test_options_form_uses_normalized_current_access_level_default(
         if getattr(marker, "schema", None) == CONF_READ_ACCESS_LEVEL
     )
     assert access_marker.default() == expected
+
+
+@pytest.mark.asyncio
+async def test_options_form_reopens_independent_read_and_no_write_levels(
+    monkeypatch,
+) -> None:
+    entry = SimpleNamespace(
+        data={CONF_ACCESS_LEVEL: 1, CONF_WRITE_ENABLED: False},
+        options={CONF_READ_ACCESS_LEVEL: 3, CONF_WRITE_ACCESS_LEVEL: 0},
+        runtime_data=SimpleNamespace(effective_access_level=1),
+    )
+    flow = OpenRBusOptionsFlowHandler(entry)
+    monkeypatch.setattr(
+        OpenRBusConfigFlow,
+        "_ble_target_choices",
+        staticmethod(lambda hass, include_thin=True: {}),
+    )
+    monkeypatch.setattr(
+        OpenRBusOptionsFlowHandler, "_entity_choices", lambda self, configured=None: {}
+    )
+    monkeypatch.setattr(OpenRBusOptionsFlowHandler, "_zone_choices", lambda self: {})
+
+    result = await flow.async_step_init()
+    defaults = {
+        marker.schema: marker.default()
+        for marker in result["data_schema"].schema
+        if hasattr(marker, "default")
+    }
+    assert defaults[CONF_READ_ACCESS_LEVEL] == 3
+    assert defaults[CONF_WRITE_ACCESS_LEVEL] == 0
+    assert defaults[config_flow_module.CONF_COOLING_ENABLED] is False
+
+
+@pytest.mark.asyncio
+async def test_options_form_does_not_replace_saved_read_policy_with_observed_level(
+    monkeypatch,
+) -> None:
+    entry = SimpleNamespace(
+        data={CONF_ACCESS_LEVEL: 1},
+        options={CONF_READ_ACCESS_LEVEL: 1, CONF_WRITE_ACCESS_LEVEL: 3},
+        runtime_data=SimpleNamespace(effective_access_level=3),
+    )
+    flow = OpenRBusOptionsFlowHandler(entry)
+    monkeypatch.setattr(
+        OpenRBusConfigFlow,
+        "_ble_target_choices",
+        staticmethod(lambda hass, include_thin=True: {}),
+    )
+    monkeypatch.setattr(
+        OpenRBusOptionsFlowHandler, "_entity_choices", lambda self, configured=None: {}
+    )
+    monkeypatch.setattr(OpenRBusOptionsFlowHandler, "_zone_choices", lambda self: {})
+
+    result = await flow.async_step_init()
+    defaults = {
+        marker.schema: marker.default()
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None)
+        in {CONF_READ_ACCESS_LEVEL, CONF_WRITE_ACCESS_LEVEL}
+    }
+    assert defaults == {CONF_READ_ACCESS_LEVEL: 1, CONF_WRITE_ACCESS_LEVEL: 3}
+
+
+@pytest.mark.asyncio
+async def test_entity_picker_applies_node_and_group_overrides_in_stages() -> None:
+    entry = SimpleNamespace(data={}, options={}, runtime_data=SimpleNamespace())
+    flow = OpenRBusOptionsFlowHandler(entry)
+    groups = {
+        "node:1:object:2001": {
+            "node": 1,
+            "node_label": "Controller",
+            "label": "0x2001",
+            "items": {"uid-a": "Node 1 — Status", "uid-b": "Node 1 — Mode"},
+            "search": {
+                "uid-a": "status 2001:00 node 1",
+                "uid-b": "mode 2001:01 node 1",
+            },
+        },
+        "node:2:zone:0": {
+            "node": 2,
+            "node_label": "SCB-10",
+            "label": "Zone 1 — Heating",
+            "items": {"uid-c": "Node 2 — Zone temperature"},
+            "search": {"uid-c": "zone temperature 3404:00 node 2"},
+        },
+    }
+    flow._entity_selection_catalog = lambda: groups
+
+    def selected(catalog):
+        overrides = flow._picker_overrides()
+        return {
+            uid
+            for group in catalog.values()
+            for uid in group["items"]
+            if overrides.get(uid, uid == "uid-a")
+        }
+
+    flow._picker_default_selected = selected
+    flow._entity_picker_overrides = {}
+    flow._entity_picker_node_overrides = {}
+    flow._entity_picker_group_overrides = {}
+    result = await flow.async_step_entity_nodes(
+        {
+            config_flow_module._CONF_ENTITY_NODES: ["1"],
+            config_flow_module._CONF_ENTITY_NODE_PRESET: "all",
+            CONF_FLOW_ACTION: "next",
+        }
+    )
+    assert result["step_id"] == "entity_groups"
+    assert flow._entity_picker_node_overrides == {"1": True}
+
+    result = await flow.async_step_entity_groups(
+        {
+            config_flow_module._CONF_ENTITY_GROUPS: ["node:1:object:2001"],
+            config_flow_module._CONF_ENTITY_GROUP_PRESET: "none",
+            config_flow_module._CONF_ENTITY_GROUP_EDIT: "node:1:object:2001",
+            config_flow_module._CONF_ENTITY_GROUP_ACTION: "edit",
+            CONF_FLOW_ACTION: "next",
+        }
+    )
+    assert result["step_id"] == "entity_items"
+    assert flow._entity_picker_group_overrides == {"node:1:object:2001": False}
+
+    fields = {marker.schema: marker for marker in result["data_schema"].schema}
+    assert config_flow_module._CONF_ENTITY_ITEMS in fields
 
 
 @pytest.mark.asyncio
@@ -134,7 +292,9 @@ async def test_options_form_prefers_options_over_entry_data_without_saving(
 
 
 @pytest.mark.asyncio
-async def test_options_form_keeps_read_and_write_policies_independent(monkeypatch) -> None:
+async def test_options_form_keeps_read_and_write_policies_independent(
+    monkeypatch,
+) -> None:
     entry = SimpleNamespace(
         data={CONF_ACCESS_LEVEL: 1, CONF_BLE_DEVICE: "AA:BB:CC:DD:EE:FF"},
         options={CONF_READ_ACCESS_LEVEL: 3, CONF_WRITE_ACCESS_LEVEL: 1},
@@ -160,7 +320,9 @@ async def test_options_form_keeps_read_and_write_policies_independent(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_options_form_defaults_diagnostics_to_off_and_preserves_it(monkeypatch) -> None:
+async def test_options_form_defaults_diagnostics_to_off_and_preserves_it(
+    monkeypatch,
+) -> None:
     entry = SimpleNamespace(data={CONF_ACCESS_LEVEL: 1}, options={})
     flow = OpenRBusOptionsFlowHandler(entry)
     monkeypatch.setattr(
@@ -220,7 +382,9 @@ async def test_options_diagnostic_toggle_updates_only_that_option(monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_options_form_defaults_screed_drying_to_off_and_preserves_it(monkeypatch) -> None:
+async def test_options_form_defaults_screed_drying_to_off_and_preserves_it(
+    monkeypatch,
+) -> None:
     entry = SimpleNamespace(data={CONF_ACCESS_LEVEL: 1}, options={})
     monkeypatch.setattr(
         OpenRBusConfigFlow,
@@ -244,6 +408,20 @@ async def test_options_form_defaults_screed_drying_to_off_and_preserves_it(monke
         if getattr(marker, "schema", None) == CONF_SCREED_DRYING_ENABLED
     )
     assert marker.default() is True
+    cooling_marker = next(
+        marker
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None) == CONF_COOLING_ENABLED
+    )
+    assert cooling_marker.default() is False
+    entry.options[CONF_COOLING_ENABLED] = True
+    result = await OpenRBusOptionsFlowHandler(entry).async_step_init()
+    cooling_marker = next(
+        marker
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None) == CONF_COOLING_ENABLED
+    )
+    assert cooling_marker.default() is True
 
 
 @pytest.mark.asyncio
@@ -379,9 +557,10 @@ def test_transport_route_changes_for_adapter_or_proxy_but_not_policy() -> None:
 def test_retained_entry_transport_switch_requires_same_verified_mac(
     old, new, expected
 ) -> None:
-    assert _transport_switch_is_safe(
-        {CONF_BLE_DEVICE: old}, {CONF_BLE_DEVICE: new}
-    ) is expected
+    assert (
+        _transport_switch_is_safe({CONF_BLE_DEVICE: old}, {CONF_BLE_DEVICE: new})
+        is expected
+    )
 
 
 def test_warning_gate_requires_access_or_write_permission() -> None:

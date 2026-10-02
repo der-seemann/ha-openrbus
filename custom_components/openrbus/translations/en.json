@@ -13,17 +13,22 @@
         "data": {
           "backend": "Transport backend",
           "language": "Entity language",
-          "write_enabled": "Enable write access",
-          "diagnostics_enabled": "Enable diagnostics and debug entities",
-          "screed_drying_enabled": "Enable screed drying program entities",
           "access_level": "Access level",
           "passkey": "Bluetooth pairing PIN",
-          "auth_encryption_key": "Encryption key",
           "poll_interval_fast": "Fast polling interval (seconds)",
           "poll_interval_standard": "Standard polling interval (seconds)",
           "poll_interval_slow": "Slow polling interval (seconds)",
-          "thin_rpc_profile": "Thin-GATT profile",
-          "thin_rpc_key_secret": "EHC key secret name"
+          "invalid_value_disable_after": "Disable entity after invalid values (minutes)"
+        },
+        "data_description": {
+          "backend": "Select how Home Assistant connects to the heating system.",
+          "language": "Choose the language used for entity names and descriptions.",
+          "poll_interval_fast": "Time between frequent reads, in seconds. A longer interval reduces Bluetooth traffic.",
+          "poll_interval_standard": "Time between regular reads, in seconds.",
+          "poll_interval_slow": "Time between infrequent reads, in seconds.",
+          "invalid_value_disable_after": "Disable an entity after its value has remained invalid for this many minutes.",
+          "passkey": "PIN used to pair with the gateway over Bluetooth.",
+          "access_level": "Choose the highest register level requested during setup. Read and write levels can be adjusted separately in the next step."
         }
       },
       "ble_target": {
@@ -32,6 +37,9 @@
         "data": {
           "ble_device": "BLE gateway",
           "flow_action": "Navigation"
+        },
+        "data_description": {
+          "ble_device": "Choose the heating gateway discovered by Home Assistant or the selected proxy."
         }
       },
       "access_level": {
@@ -40,10 +48,20 @@
           "read_access_level": "Read access level",
           "write_access_level": "Write access level",
           "write_enabled": "Enable write access",
-          "screed_drying_enabled": "Enable screed drying program entities",
-          "diagnostics_enabled": "Enable diagnostics and debug entities",
-          "flow_action": "Navigation"
-        }
+          "screed_drying_enabled": "Enable screed drying",
+          "diagnostics_enabled": "Enable diagnostic data",
+          "flow_action": "Navigation",
+          "cooling_enabled": "Enable cooling functions"
+        },
+        "data_description": {
+          "read_access_level": "Choose the highest register level whose values should be exposed.",
+          "write_access_level": "Choose the highest register level that may be written. This does not enable writes by itself.",
+          "write_enabled": "Allow supported controls to send changes to the heating system.",
+          "diagnostics_enabled": "Add diagnostic entities with transport and communication status for troubleshooting.",
+          "screed_drying_enabled": "Add entities for the screed-drying program when the controller provides them.",
+          "cooling_enabled": "Include registers in the reviewed cooling-function map. When disabled, those exact registers are excluded before entity selection and creation."
+        },
+        "description": "Choose independent read and write access policies. A higher read policy does not enable writes."
       },
       "access_warning": {
         "title": "Review access and write permissions",
@@ -51,19 +69,21 @@
         "data": {
           "access_level_acknowledged": "I understand the possible consequences and want to enable these permissions.",
           "flow_action": "Navigation"
+        },
+        "data_description": {
+          "access_level_acknowledged": "Confirm that you understand the access and write settings shown above."
         }
       },
       "credentials": {
         "title": "Secure connection",
-        "description": "Enter the local pairing PIN and access settings.",
         "data": {
           "passkey": "Bluetooth pairing PIN",
-          "access_level": "Register access level",
-          "write_enabled": "Enable write access",
           "auth_encryption_key": "Encryption key",
-          "thin_rpc_profile": "Thin-GATT profile",
-          "thin_rpc_key_secret": "Authentication key reference",
           "flow_action": "Navigation"
+        },
+        "data_description": {
+          "passkey": "PIN used to pair with the gateway over Bluetooth.",
+          "auth_encryption_key": "Eight-digit hexadecimal key used to authenticate and encrypt the connection."
         }
       },
       "thin_controller": {
@@ -72,6 +92,9 @@
         "data": {
           "thin_rpc_controller": "Controller",
           "flow_action": "Navigation"
+        },
+        "data_description": {
+          "thin_rpc_controller": "Choose the ESPHome controller that provides the matching request, poll, and diagnostics services."
         }
       },
       "thin_scan": {
@@ -80,6 +103,9 @@
         "data": {
           "ble_device": "BLE device",
           "flow_action": "Navigation"
+        },
+        "data_description": {
+          "ble_device": "Choose the heating gateway found by scanning through the selected ESPHome proxy."
         }
       }
     },
@@ -92,7 +118,8 @@
       "thin_rpc_credentials_required": "Reference the EHC key in secrets.yaml before enabling Thin-RPC.",
       "invalid_thin_rpc_controller": "The selected Thin-RPC controller is unavailable.",
       "thin_rpc_scan_failed": "Remote BLE scan through the ESP proxy failed.",
-      "thin_rpc_no_ble_devices": "No BLE devices were found behind the ESP proxy."
+      "thin_rpc_no_ble_devices": "No BLE devices were found behind the ESP proxy.",
+      "access_confirmation_required": "Confirm the possible consequences before enabling the selected permissions."
     }
   },
   "options": {
@@ -107,7 +134,38 @@
           "write_access_level": "Write access level",
           "write_enabled": "Enable write access",
           "entity_overrides": "Enabled entities",
-          "zone_overrides": "Active zones"
+          "zone_overrides": "Active zones",
+          "diagnostics_enabled": "Enable diagnostic data",
+          "screed_drying_enabled": "Enable screed drying",
+          "invalid_value_disable_after": "Disable entity after invalid values (minutes)",
+          "backend": "Transport backend",
+          "language": "Entity language",
+          "ble_device": "BLE gateway",
+          "passkey": "Bluetooth pairing PIN",
+          "poll_interval_fast": "Fast polling interval (seconds)",
+          "poll_interval_standard": "Standard polling interval (seconds)",
+          "poll_interval_slow": "Slow polling interval (seconds)",
+          "cooling_enabled": "Enable cooling functions",
+          "_openrbus_entity_picker": "Configure entity selection"
+        },
+        "data_description": {
+          "language": "Choose the language used for entity names and descriptions.",
+          "write_enabled": "Allow supported controls to send changes to the heating system.",
+          "diagnostics_enabled": "Add diagnostic entities with transport and communication status for troubleshooting.",
+          "screed_drying_enabled": "Add entities for the screed-drying program when the controller provides them.",
+          "read_access_level": "Choose the highest register level whose values should be exposed.",
+          "write_access_level": "Choose the highest register level that may be written. This does not enable writes by itself.",
+          "poll_interval_fast": "Time between frequent reads, in seconds. A longer interval reduces Bluetooth traffic.",
+          "poll_interval_standard": "Time between regular reads, in seconds.",
+          "poll_interval_slow": "Time between infrequent reads, in seconds.",
+          "invalid_value_disable_after": "Disable an entity after its value has remained invalid for this many minutes.",
+          "entity_overrides": "Select which discovered entities should be created.",
+          "zone_overrides": "Shows the owning node and detected manufacturer function; only zones enabled by the device can be selected.",
+          "backend": "Select how Home Assistant connects to the heating system.",
+          "ble_device": "Select or enter the Bluetooth address of the heating gateway.",
+          "passkey": "PIN used to pair with the gateway over Bluetooth.",
+          "cooling_enabled": "Include registers in the reviewed cooling-function map. When disabled, those exact registers are excluded before entity selection and creation.",
+          "_openrbus_entity_picker": "Open the three-step selector: Device, Category, then Entities. Existing entity identities and saved choices are retained."
         }
       },
       "access_warning": {
@@ -116,6 +174,9 @@
         "data": {
           "access_level_acknowledged": "I understand the possible consequences and want to enable these permissions.",
           "flow_action": "Navigation"
+        },
+        "data_description": {
+          "access_level_acknowledged": "Confirm that you understand the access and write settings shown above."
         }
       },
       "credentials": {
@@ -123,6 +184,9 @@
         "data": {
           "auth_encryption_key": "Encryption key",
           "flow_action": "Navigation"
+        },
+        "data_description": {
+          "auth_encryption_key": "Eight-digit hexadecimal key used to authenticate and encrypt the connection."
         }
       },
       "thin_controller": {
@@ -130,6 +194,9 @@
         "data": {
           "thin_rpc_controller": "Controller",
           "flow_action": "Navigation"
+        },
+        "data_description": {
+          "thin_rpc_controller": "Choose the ESPHome controller that provides the matching request, poll, and diagnostics services."
         }
       },
       "thin_scan": {
@@ -137,6 +204,54 @@
         "data": {
           "ble_device": "BLE device",
           "flow_action": "Navigation"
+        },
+        "data_description": {
+          "ble_device": "Choose the heating gateway found by scanning through the selected ESPHome proxy."
+        }
+      },
+      "entity_nodes": {
+        "title": "Device selection",
+        "description": "Choose the discovered devices to manage. Known models are labeled when identified; other discovered devices remain available.",
+        "data": {
+          "_openrbus_entity_nodes": "Devices",
+          "_openrbus_entity_node_preset": "Bulk action",
+          "flow_action": "Navigation"
+        },
+        "data_description": {
+          "_openrbus_entity_nodes": "Choose discovered devices. The list includes all devices present in this installation.",
+          "_openrbus_entity_node_preset": "Set selected nodes to all, none, or their automatic defaults."
+        }
+      },
+      "entity_groups": {
+        "title": "Category selection",
+        "description": "Choose a category for a bulk action or open it to select individual entities.",
+        "data": {
+          "_openrbus_entity_groups": "Categories",
+          "_openrbus_entity_group_preset": "Bulk action",
+          "_openrbus_entity_group_edit": "Group to edit",
+          "_openrbus_entity_group_action": "Next action",
+          "flow_action": "Navigation"
+        },
+        "data_description": {
+          "_openrbus_entity_groups": "Categories follow the Original App where membership is supported by catalog or CP020 evidence. Unclassified entries stay in General.",
+          "_openrbus_entity_group_preset": "Apply all, none, or defaults to selected groups.",
+          "_openrbus_entity_group_edit": "Choose one category for individual entity selection.",
+          "_openrbus_entity_group_action": "Edit the chosen group or finish the selection."
+        }
+      },
+      "entity_items": {
+        "title": "Entities in category",
+        "description": "Search by name, object/register ID, device, zone, or category.",
+        "data": {
+          "_openrbus_entity_search": "Search",
+          "_openrbus_entity_preset": "Selection mode",
+          "_openrbus_entity_items": "Enabled entities",
+          "_openrbus_entity_item_nav": "Action"
+        },
+        "data_description": {
+          "_openrbus_entity_search": "Search by name, object/register ID, device, zone, or category.",
+          "_openrbus_entity_preset": "Use a bulk preset or edit individual checkboxes.",
+          "_openrbus_entity_items": "Choose individual entities in this category."
         }
       }
     }
@@ -146,6 +261,36 @@
       "options": {
         "next": "Continue",
         "back": "Back"
+      }
+    },
+    "entity_selection_action": {
+      "options": {
+        "default": "Restore inherited defaults",
+        "all": "Select all",
+        "none": "Select none",
+        "keep": "Keep current choices"
+      }
+    },
+    "entity_group_action": {
+      "options": {
+        "edit": "Edit a group",
+        "done": "Finish selection"
+      }
+    },
+    "entity_item_action": {
+      "options": {
+        "custom": "Use individual choices",
+        "default": "Restore inherited defaults",
+        "all": "Select all",
+        "none": "Select none"
+      }
+    },
+    "entity_item_navigation": {
+      "options": {
+        "search": "Apply search",
+        "next": "Save and return to groups",
+        "done": "Finish selection",
+        "back": "Back to groups"
       }
     }
   }

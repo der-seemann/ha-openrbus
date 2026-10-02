@@ -38,17 +38,22 @@ CONF_INVALID_VALUE_DISABLE_AFTER = "invalid_value_disable_after"
 # transport diagnostics: the latter are needed internally for Thin-RPC.
 CONF_DIAGNOSTICS_ENABLED = "diagnostics_enabled"
 DEFAULT_DIAGNOSTICS_ENABLED = False
-# Screed-drying is a rarely used commissioning program with many related
-# parameters. It is separate from diagnostics so ordinary heating-program
-# rows remain visible unless Core explicitly identifies them as screed rows.
+# Optional functional filters are independent of manufacturer navigation
+# categories and operate from the reviewed exact register map.
 CONF_SCREED_DRYING_ENABLED = "screed_drying_enabled"
 DEFAULT_SCREED_DRYING_ENABLED = False
+CONF_COOLING_ENABLED = "cooling_enabled"
+DEFAULT_COOLING_ENABLED = False
 # Explicit zone selection is intentionally separate from HA's entity-registry
 # disable state: it controls whether a discovered inactive zone is projected
 # and polled at all.  Keys are stable ``<node>:<zone-array-subindex>`` values.
 CONF_ZONE_OVERRIDES = "zone_overrides"
 # Explicit entity enable choices keyed by the stable integration unique ID.
 CONF_ENTITY_OVERRIDES = "entity_overrides"
+# Scope-level visibility preferences. Entity overrides take precedence over
+# group overrides, which take precedence over node overrides.
+CONF_NODE_OVERRIDES = "node_overrides"
+CONF_GROUP_OVERRIDES = "group_overrides"
 
 # Navigation is an action of the flow, not an integration setting.  It is
 # intentionally kept separate from the persisted configuration keys and is
@@ -67,6 +72,7 @@ CONF_ACCESS_LEVEL = "access_level"
 CONF_READ_ACCESS_LEVEL = "read_access_level"
 CONF_WRITE_ACCESS_LEVEL = "write_access_level"
 ACCESS_LEVEL_OPTIONS = (1, 2, 3)
+WRITE_ACCESS_LEVEL_OPTIONS = (0, 1, 2, 3)
 ACCESS_LEVEL_LABELS = {
     "Benutzer (1)": 1,
     "Installateur (2)": 2,
@@ -80,10 +86,39 @@ ACCESS_LEVEL_CHOICES = {
     2: "Installateur (2)",
     3: "Fachhandwerker (3)",
 }
+WRITE_ACCESS_LEVEL_CHOICES = {
+    0: "Kein Schreibzugriff (0)",
+    **ACCESS_LEVEL_CHOICES,
+}
 LANGUAGE_OPTIONS = (
-    "bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "hr", "hu",
-    "it", "lt", "lv", "nb", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sr",
-    "sv", "tr", "uk", "zh",
+    "bg",
+    "cs",
+    "da",
+    "de",
+    "el",
+    "en",
+    "es",
+    "et",
+    "fi",
+    "fr",
+    "hr",
+    "hu",
+    "it",
+    "lt",
+    "lv",
+    "nb",
+    "nl",
+    "pl",
+    "pt",
+    "ro",
+    "ru",
+    "sk",
+    "sl",
+    "sr",
+    "sv",
+    "tr",
+    "uk",
+    "zh",
 )
 DEFAULT_LANGUAGE = "de"
 DEFAULT_POLL_INTERVALS = {

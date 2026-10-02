@@ -33,11 +33,14 @@ from .const import (
     CONF_BACKEND,
     CONF_BLE_DEVICE,
     CONF_BLE_SOURCE,
+    CONF_COOLING_ENABLED,
     CONF_DIAGNOSTICS_ENABLED,
     CONF_ENTITY_OVERRIDES,
     CONF_FLOW_ACTION,
+    CONF_GROUP_OVERRIDES,
     CONF_INVALID_VALUE_DISABLE_AFTER,
     CONF_LANGUAGE,
+    CONF_NODE_OVERRIDES,
     CONF_PAIR_ACTION,
     CONF_PASSKEY,
     CONF_POLL_FAST,
@@ -58,6 +61,7 @@ from .const import (
     CONF_WRITE_ACCESS_LEVEL,
     CONF_WRITE_ENABLED,
     CONF_ZONE_OVERRIDES,
+    DEFAULT_COOLING_ENABLED,
     DEFAULT_DIAGNOSTICS_ENABLED,
     DEFAULT_INVALID_VALUE_DISABLE_AFTER,
     DEFAULT_LANGUAGE,
@@ -68,12 +72,19 @@ from .const import (
     FLOW_ACTION_NEXT,
     FLOW_ACTION_OPTIONS,
     LANGUAGE_OPTIONS,
+    WRITE_ACCESS_LEVEL_CHOICES,
+    WRITE_ACCESS_LEVEL_OPTIONS,
 )
 from .register_entities import (
     bitfield_structure,
     control_kind,
+    entity_category,
+    entity_category_key,
+    entity_category_override_keys,
     entity_enabled_by_default,
+    entity_group_key,
     entity_unique_id,
+    recommended_addresses,
     register_name,
     rows_for_parent,
     write_access_allowed,
@@ -86,6 +97,20 @@ from .transport import (
     thin_rpc_controller_choices,
 )
 from .zones import override_key, zone_device_name
+
+_CONF_ENTITY_PICKER = "_openrbus_entity_picker"
+_CONF_ENTITY_NODES = "_openrbus_entity_nodes"
+_CONF_ENTITY_NODE_PRESET = "_openrbus_entity_node_preset"
+_CONF_ENTITY_GROUPS = "_openrbus_entity_groups"
+_CONF_ENTITY_GROUP_PRESET = "_openrbus_entity_group_preset"
+_CONF_ENTITY_GROUP_EDIT = "_openrbus_entity_group_edit"
+_CONF_ENTITY_GROUP_ACTION = "_openrbus_entity_group_action"
+_CONF_ENTITY_ITEMS = "_openrbus_entity_items"
+_CONF_ENTITY_SEARCH = "_openrbus_entity_search"
+_CONF_ENTITY_PRESET = "_openrbus_entity_preset"
+_CONF_ENTITY_ITEM_NAV = "_openrbus_entity_item_nav"
+_ENTITY_PICKER_ACTIONS = ("edit", "done")
+_ENTITY_PRESETS = ("keep", "default", "all", "none")
 
 _WARNING_TRANSLATION_PREFIX = f"component.{DOMAIN}.common."
 _ACCESS_WARNING_KEY = f"{_WARNING_TRANSLATION_PREFIX}access_level_warning"
@@ -197,9 +222,15 @@ def _read_access_level(values: Mapping[str, Any]) -> int:
 def _write_access_level(values: Mapping[str, Any]) -> int:
     """Read the explicit write policy; old entries retain their old behavior."""
 
-    return _safe_access_level(
-        values.get(CONF_WRITE_ACCESS_LEVEL, values.get(CONF_ACCESS_LEVEL, 1))
-    )
+    value = values.get(CONF_WRITE_ACCESS_LEVEL, values.get(CONF_ACCESS_LEVEL, 1))
+    if value == "Kein Schreibzugriff (0)":
+        return 0
+    value = ACCESS_LEVEL_LABELS.get(value, value)
+    try:
+        level = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return level if level in WRITE_ACCESS_LEVEL_OPTIONS else 1
 
 
 def _normalize_access_policies(values: dict[str, Any]) -> None:
@@ -274,11 +305,7 @@ async def _async_warning_text(
         )
     except Exception:  # noqa: BLE001 - a warning must not break setup
         localized = {}
-    required = (
-        {_ACCESS_WARNING_KEY}
-        if _safe_access_level(access_level) >= 2
-        else set()
-    )
+    required = {_ACCESS_WARNING_KEY} if _safe_access_level(access_level) >= 2 else set()
     if bool(write_enabled):
         required.update({_WRITE_WARNING_KEY, _OPTIMIZATION_NOTE_KEY})
     missing = required.difference(localized)
@@ -676,7 +703,7 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                         vol.Required(
                             CONF_WRITE_ACCESS_LEVEL,
                             default=_write_access_level(pending),
-                        ): vol.In(ACCESS_LEVEL_CHOICES),
+                        ): vol.In(WRITE_ACCESS_LEVEL_CHOICES),
                         vol.Required(
                             CONF_WRITE_ENABLED,
                             default=pending.get(CONF_WRITE_ENABLED, False),
@@ -693,6 +720,12 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                             default=pending.get(
                                 CONF_SCREED_DRYING_ENABLED,
                                 DEFAULT_SCREED_DRYING_ENABLED,
+                            ),
+                        ): cv.boolean,
+                        vol.Required(
+                            CONF_COOLING_ENABLED,
+                            default=pending.get(
+                                CONF_COOLING_ENABLED, DEFAULT_COOLING_ENABLED
                             ),
                         ): cv.boolean,
                     }
@@ -763,9 +796,9 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                 # steps.  Level 1 intentionally has no auth-key field.
             }
             if level >= 2:
-                schema[vol.Required(
-                    CONF_AUTH_KEY, default=pending.get(CONF_AUTH_KEY, "")
-                )] = cv.string
+                schema[
+                    vol.Required(CONF_AUTH_KEY, default=pending.get(CONF_AUTH_KEY, ""))
+                ] = cv.string
             return self.async_show_form(
                 step_id="credentials", data_schema=_flow_schema(schema)
             )
@@ -922,6 +955,9 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                             DEFAULT_SCREED_DRYING_ENABLED,
                         )
                     ),
+                    CONF_COOLING_ENABLED: bool(
+                        user_input.get(CONF_COOLING_ENABLED, DEFAULT_COOLING_ENABLED)
+                    ),
                     CONF_POLL_FAST: int(
                         user_input.get(
                             CONF_POLL_FAST, DEFAULT_POLL_INTERVALS[CONF_POLL_FAST]
@@ -938,10 +974,12 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                             CONF_POLL_SLOW, DEFAULT_POLL_INTERVALS[CONF_POLL_SLOW]
                         )
                     ),
-                    CONF_INVALID_VALUE_DISABLE_AFTER: int(user_input.get(
-                        CONF_INVALID_VALUE_DISABLE_AFTER,
-                        DEFAULT_INVALID_VALUE_DISABLE_AFTER,
-                    )),
+                    CONF_INVALID_VALUE_DISABLE_AFTER: int(
+                        user_input.get(
+                            CONF_INVALID_VALUE_DISABLE_AFTER,
+                            DEFAULT_INVALID_VALUE_DISABLE_AFTER,
+                        )
+                    ),
                 },
             )
 
@@ -1037,32 +1075,63 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
 
         runtime = getattr(self._config_entry, "runtime_data", None)
         profiles = getattr(runtime, "zone_profiles", {}) or {}
+        language = getattr(runtime, "language", "de")
         return {
-            override_key(profile.node, profile.subindex): zone_device_name(profile)
+            override_key(profile.node, profile.subindex): zone_device_name(
+                profile, language
+            )
             for _key, profile in sorted(profiles.items())
         }
 
-    def _entity_choices(self) -> dict[str, str]:
+    def _entity_choices(
+        self, configured: Mapping[str, Any] | None = None
+    ) -> dict[str, str]:
         """Return only currently discovered, readable, safe scalar projections."""
         runtime = getattr(self._config_entry, "runtime_data", None)
         if runtime is None:
             return {}
+        preferences = {**self._config_entry.data, **self._config_entry.options}
+        if configured:
+            preferences.update(configured)
         choices: dict[str, str] = {}
-        for identity, register, _group, allowed in rows_for_parent(runtime):
-            if not allowed or not register.readable or not zone_row_enabled(runtime, identity, register):
+        for identity, register, _group, allowed in rows_for_parent(
+            runtime,
+            include_diagnostics=bool(
+                preferences.get(CONF_DIAGNOSTICS_ENABLED, DEFAULT_DIAGNOSTICS_ENABLED)
+            ),
+            include_screed_drying=bool(
+                preferences.get(
+                    CONF_SCREED_DRYING_ENABLED, DEFAULT_SCREED_DRYING_ENABLED
+                )
+            ),
+            include_cooling=bool(
+                preferences.get(CONF_COOLING_ENABLED, DEFAULT_COOLING_ENABLED)
+            ),
+        ):
+            if (
+                not allowed
+                or not register.readable
+                or not zone_row_enabled(runtime, identity, register)
+            ):
                 continue
             effective = runtime.effective_access_levels.get(identity.node)
-            if control_kind(register, runtime.language) is not None and not write_access_allowed(runtime, register, effective):
+            if control_kind(
+                register, runtime.language
+            ) is not None and not write_access_allowed(runtime, register, effective):
                 continue
             uid = entity_unique_id(runtime, identity, register)
             base_label = f"{identity.node}: {register_name(register, runtime.language)}"
             structure = bitfield_structure(register)
-            bit_fields = tuple(
-                field for field in structure.fields if field.bit_length == 1
-            ) if structure is not None else ()
+            bit_fields = (
+                tuple(field for field in structure.fields if field.bit_length == 1)
+                if structure is not None
+                else ()
+            )
             if bit_fields:
                 for field in bit_fields:
-                    choices[f"{uid}:bit:{field.name}"] = f"{base_label} — {field.label(runtime.language)}"
+                    choices[f"{uid}:bit:{field.name}"] = (
+                        f"{base_label} — {field.label(runtime.language)}"
+                    )
             else:
                 choices[uid] = base_label
         return choices
@@ -1079,23 +1148,481 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             stored.update({str(key): bool(value) for key, value in overrides.items()})
         selected: list[str] = []
         for identity, register, _group, allowed in rows_for_parent(runtime):
-            if not allowed or not register.readable or not zone_row_enabled(runtime, identity, register):
+            if (
+                not allowed
+                or not register.readable
+                or not zone_row_enabled(runtime, identity, register)
+            ):
                 continue
             effective = runtime.effective_access_levels.get(identity.node)
-            if control_kind(register, runtime.language) is not None and not write_access_allowed(runtime, register, effective):
+            if control_kind(
+                register, runtime.language
+            ) is not None and not write_access_allowed(runtime, register, effective):
                 continue
             base_uid = entity_unique_id(runtime, identity, register)
             structure = bitfield_structure(register)
-            bit_fields = tuple(field for field in structure.fields if field.bit_length == 1) if structure is not None else ()
+            bit_fields = (
+                tuple(field for field in structure.fields if field.bit_length == 1)
+                if structure is not None
+                else ()
+            )
             uids = (
                 tuple(f"{base_uid}:bit:{field.name}" for field in bit_fields)
-                if bit_fields else (base_uid,)
+                if bit_fields
+                else (base_uid,)
             )
             default = entity_enabled_by_default(runtime, identity, register)
             if control_kind(register, runtime.language) is not None:
                 default = default and write_access_allowed(runtime, register, effective)
             selected.extend(uid for uid in uids if stored.get(uid, default))
         return selected
+
+    def _entity_selection_catalog(self) -> dict[str, dict[str, Any]]:
+        """Build a stable Device -> category -> entity projection.
+
+        Core currently exposes zone slot evidence but not manufacturer
+        FunctionGroup records. Non-zone rows are therefore grouped by their
+        CANopen object index, which is stable and keeps each leaf selector
+        bounded. The UI does not claim those object groups are manufacturer
+        FunctionGroups.
+        """
+        runtime = getattr(self._config_entry, "runtime_data", None)
+        if runtime is None:
+            return {}
+        configured = {**self._config_entry.data, **self._config_entry.options}
+        configured.update(getattr(self, "_entity_picker_pending", {}) or {})
+        cooling = bool(configured.get(CONF_COOLING_ENABLED, DEFAULT_COOLING_ENABLED))
+        rows = rows_for_parent(
+            runtime,
+            include_diagnostics=bool(
+                configured.get(CONF_DIAGNOSTICS_ENABLED, DEFAULT_DIAGNOSTICS_ENABLED)
+            ),
+            include_screed_drying=bool(
+                configured.get(
+                    CONF_SCREED_DRYING_ENABLED, DEFAULT_SCREED_DRYING_ENABLED
+                )
+            ),
+            include_cooling=cooling,
+        )
+        groups: dict[str, dict[str, Any]] = {}
+        for identity, register, _poll_group, allowed in rows:
+            if (
+                not allowed
+                or not register.readable
+                or not zone_row_enabled(runtime, identity, register)
+            ):
+                continue
+            effective = runtime.effective_access_levels.get(identity.node)
+            if control_kind(
+                register, runtime.language
+            ) is not None and not write_access_allowed(runtime, register, effective):
+                continue
+            base_uid = entity_unique_id(runtime, identity, register)
+            structure = bitfield_structure(register)
+            bit_fields = (
+                tuple(field for field in structure.fields if field.bit_length == 1)
+                if structure is not None
+                else ()
+            )
+            items = (
+                tuple(
+                    (
+                        f"{base_uid}:bit:{field.name}",
+                        f"{register_name(register, runtime.language)} — {field.label(runtime.language)}",
+                    )
+                    for field in bit_fields
+                )
+                if bit_fields
+                else ((base_uid, register_name(register, runtime.language)),)
+            )
+            category = entity_category(runtime, identity, register)
+            group_key = entity_category_key(runtime, identity, register)
+            category_labels = {
+                "general": ("Allgemein", "General"),
+                "heating_system": ("Heizungsanlage", "Heating system"),
+                "zone": ("Zone", "Zone"),
+                "dhw": ("Trinkwarmwasser", "Domestic hot water"),
+                "heat_pump": ("Wärmepumpe", "Heat pump"),
+                "unclassified": ("Nicht klassifiziert", "Unclassified"),
+            }
+            group_label = category_labels[category][
+                0 if runtime.language == "de" else 1
+            ]
+            if getattr(register, "safety", None) == "unverified":
+                write_note = (
+                    "Schreiben nicht validiert (nur lesbar)"
+                    if runtime.language == "de"
+                    else "Write not validated (read-only)"
+                )
+                group_label = f"{group_label} — {write_note}"
+            node = groups.setdefault(
+                group_key,
+                {
+                    "node": identity.node,
+                    "node_label": identity.display_name,
+                    "device_label": self._device_label(identity),
+                    "label": group_label,
+                    "items": {},
+                    "search": {},
+                },
+            )
+            register_search = " ".join(
+                (
+                    register_name(register, runtime.language),
+                    str(register.address),
+                    str(register.internal_code or ""),
+                    str(identity.node),
+                    identity.display_name,
+                    group_label,
+                )
+            ).casefold()
+            for uid, label in items:
+                node["items"][uid] = f"Node {identity.node} — {label}"
+                node["search"][uid] = f"{register_search} {label}".casefold()
+        return dict(
+            sorted(
+                groups.items(),
+                key=lambda item: (
+                    item[1]["node"],
+                    item[1]["label"].casefold(),
+                    item[0],
+                ),
+            )
+        )
+
+    @staticmethod
+    def _device_label(identity: Any) -> str:
+        """Show the discovered identity without a product-name allowlist."""
+        resolution = getattr(identity, "registry_resolution", None)
+        model = getattr(resolution, "model", None) or getattr(identity, "model", None)
+        family = getattr(resolution, "family", None) or getattr(
+            identity, "family", None
+        )
+        return str(model or family or identity.display_name or "OpenRBus")
+
+    def _picker_overrides(self) -> dict[str, bool | None]:
+        overrides = getattr(self, "_entity_picker_overrides", None)
+        if isinstance(overrides, dict):
+            return overrides
+        current = {**self._config_entry.data, **self._config_entry.options}
+        stored = current.get(CONF_ENTITY_OVERRIDES, {})
+        return dict(stored) if isinstance(stored, Mapping) else {}
+
+    def _picker_node_overrides(self) -> dict[str, bool | None]:
+        overrides = getattr(self, "_entity_picker_node_overrides", None)
+        if isinstance(overrides, dict):
+            return overrides
+        current = {**self._config_entry.data, **self._config_entry.options}
+        stored = current.get(CONF_NODE_OVERRIDES, {})
+        return dict(stored) if isinstance(stored, Mapping) else {}
+
+    def _picker_group_overrides(self) -> dict[str, bool | None]:
+        overrides = getattr(self, "_entity_picker_group_overrides", None)
+        if isinstance(overrides, dict):
+            return overrides
+        current = {**self._config_entry.data, **self._config_entry.options}
+        stored = current.get(CONF_GROUP_OVERRIDES, {})
+        return dict(stored) if isinstance(stored, Mapping) else {}
+
+    def _picker_default_selected(
+        self, groups: Mapping[str, Mapping[str, Any]]
+    ) -> set[str]:
+        runtime = getattr(self._config_entry, "runtime_data", None)
+        if runtime is None:
+            return set()
+        stored = self._picker_overrides()
+        node_overrides = self._picker_node_overrides()
+        group_overrides = self._picker_group_overrides()
+        defaults: set[str] = set()
+        rows = {
+            entity_unique_id(runtime, identity, register): (identity, register)
+            for identity, register, _group, allowed in rows_for_parent(
+                runtime,
+                include_diagnostics=True,
+                include_screed_drying=True,
+                include_cooling=True,
+            )
+            if allowed
+        }
+        for group_key, group in groups.items():
+            for uid in group["items"]:
+                base_uid = uid.split(":bit:", 1)[0]
+                row = rows.get(base_uid)
+                default = False
+                if row:
+                    identity, register = row
+                    read_levels = (
+                        register.access_level_evidence.get("read", {}) or {}
+                    ).get("levels", ())
+                    default = zone_row_enabled(runtime, identity, register) and (
+                        register.address in recommended_addresses(identity)
+                        or (
+                            register.readable
+                            and register.datatype not in {"STRUCT", "OCTETSTRING"}
+                            and any(
+                                str(level).casefold() in {"level 0", "user"}
+                                for level in read_levels
+                            )
+                        )
+                    )
+                selected = stored.get(uid)
+                if selected is None:
+                    selected = group_overrides.get(group_key)
+                if selected is None and row:
+                    selected = next(
+                        (
+                            group_overrides[key]
+                            for key in entity_category_override_keys(
+                                runtime, identity, register
+                            )
+                            if group_overrides.get(key) is not None
+                        ),
+                        None,
+                    )
+                if selected is None and row:
+                    selected = group_overrides.get(
+                        entity_group_key(runtime, identity, register)
+                    )
+                if selected is None:
+                    selected = node_overrides.get(str(group["node"]))
+                if selected is None:
+                    selected = default
+                if selected:
+                    defaults.add(uid)
+        return defaults
+
+    @staticmethod
+    def _apply_picker_preset(
+        overrides: dict[str, bool | None], uids: Iterable[str], preset: str
+    ) -> None:
+        if preset == "default":
+            # Keep a reset marker so existing registry entries are recalculated
+            # when a prior scope-level disable is removed. ``None`` inherits.
+            overrides.update({uid: None for uid in uids})
+        elif preset in {"all", "none"}:
+            enabled = preset == "all"
+            overrides.update({uid: enabled for uid in uids})
+
+    def _entity_picker_form(self, step: str, fields: dict[vol.Marker, object]):
+        return self.async_show_form(step_id=step, data_schema=vol.Schema(fields))
+
+    async def async_step_entity_nodes(self, user_input=None):
+        groups = self._entity_selection_catalog()
+        nodes = sorted({group["node"] for group in groups.values()})
+        node_labels = {
+            str(node): next(
+                group.get("device_label", group["node_label"])
+                for group in groups.values()
+                if group["node"] == node
+            )
+            + f" (Node {node})"
+            for node in nodes
+        }
+        if user_input is not None:
+            self._entity_picker_pending = dict(
+                getattr(self, "_entity_picker_pending", {}) or {}
+            )
+            if _flow_action(user_input) == FLOW_ACTION_BACK:
+                pending = dict(self._entity_picker_pending)
+                pending[CONF_ENTITY_OVERRIDES] = self._picker_overrides()
+                pending[CONF_NODE_OVERRIDES] = self._picker_node_overrides()
+                pending[CONF_GROUP_OVERRIDES] = self._picker_group_overrides()
+                self._pending_options_input = pending
+                self._entity_picker_pending = None
+                self._entity_picker_overrides = None
+                self._entity_picker_node_overrides = None
+                self._entity_picker_group_overrides = None
+                return await self.async_step_init()
+            selected_nodes = {
+                int(value) for value in user_input.get(_CONF_ENTITY_NODES, ())
+            }
+            self._entity_picker_nodes = selected_nodes
+            overrides = self._picker_overrides()
+            self._apply_picker_preset(
+                self._picker_node_overrides(),
+                (str(node) for node in selected_nodes),
+                str(user_input.get(_CONF_ENTITY_NODE_PRESET, "keep")),
+            )
+            self._entity_picker_overrides = overrides
+            self._entity_picker_node_overrides = self._picker_node_overrides()
+            return await self.async_step_entity_groups()
+        defaults = self._picker_default_selected(groups)
+        selected_nodes = getattr(self, "_entity_picker_nodes", None)
+        default_nodes = (
+            sorted(str(node) for node in selected_nodes)
+            if selected_nodes is not None
+            else sorted(
+                {
+                    str(group["node"])
+                    for group in groups.values()
+                    if any(uid in defaults for uid in group["items"])
+                }
+            )
+        )
+        return self._entity_picker_form(
+            "entity_nodes",
+            {
+                vol.Optional(
+                    _CONF_ENTITY_NODES, default=default_nodes
+                ): cv.multi_select(node_labels),
+                vol.Required(
+                    _CONF_ENTITY_NODE_PRESET, default="keep"
+                ): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=list(_ENTITY_PRESETS),
+                        translation_key="entity_selection_action",
+                    )
+                ),
+                **dict([_navigation_field()]),
+            },
+        )
+
+    async def async_step_entity_groups(self, user_input=None):
+        groups = self._entity_selection_catalog()
+        selected_nodes = set(getattr(self, "_entity_picker_nodes", set()))
+        eligible = {
+            key: group
+            for key, group in groups.items()
+            if group["node"] in selected_nodes
+        }
+        if user_input is not None:
+            if _flow_action(user_input) == FLOW_ACTION_BACK:
+                return await self.async_step_entity_nodes()
+            overrides = self._picker_group_overrides()
+            selected_groups = set(user_input.get(_CONF_ENTITY_GROUPS, ()))
+            self._apply_picker_preset(
+                overrides,
+                selected_groups.intersection(eligible),
+                str(user_input.get(_CONF_ENTITY_GROUP_PRESET, "keep")),
+            )
+            self._entity_picker_group_overrides = overrides
+            action = str(user_input.get(_CONF_ENTITY_GROUP_ACTION, "done"))
+            if action == "done":
+                return await self.async_step_entity_selection_done()
+            group_key = str(user_input.get(_CONF_ENTITY_GROUP_EDIT, ""))
+            if group_key not in eligible:
+                return self._entity_picker_form(
+                    "entity_groups",
+                    self._entity_group_schema(eligible, selected_groups, error=True),
+                )
+            self._entity_picker_group = group_key
+            self._entity_picker_search = ""
+            return await self.async_step_entity_items()
+        defaults = self._picker_default_selected(eligible)
+        selected_groups = [
+            key
+            for key, group in eligible.items()
+            if any(uid in defaults for uid in group["items"])
+        ]
+        return self._entity_picker_form(
+            "entity_groups", self._entity_group_schema(eligible, set(selected_groups))
+        )
+
+    def _entity_group_schema(
+        self,
+        groups: Mapping[str, Mapping[str, Any]],
+        selected: set[str],
+        *,
+        error: bool = False,
+    ) -> dict[vol.Marker, object]:
+        choices = {
+            key: f"{group['label']} ({len(group['items'])})"
+            for key, group in groups.items()
+        }
+        fields: dict[vol.Marker, object] = {
+            vol.Optional(
+                _CONF_ENTITY_GROUPS, default=sorted(selected)
+            ): cv.multi_select(choices),
+            vol.Required(
+                _CONF_ENTITY_GROUP_PRESET, default="keep"
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=list(_ENTITY_PRESETS),
+                    translation_key="entity_selection_action",
+                )
+            ),
+            vol.Required(
+                _CONF_ENTITY_GROUP_ACTION, default="edit"
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=list(_ENTITY_PICKER_ACTIONS),
+                    translation_key="entity_group_action",
+                )
+            ),
+        }
+        if groups:
+            fields[
+                vol.Required(_CONF_ENTITY_GROUP_EDIT, default=next(iter(groups)))
+            ] = vol.In(choices)
+        fields.update(dict([_navigation_field()]))
+        return fields
+
+    async def async_step_entity_items(self, user_input=None):
+        groups = self._entity_selection_catalog()
+        key = getattr(self, "_entity_picker_group", None)
+        if key not in groups:
+            return await self.async_step_entity_groups()
+        group = groups[key]
+        search = (
+            str(getattr(self, "_entity_picker_search", "") or "").casefold().strip()
+        )
+        items = {
+            uid: label
+            for uid, label in group["items"].items()
+            if not search or search in group["search"].get(uid, "")
+        }
+        if user_input is not None:
+            action = str(user_input.get(_CONF_ENTITY_ITEM_NAV, "next"))
+            if action == "back":
+                return await self.async_step_entity_groups()
+            overrides = self._picker_overrides()
+            preset = str(user_input.get(_CONF_ENTITY_PRESET, "default"))
+            self._apply_picker_preset(overrides, items, preset)
+            if preset == "custom":
+                chosen = set(user_input.get(_CONF_ENTITY_ITEMS, ()))
+                overrides.update({uid: uid in chosen for uid in items})
+            self._entity_picker_overrides = overrides
+            self._entity_picker_search = str(user_input.get(_CONF_ENTITY_SEARCH, ""))
+            if action == "done":
+                return await self.async_step_entity_selection_done()
+            if action == "search":
+                return await self.async_step_entity_items()
+            return await self.async_step_entity_groups()
+        selected = self._picker_default_selected({key: group})
+        fields: dict[vol.Marker, object] = {
+            vol.Required(_CONF_ENTITY_SEARCH, default=search): cv.string,
+            vol.Required(
+                _CONF_ENTITY_PRESET, default="custom"
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=["custom", *_ENTITY_PRESETS],
+                    translation_key="entity_item_action",
+                )
+            ),
+            vol.Optional(
+                _CONF_ENTITY_ITEMS, default=sorted(selected.intersection(items))
+            ): cv.multi_select(items),
+            vol.Required(
+                _CONF_ENTITY_ITEM_NAV, default="search"
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=["search", "next", "done", "back"],
+                    translation_key="entity_item_navigation",
+                )
+            ),
+        }
+        return self._entity_picker_form("entity_items", fields)
+
+    async def async_step_entity_selection_done(self, user_input=None):
+        pending = dict(getattr(self, "_entity_picker_pending", {}) or {})
+        pending[CONF_ENTITY_OVERRIDES] = self._picker_overrides()
+        pending[CONF_NODE_OVERRIDES] = self._picker_node_overrides()
+        pending[CONF_GROUP_OVERRIDES] = self._picker_group_overrides()
+        self._entity_picker_pending = None
+        self._entity_picker_overrides = None
+        self._entity_picker_node_overrides = None
+        self._entity_picker_group_overrides = None
+        return await self.async_step_init(pending)
 
     async def async_step_init(self, user_input=None):
         if user_input is not None:
@@ -1121,22 +1648,62 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             zone_choices = self._zone_choices()
             selected_zones = user_input.get(CONF_ZONE_OVERRIDES)
             if isinstance(selected_zones, (list, tuple, set)):
-                # Store both explicit enable and disable choices.  A later
-                # rediscovery can add new slots without changing an existing
-                # manual override, and an inactive user-enabled slot survives
-                # a reload as an intentional selection.
-                user_input[CONF_ZONE_OVERRIDES] = {
-                    key: key in selected_zones for key in zone_choices
+                # Persist choices for the visible profiles, but never allow a
+                # stale/manual choice to enable a CP020-disabled or unreadable
+                # slot. The runtime gate also enforces this during projection.
+                profiles = (
+                    getattr(
+                        getattr(self._config_entry, "runtime_data", None),
+                        "zone_profiles",
+                        {},
+                    )
+                    or {}
+                )
+                profiles_by_key = {
+                    override_key(profile.node, profile.subindex): profile
+                    for profile in profiles.values()
                 }
-            entity_choices = self._entity_choices()
+                user_input[CONF_ZONE_OVERRIDES] = {
+                    key: key in selected_zones and profiles_by_key[key].active
+                    for key in zone_choices
+                }
+            entity_choices = self._entity_choices({**previous, **user_input})
             selected_entities = user_input.get(CONF_ENTITY_OVERRIDES)
-            stored_entities = previous.get(CONF_ENTITY_OVERRIDES, {})
-            merged_entities = dict(stored_entities) if isinstance(stored_entities, Mapping) else {}
+            pending_options = getattr(self, "_pending_options_input", {}) or {}
+            stored_entities = pending_options.get(
+                CONF_ENTITY_OVERRIDES, previous.get(CONF_ENTITY_OVERRIDES, {})
+            )
+            merged_entities = (
+                dict(stored_entities) if isinstance(stored_entities, Mapping) else {}
+            )
             if isinstance(selected_entities, (list, tuple, set)):
                 # Retain overrides for temporarily undiscovered identities;
                 # they have no effect until a safe matching row returns.
-                merged_entities.update({key: key in selected_entities for key in entity_choices})
+                merged_entities.update(
+                    {key: key in selected_entities for key in entity_choices}
+                )
             user_input[CONF_ENTITY_OVERRIDES] = merged_entities
+            for key in (CONF_NODE_OVERRIDES, CONF_GROUP_OVERRIDES):
+                scoped = user_input.get(
+                    key,
+                    pending_options.get(key, previous.get(key, {})),
+                )
+                user_input[key] = dict(scoped) if isinstance(scoped, Mapping) else {}
+            self._pending_options_input = None
+            if bool(user_input.pop(_CONF_ENTITY_PICKER, False)):
+                self._entity_picker_pending = dict(user_input)
+                self._entity_picker_overrides = merged_entities
+                node_overrides = user_input.get(CONF_NODE_OVERRIDES, {})
+                group_overrides = user_input.get(CONF_GROUP_OVERRIDES, {})
+                self._entity_picker_node_overrides = (
+                    dict(node_overrides) if isinstance(node_overrides, Mapping) else {}
+                )
+                self._entity_picker_group_overrides = (
+                    dict(group_overrides)
+                    if isinstance(group_overrides, Mapping)
+                    else {}
+                )
+                return await self.async_step_entity_nodes()
             await _async_apply_mac_profile(self.hass, user_input)
             # Read and write policy are independently persisted.  A higher
             # read policy must not silently become write permission.
@@ -1278,14 +1845,10 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
         for key, value in stored_profile.items():
             current.setdefault(key, value)
         _normalize_access_policies(current)
-        runtime = getattr(self._config_entry, "runtime_data", None)
-        observed = getattr(runtime, "effective_access_level", None)
-        # The coordinator has already read the authoritative access object
-        # during normal setup.  Prefer this cached observation for the read
-        # default, but never probe/write from the options form itself.
-        if observed in ACCESS_LEVEL_OPTIONS:
-            current[CONF_READ_ACCESS_LEVEL] = observed
-            current[CONF_ACCESS_LEVEL] = observed
+        # The effective transport level may be higher than the saved read
+        # policy because it satisfies write authorization. Keep the persisted
+        # read selection as the form default so open/save without edits is
+        # stable and does not widen entity visibility.
         self._native_ble_sources = _native_ble_source_map(self.hass)
         fields = {
             vol.Required(
@@ -1299,7 +1862,7 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             vol.Required(
                 CONF_WRITE_ACCESS_LEVEL,
                 default=_write_access_level(current),
-            ): vol.In(ACCESS_LEVEL_OPTIONS),
+            ): vol.In(WRITE_ACCESS_LEVEL_CHOICES),
             vol.Required(
                 CONF_LANGUAGE,
                 default=current.get(CONF_LANGUAGE, DEFAULT_LANGUAGE),
@@ -1321,6 +1884,10 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                 ),
             ): cv.boolean,
             vol.Required(
+                CONF_COOLING_ENABLED,
+                default=current.get(CONF_COOLING_ENABLED, DEFAULT_COOLING_ENABLED),
+            ): cv.boolean,
+            vol.Required(
                 CONF_BLE_DEVICE,
                 default=current.get(CONF_BLE_DEVICE, ""),
             ): self._native_ble_schema(current),
@@ -1330,38 +1897,57 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             ): cv.string,
             vol.Required(
                 CONF_POLL_FAST,
-                default=current.get(CONF_POLL_FAST, DEFAULT_POLL_INTERVALS[CONF_POLL_FAST]),
+                default=current.get(
+                    CONF_POLL_FAST, DEFAULT_POLL_INTERVALS[CONF_POLL_FAST]
+                ),
             ): vol.All(vol.Coerce(int), vol.Range(min=5, max=86400)),
             vol.Required(
                 CONF_POLL_STANDARD,
-                default=current.get(CONF_POLL_STANDARD, DEFAULT_POLL_INTERVALS[CONF_POLL_STANDARD]),
+                default=current.get(
+                    CONF_POLL_STANDARD, DEFAULT_POLL_INTERVALS[CONF_POLL_STANDARD]
+                ),
             ): vol.All(vol.Coerce(int), vol.Range(min=5, max=86400)),
             vol.Required(
                 CONF_POLL_SLOW,
-                default=current.get(CONF_POLL_SLOW, DEFAULT_POLL_INTERVALS[CONF_POLL_SLOW]),
+                default=current.get(
+                    CONF_POLL_SLOW, DEFAULT_POLL_INTERVALS[CONF_POLL_SLOW]
+                ),
             ): vol.All(vol.Coerce(int), vol.Range(min=5, max=86400)),
             vol.Required(
                 CONF_INVALID_VALUE_DISABLE_AFTER,
-                default=current.get(CONF_INVALID_VALUE_DISABLE_AFTER, DEFAULT_INVALID_VALUE_DISABLE_AFTER),
+                default=current.get(
+                    CONF_INVALID_VALUE_DISABLE_AFTER,
+                    DEFAULT_INVALID_VALUE_DISABLE_AFTER,
+                ),
             ): vol.All(vol.Coerce(int), vol.Range(min=60, max=31536000)),
         }
         zone_choices = self._zone_choices()
         if zone_choices:
             stored = current.get(CONF_ZONE_OVERRIDES, {})
-            selected = [key for key in zone_choices if not isinstance(stored, Mapping) or stored.get(key, False)]
-            # No old value means "use automatic active-zone defaults".  The
-            # initial selection mirrors that visible state, then becomes an
-            # explicit durable override only when the form is saved.
-            if not isinstance(stored, Mapping):
-                selected = [
-                    key for key, profile in getattr(self._config_entry.runtime_data, "zone_profiles", {}).items()
-                    if profile.active
-                ]
-            fields[vol.Optional(CONF_ZONE_OVERRIDES, default=selected)] = cv.multi_select(zone_choices)
-        entity_choices = self._entity_choices()
+            profiles = (
+                getattr(self._config_entry.runtime_data, "zone_profiles", {}) or {}
+            )
+            profiles_by_key = {
+                override_key(profile.node, profile.subindex): profile
+                for profile in profiles.values()
+            }
+            # Device-disabled and unreadable profiles are shown with their
+            # state in the label, but cannot be selected as active zones.
+            selected = [
+                key
+                for key in zone_choices
+                if profiles_by_key[key].active
+                and (
+                    not isinstance(stored, Mapping)
+                    or stored.get(key, profiles_by_key[key].active)
+                )
+            ]
+            fields[vol.Optional(CONF_ZONE_OVERRIDES, default=selected)] = (
+                cv.multi_select(zone_choices)
+            )
+        entity_choices = self._entity_choices(current)
         if entity_choices:
-            selected_entities = self._entity_default_selection()
-            fields[vol.Optional(CONF_ENTITY_OVERRIDES, default=selected_entities)] = cv.multi_select(entity_choices)
+            fields[vol.Optional(_CONF_ENTITY_PICKER, default=False)] = cv.boolean
         self._diagnostic_toggle_baseline = {
             marker.schema: marker.default()
             for marker in fields

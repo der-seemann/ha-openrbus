@@ -18,6 +18,7 @@ from .register_entities import (
     entity_enabled_by_default,
     number_bounds,
     rows_for_parent,
+    should_project_as_control,
     write_access_allowed,
 )
 
@@ -34,14 +35,16 @@ async def async_setup_entry(
     polling = ensure_polling_coordinators(hass, parent)
     entities: list[OpenRBusNumber] = []
     for identity, register, group, _poll_allowed in rows_for_parent(parent):
-        if control_kind(register, parent.language) != "number":
-            continue
         bounds = number_bounds(register)
         if bounds is None:
             continue
         effective = parent.effective_access_levels.get(identity.node)
         if effective is None and parent.configured_access_level == 1:
             effective = 1
+        if control_kind(register, parent.language) != "number" or not (
+            should_project_as_control(parent, register, effective)
+        ):
+            continue
         entities.append(
             OpenRBusNumber(
                 parent,
@@ -68,10 +71,9 @@ class OpenRBusNumber(OpenRBusRegisterEntity, NumberEntity):
         self._attr_native_min_value = minimum
         self._attr_native_max_value = maximum
         self._attr_native_step = step
-        self._attr_entity_registry_enabled_default = (
-            entity_enabled_by_default(parent, identity, register)
-            and write_access_allowed(parent, register, self._effective_access_level)
-        )
+        self._attr_entity_registry_enabled_default = entity_enabled_by_default(
+            parent, identity, register
+        ) and write_access_allowed(parent, register, self._effective_access_level)
 
     @property
     def available(self) -> bool:
