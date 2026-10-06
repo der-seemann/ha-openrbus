@@ -21,7 +21,7 @@
           "invalid_value_disable_after": "Disable entity after invalid values (minutes)"
         },
         "data_description": {
-          "backend": "Choose how Home Assistant connects to the heating system. See the [ESPHome setup guide](https://github.com/der-seemann/openrbus/blob/v0.4.3/tools/phase1a/esphome/README.md) to add an ESP proxy.",
+          "backend": "Choose how Home Assistant connects to the heating system. Use the setup link above to add an ESP proxy.",
           "language": "Choose the language used for entity names and descriptions.",
           "poll_interval_fast": "Time between frequent reads, in seconds. A longer interval reduces Bluetooth traffic.",
           "poll_interval_standard": "Time between regular reads, in seconds.",

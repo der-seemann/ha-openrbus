@@ -21,7 +21,7 @@
           "invalid_value_disable_after": "Entität nach dauerhaft ungültigen Werten deaktivieren nach (Minuten)"
         },
         "data_description": {
-          "backend": "Legt fest, wie Home Assistant eine Verbindung zur Heizungsanlage herstellt. Hinweise zum Einrichten eines ESP-Proxys stehen in der [ESPHome-Anleitung](https://github.com/der-seemann/openrbus/blob/v0.4.3/tools/phase1a/esphome/README.md).",
+          "backend": "Legt fest, wie Home Assistant eine Verbindung zur Heizungsanlage herstellt. Über den Link oben kannst du einen ESP-Proxy einrichten.",
           "language": "Legt die Sprache für Namen und Beschreibungen der Entitäten fest.",
           "poll_interval_fast": "Abstand zwischen häufigen Leseabfragen in Sekunden. Ein längerer Abstand verringert den Bluetooth-Datenverkehr.",
           "poll_interval_standard": "Abstand zwischen regulären Leseabfragen in Sekunden.",
