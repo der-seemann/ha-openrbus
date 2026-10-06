@@ -9,7 +9,7 @@
     "step": {
       "user": {
         "title": "Select transport",
-        "description": "Choose a native Bluetooth adapter or an OpenRBus proxy.",
+        "description": "Choose a native Bluetooth adapter or an OpenRBus proxy.\n\nNo suitable Bluetooth adapter nearby? [Set up an ESP proxy](https://github.com/der-seemann/openrbus/blob/v0.4.3/tools/phase1a/esphome/README.md).",
         "data": {
           "backend": "Transport backend",
           "language": "Entity language",
@@ -21,7 +21,7 @@
           "invalid_value_disable_after": "Disable entity after invalid values (minutes)"
         },
         "data_description": {
-          "backend": "Select how Home Assistant connects to the heating system.",
+          "backend": "Choose how Home Assistant connects to the heating system. See the [ESPHome setup guide](https://github.com/der-seemann/openrbus/blob/v0.4.3/tools/phase1a/esphome/README.md) to add an ESP proxy.",
           "language": "Choose the language used for entity names and descriptions.",
           "poll_interval_fast": "Time between frequent reads, in seconds. A longer interval reduces Bluetooth traffic.",
           "poll_interval_standard": "Time between regular reads, in seconds.",
@@ -55,8 +55,8 @@
           "experimental_writes": "Expose additional registers without an explicit IsReadOnly declaration as experimental controls. Requires write access to be enabled; these registers are not confirmed as regular writable parameters."
         },
         "data_description": {
-          "read_access_level": "Choose the highest register level whose values should be exposed.",
-          "write_access_level": "Choose the highest register level that may be written. This does not enable writes by itself.",
+          "read_access_level": "Slider: 1 User, 2 Installer, 3 Professional. The saved level is selected.",
+          "write_access_level": "Slider: 0 no write access, 1 User, 2 Installer, 3 Professional. The saved level is selected.",
           "write_enabled": "Allow supported controls to send changes to the heating system.",
           "diagnostics_enabled": "Add diagnostic entities with transport and communication status for troubleshooting.",
           "screed_drying_enabled": "Add entities for the screed-drying program when the controller provides them.",
@@ -156,8 +156,8 @@
           "write_enabled": "Allow supported controls to send changes to the heating system.",
           "diagnostics_enabled": "Add diagnostic entities with transport and communication status for troubleshooting.",
           "screed_drying_enabled": "Add entities for the screed-drying program when the controller provides them.",
-          "read_access_level": "Choose the highest register level whose values should be exposed.",
-          "write_access_level": "Choose the highest register level that may be written. This does not enable writes by itself.",
+          "read_access_level": "Slider: 1 User, 2 Installer, 3 Professional. The saved level is selected.",
+          "write_access_level": "Slider: 0 no write access, 1 User, 2 Installer, 3 Professional. The saved level is selected.",
           "poll_interval_fast": "Time between frequent reads, in seconds. A longer interval reduces Bluetooth traffic.",
           "poll_interval_standard": "Time between regular reads, in seconds.",
           "poll_interval_slow": "Time between infrequent reads, in seconds.",
@@ -165,12 +165,13 @@
           "entity_overrides": "Select which discovered entities should be created.",
           "zone_overrides": "Shows the owning node and detected manufacturer function; only zones enabled by the device can be selected.",
           "backend": "Select how Home Assistant connects to the heating system.",
-          "ble_device": "Select or enter the Bluetooth address of the heating gateway.",
+          "ble_device": "Choose the BLE gateway. Discovered devices show name — MAC address; when no name is available, the MAC address is shown.",
           "passkey": "PIN used to pair with the gateway over Bluetooth.",
           "cooling_enabled": "Include registers in the reviewed cooling-function map. When disabled, those exact registers are excluded before entity selection and creation.",
           "_openrbus_entity_picker": "Open the three-step selector: Device, Category, then Entities. Existing entity identities and saved choices are retained.",
           "experimental_writes": "Expose additional registers without an explicit IsReadOnly declaration as experimental controls. Requires write access to be enabled; these registers are not confirmed as regular writable parameters."
-        }
+        },
+        "description": "No suitable Bluetooth adapter nearby? [Set up an ESP proxy](https://github.com/der-seemann/openrbus/blob/v0.4.3/tools/phase1a/esphome/README.md)."
       },
       "access_warning": {
         "title": "Review access and write permissions",

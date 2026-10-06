@@ -7,6 +7,7 @@ import base64
 import binascii
 import contextlib
 import json
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, ClassVar
@@ -58,6 +59,8 @@ from .const import BACKEND_NATIVE, BACKEND_THIN_RPC
 from .proxy_provisioning import check_proxy_compatibility
 from .setup_observability import RecoveryFenceMetrics, SetupResponseMetrics
 
+_LOGGER = logging.getLogger(__name__)
+
 _DEFAULT_REQUEST_SERVICE = "openrbus_gatt_rpc_request"
 _DEFAULT_POLL_SERVICE = "openrbus_gatt_rpc_poll"
 _DEFAULT_DIAGNOSTICS_SERVICE = "openrbus_gatt_rpc_diagnostics"
@@ -67,6 +70,7 @@ _RESPONSE_WRAPPERS = ("response", "service_data", "data", "service_response")
 # cancels the Core operation.  Object reads retain the configured timeout.
 _THIN_SECURE_TIMEOUT = 20.0
 _THIN_DISCONNECT_TIMEOUT = 5.0
+_THIN_CAPABILITY_DISCOVERY_BUDGET = 5.0
 _PAIR_ACTION_SUFFIX = "openrbus_pair"
 _DISCONNECT_ACTION_SUFFIX = "openrbus_disconnect"
 MAX_FRAME_TRACE_ENTRIES = 128
@@ -311,7 +315,11 @@ def _safe_proxy_read_counters(snapshot: object) -> dict[str, Any]:
     ):
         value = snapshot.get(key)
         if isinstance(value, str) and value in {
-            "none", "WRITE_CHAR", "success", "failed", "waiting_notification"
+            "none",
+            "WRITE_CHAR",
+            "success",
+            "failed",
+            "waiting_notification",
         }:
             safe[key] = value
     for key in (
@@ -504,19 +512,138 @@ async def _read_objects_batched(
 
 
 async def _read_effective_access_levels(
-    client: RawObjectClient, identities: Sequence[DeviceIdentity]
+    client: RawObjectClient,
+    identities: Sequence[DeviceIdentity],
+    *,
+    recover_on_transport_error: Callable[[], Any] | None = None,
 ) -> dict[int, int]:
-    """Read the authoritative per-node access level after discovery."""
+    """Read the authoritative per-node access level after discovery.
+
+    A Thin-RPC response can be lost while the secure session is still settling
+    after discovery. Recover that session at most once and retry the failed
+    read once; access remains fail-closed if the retry has no proof.
+    """
 
     levels: dict[int, int] = {}
+    recovery_attempted = False
     for identity in identities:
         try:
             raw = await client.read_raw(identity.node, ObjectAddress(0x4002, 0x00))
             if raw:
                 levels[identity.node] = max(1, min(3, int(raw[0])))
+        except TransportError:
+            if recover_on_transport_error is None:
+                continue
+            try:
+                if not recovery_attempted:
+                    recovery_attempted = True
+                    await recover_on_transport_error()
+                raw = await client.read_raw(identity.node, ObjectAddress(0x4002, 0x00))
+                if raw:
+                    levels[identity.node] = max(1, min(3, int(raw[0])))
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001 - missing proof stays fail-closed
+                _LOGGER.debug(
+                    "Thin access-level proof unavailable for node %s (%s)",
+                    identity.node,
+                    type(error).__name__,
+                )
+                continue
         except Exception:  # noqa: BLE001, S112 - one unavailable node must not abort discovery
             continue
     return levels
+
+
+async def _discover_capabilities_batched(
+    client: RawObjectClient, node: int, *, timeout: float
+) -> tuple[CapabilityReference, ...]:
+    """Read a node capability directory with bounded GetList requests.
+
+    Some SCB nodes advertise 80–100 entries. Reading those one at a time can
+    hold up config-entry setup for minutes. Core's `read_many_raw` partitions
+    the full directory into size-limited GetList calls, while keeping each
+    request subject to its ordinary transport timeout. No task cancellation
+    is used, so a late response cannot poison the next correlated read.
+    """
+
+    count_raw = await client.read_raw(
+        node, ObjectAddress(0x5826, 0x00), timeout=timeout
+    )
+    if not count_raw:
+        return ()
+    count = count_raw[0]
+    if count == 0:
+        return ()
+    items = tuple(
+        ObjectRead(node, ObjectAddress(0x5826, subindex), 4)
+        for subindex in range(1, count + 1)
+    )
+    results = await client.read_many_raw(items, timeout=min(timeout, 3.0))
+    capabilities: list[CapabilityReference] = []
+    for item in results:
+        raw = item.raw
+        if raw is None or len(raw) != 4:
+            continue
+        flags, index_low, target_subindex, index_high = raw
+        capabilities.append(
+            CapabilityReference(
+                item.address.subindex,
+                ObjectAddress((index_high << 8) | index_low, target_subindex),
+                flags,
+            )
+        )
+    return tuple(capabilities)
+
+
+async def _read_thin_access_level(backend: Any, node: int) -> int | None:
+    """Read one node's effective access proof with one bounded transport retry.
+
+    The normal read path already performs its single session recovery. A
+    follow-up read is useful when the first request still raced gateway
+    readiness; it is limited to one extra read and remains fail-closed for
+    aborts or any other missing proof.
+    """
+
+    address = ObjectAddress(0x4002, 0x00)
+    for attempt in range(2):
+        try:
+            result = await backend.async_read_object(
+                address,
+                node=node,
+                timeout=min(backend.timeout, 3.0),
+            )
+        except asyncio.CancelledError:
+            raise
+        except TransportError as error:
+            if attempt == 0:
+                _LOGGER.debug(
+                    "THIN_ACCESS_PROOF node=%s retrying_after=%s",
+                    node,
+                    type(error).__name__,
+                )
+                await asyncio.sleep(0.1)
+                continue
+            _LOGGER.debug(
+                "THIN_ACCESS_PROOF node=%s error_type=%s",
+                node,
+                type(error).__name__,
+            )
+            return None
+        except Exception as error:  # noqa: BLE001 - missing proof remains fail-closed
+            _LOGGER.debug(
+                "THIN_ACCESS_PROOF node=%s error_type=%s",
+                node,
+                type(error).__name__,
+            )
+            return None
+        if not result.raw_value:
+            _LOGGER.debug("THIN_ACCESS_PROOF node=%s result=empty", node)
+            return None
+        level = max(1, min(3, int(result.raw_value[0])))
+        _LOGGER.debug("THIN_ACCESS_PROOF node=%s level=%s", node, level)
+        return level
+    return None
 
 
 def _identity_capability_evidence(
@@ -755,12 +882,12 @@ class NativeBluetoothBackend:
         return self.devices
 
     async def async_read_object(
-        self, address: ObjectAddress, *, node: int = 0xFF
+        self, address: ObjectAddress, *, node: int = 0xFF, timeout: float | None = None
     ) -> GenericRead:
         await self.async_start()
         if self.client is None:
             raise HomeAssistantError("Native Bluetooth backend is not started")
-        raw = await self.client.read_raw(node, address)
+        raw = await self.client.read_raw(node, address, timeout=timeout)
         definition = _REGISTRY.get(address)
         value = decode_value(definition, address, raw, registry=_REGISTRY)
         return GenericRead(node, address, raw, value)
@@ -1131,14 +1258,15 @@ class HomeAssistantThinGattChannel:
                     else None
                 ),
                 "context": (
-                    self.trace_context
-                    if self.trace_context in {"discovery"}
-                    else None
+                    self.trace_context if self.trace_context in {"discovery"} else None
                 ),
                 "status": status if status in _TRACE_STATUSES else None,
                 "state_category": state if state in _TRACE_STATES else None,
             }
-            if type(self.trace_operation_id) is int and 1 <= self.trace_operation_id <= 4_294_967_295:
+            if (
+                type(self.trace_operation_id) is int
+                and 1 <= self.trace_operation_id <= 4_294_967_295
+            ):
                 record["read_operation_id"] = self.trace_operation_id
             encoded_size = (
                 len(
@@ -1487,6 +1615,8 @@ class ThinRpcBackend:
     """Stable read backend for one configured HA controller session."""
 
     _active_controllers: ClassVar[set[str]] = set()
+    _controller_owner_generations: ClassVar[dict[str, int]] = {}
+    _next_owner_generation: ClassVar[int] = 1
 
     def __init__(
         self,
@@ -1570,6 +1700,8 @@ class ThinRpcBackend:
         self._last_batch_failure_trace: dict[str, Any] | None = None
         self._started = False
         self._owns_controller = False
+        self._owner_generation = self._next_owner_generation
+        type(self)._next_owner_generation += 1
         self._last_disconnect_snapshot: dict[str, bool | int | None] = {}
         self._lifecycle_lock = asyncio.Lock()
         self._read_lock = asyncio.Lock()
@@ -1607,12 +1739,37 @@ class ThinRpcBackend:
                 and self.authenticator_factory is None
             ):
                 raise HomeAssistantError("Thin-RPC requires an EHC key provider")
-            if self.controller_id in self._active_controllers:
+            if (
+                self.controller_id in self._active_controllers
+                and not self._owns_controller
+            ):
+                existing_owner = self._controller_owner_generations.get(
+                    self.controller_id
+                )
+                _LOGGER.warning(
+                    "THIN_OWNER event=claim_rejected claimant_generation=%d "
+                    "existing_generation=%s",
+                    self._owner_generation,
+                    existing_owner,
+                )
                 raise HomeAssistantError(
                     "Thin-RPC controller is already owned by another entry"
                 )
-            self._active_controllers.add(self.controller_id)
-            self._owns_controller = True
+            if not self._owns_controller:
+                self._active_controllers.add(self.controller_id)
+                self._controller_owner_generations[self.controller_id] = (
+                    self._owner_generation
+                )
+                self._owns_controller = True
+                _LOGGER.debug(
+                    "THIN_OWNER event=claim_acquired generation=%d",
+                    self._owner_generation,
+                )
+            else:
+                _LOGGER.debug(
+                    "THIN_OWNER event=claim_reused generation=%d",
+                    self._owner_generation,
+                )
             setup_started = asyncio.get_running_loop().time()
             try:
                 if self.channel is None:
@@ -1686,6 +1843,11 @@ class ThinRpcBackend:
 
         if not self._owns_controller:
             return
+        existing_owner = self._controller_owner_generations.get(self.controller_id)
+        if existing_owner not in (None, self._owner_generation):
+            raise HomeAssistantError(
+                "Thin-RPC controller ownership changed before cleanup"
+            )
         channel = getattr(self, "channel", None)
         link = getattr(self, "link", None)
         session = getattr(self, "session", None)
@@ -1695,14 +1857,71 @@ class ThinRpcBackend:
             raise HomeAssistantError(
                 "Thin-RPC cannot prove physical disconnect without its channel"
             )
+        disconnect_error: BaseException | None = None
         if link is not None and getattr(link, "is_connected", False):
-            await link.disconnect(timeout=min(5.0, self.timeout))
+            try:
+                await link.disconnect(timeout=min(5.0, self.timeout))
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001 - physical state is checked below
+                disconnect_error = error
         elif session is not None:
-            await self._force_disconnect_current_session()
+            try:
+                await self._force_disconnect_current_session()
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:  # noqa: BLE001 - physical state is checked below
+                disconnect_error = error
         # DISCONNECT acknowledgement alone is not the safety boundary. Keep
         # ownership until the proxy confirms both physical connection flags
-        # are down. If diagnostics/time out, the controller remains reserved.
-        await self._wait_for_physical_disconnect()
+        # are down. Some ESPHome BLE clients acknowledge the Thin-RPC command
+        # before their asynchronous BLE disconnect callback runs. If that
+        # physical boundary does not arrive, use the exact scoped proxy action
+        # as one safe fallback, then require the same two down flags.
+        try:
+            await self._wait_for_physical_disconnect()
+        except asyncio.CancelledError:
+            raise
+        except HomeAssistantError as physical_error:
+            disconnect_action = self._configured_disconnect_action()
+            if disconnect_action is None or not _has_esphome_service(
+                self.hass, disconnect_action
+            ):
+                if disconnect_error is not None:
+                    physical_error.add_note(
+                        "Thin-RPC DISCONNECT request failed: "
+                        f"{type(disconnect_error).__name__}"
+                    )
+                raise
+            _LOGGER.debug(
+                "THIN_OWNER event=scoped_disconnect_fallback generation=%d",
+                self._owner_generation,
+            )
+            try:
+                await self.hass.services.async_call(
+                    "esphome", disconnect_action, {}, blocking=True
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as fallback_error:  # noqa: BLE001 - state remains authoritative
+                physical_error.add_note(
+                    "Scoped ESPHome disconnect action failed: "
+                    f"{type(fallback_error).__name__}"
+                )
+            try:
+                await self._wait_for_physical_disconnect()
+            except asyncio.CancelledError:
+                raise
+            except HomeAssistantError as final_error:
+                if disconnect_error is not None:
+                    final_error.add_note(
+                        "Thin-RPC DISCONNECT request failed: "
+                        f"{type(disconnect_error).__name__}"
+                    )
+                final_error.add_note(
+                    "Scoped ESPHome disconnect fallback did not prove physical disconnect"
+                )
+                raise
         if session is not None:
             retire = getattr(session, "retire", None)
             if callable(retire):
@@ -1714,7 +1933,12 @@ class ThinRpcBackend:
         self.link = None
         self.authentication = None
         self._active_controllers.discard(self.controller_id)
+        self._controller_owner_generations.pop(self.controller_id, None)
         self._owns_controller = False
+        _LOGGER.debug(
+            "THIN_OWNER event=claim_released generation=%d",
+            self._owner_generation,
+        )
 
     async def _force_disconnect_current_session(self) -> bool:
         """Fence a partially prepared session using its observed identity."""
@@ -1938,7 +2162,12 @@ class ThinRpcBackend:
             empty_polls = 0
 
     async def async_read_object(
-        self, address: ObjectAddress, *, node: int = 0xFF
+        self,
+        address: ObjectAddress,
+        *,
+        node: int = 0xFF,
+        timeout: float | None = None,
+        recover_on_transport_error: bool = True,
     ) -> GenericRead:
         async with self._read_lock:
             await self._ensure_session_ready()
@@ -1946,8 +2175,13 @@ class ThinRpcBackend:
             outcome = "error"
             try:
                 try:
-                    raw = await self.client.read_raw(node, address)
+                    if timeout is None:
+                        raw = await self.client.read_raw(node, address)
+                    else:
+                        raw = await self.client.read_raw(node, address, timeout=timeout)
                 except TransportError as transport_error:
+                    if not recover_on_transport_error:
+                        raise
                     # A read is idempotent. If the secure link disappears
                     # after the readiness check, fence and retry this one
                     # object once on a fully re-prepared session.
@@ -1957,11 +2191,13 @@ class ThinRpcBackend:
                         raise
                     except Exception as recovery_error:  # noqa: BLE001
                         transport_error.add_note(
-                            "Thin-RPC recovery failed: "
-                            f"{type(recovery_error).__name__}"
+                            f"Thin-RPC recovery failed: {type(recovery_error).__name__}"
                         )
                         raise transport_error
-                    raw = await self.client.read_raw(node, address)
+                    if timeout is None:
+                        raw = await self.client.read_raw(node, address)
+                    else:
+                        raw = await self.client.read_raw(node, address, timeout=timeout)
                 definition = _REGISTRY.get(address)
                 value = decode_value(definition, address, raw, registry=_REGISTRY)
                 outcome = "success"
@@ -1993,8 +2229,7 @@ class ThinRpcBackend:
                     raise
                 except Exception as recovery_error:  # noqa: BLE001
                     transport_error.add_note(
-                        "Thin-RPC recovery failed: "
-                        f"{type(recovery_error).__name__}"
+                        f"Thin-RPC recovery failed: {type(recovery_error).__name__}"
                     )
                     raise transport_error
                 identities = await discover_devices(self.client, include_serial=False)
@@ -2004,15 +2239,34 @@ class ThinRpcBackend:
             scoped: list[DeviceIdentity] = []
             for identity in identities:
                 try:
-                    capabilities = await discover_capabilities(
-                        self.client, identity.node, timeout=self.timeout
+                    capabilities = await _discover_capabilities_batched(
+                        self.client,
+                        identity.node,
+                        timeout=min(self.timeout, _THIN_CAPABILITY_DISCOVERY_BUDGET),
                     )
-                except (CanOpenAbortError, ProtocolError, TransportError, ValueError):
+                except (
+                    CanOpenAbortError,
+                    ProtocolError,
+                    TransportError,
+                    TimeoutError,
+                    ValueError,
+                ) as error:
                     # A node remains visible even when its optional capability
                     # directory cannot be read.  An empty directory is
                     # intentionally conservative: catalog_for_node() must not
                     # substitute the global registry in that case.
+                    _LOGGER.debug(
+                        "THIN_CAPABILITIES node=%s result=error type=%s",
+                        identity.node,
+                        type(error).__name__,
+                    )
                     capabilities = ()
+                else:
+                    _LOGGER.debug(
+                        "THIN_CAPABILITIES node=%s count=%s",
+                        identity.node,
+                        len(capabilities),
+                    )
                 discovered = replace(identity, capabilities=capabilities)
                 scoped.append(
                     replace(
@@ -2020,22 +2274,31 @@ class ThinRpcBackend:
                         capabilities=_identity_capability_evidence(discovered),
                     )
                 )
-            self.effective_access_levels = await _read_effective_access_levels(
-                self.client, tuple(scoped)
-            )
-            return tuple(scoped)
+        # Access proof is read after releasing the discovery lock.  Use the
+        # normal session-ready single-read path so a capability timeout cannot
+        # leave this proof pass on a retired Thin session.
+        levels: dict[int, int] = {}
+        for identity in scoped:
+            level = await _read_thin_access_level(self, identity.node)
+            if level is not None:
+                levels[identity.node] = level
+        self.effective_access_levels = levels
+        return tuple(scoped)
 
     async def async_read_objects(
-        self, addresses: Sequence[ObjectAddress], *, node: int = 0xFF,
+        self,
+        addresses: Sequence[ObjectAddress],
+        *,
+        node: int = 0xFF,
         trace_failure: bool = False,
     ) -> tuple[GenericRead | HomeAssistantError, ...]:
         async with self._read_lock:
             await self._ensure_session_ready()
-            capture_failure = (
-                trace_failure and not self._batch_failure_trace_captured
-            )
+            capture_failure = trace_failure and not self._batch_failure_trace_captured
             before: Mapping[str, Any] = {}
-            if capture_failure and isinstance(self.channel, HomeAssistantThinGattChannel):
+            if capture_failure and isinstance(
+                self.channel, HomeAssistantThinGattChannel
+            ):
                 try:
                     before = await self.channel.diagnostics()
                 except Exception:  # noqa: BLE001 - diagnostics cannot mask polling
@@ -2046,7 +2309,9 @@ class ThinRpcBackend:
 
             def record_failure(stage: str, error: BaseException) -> None:
                 if stage in {
-                    "get_list_call", "response_parse", "single_fallback",
+                    "get_list_call",
+                    "response_parse",
+                    "single_fallback",
                     "recovery_dispatch",
                 }:
                     failure["stage"] = stage
@@ -2128,7 +2393,8 @@ class ThinRpcBackend:
             after = {}
         frames = getattr(self, "frame_trace", None) or ()
         correlated = [
-            item for item in frames
+            item
+            for item in frames
             if isinstance(item, dict) and item.get("read_operation_id") == operation_id
         ]
         last = correlated[-1] if correlated else {}
@@ -2158,18 +2424,14 @@ class ThinRpcBackend:
         """Tag the serialized bus operation without retaining its address."""
         current_id = getattr(self, "_next_read_operation_id", 0)
         self._next_read_operation_id = (
-            1
-            if current_id >= 4_294_967_295
-            else current_id + 1
+            1 if current_id >= 4_294_967_295 else current_id + 1
         )
         operation_id = self._next_read_operation_id
         if isinstance(getattr(self, "channel", None), HomeAssistantThinGattChannel):
             self.channel.trace_operation_id = operation_id
         return operation_id
 
-    def _end_read_operation(
-        self, operation_id: int, kind: str, outcome: str
-    ) -> None:
+    def _end_read_operation(self, operation_id: int, kind: str, outcome: str) -> None:
         """Close one bounded trace interval and release the channel tag."""
         if (
             isinstance(getattr(self, "channel", None), HomeAssistantThinGattChannel)
@@ -2219,8 +2481,7 @@ class ThinRpcBackend:
                         raise
                     except Exception as recovery_error:  # noqa: BLE001
                         transport_error.add_note(
-                            "Thin-RPC recovery failed: "
-                            f"{type(recovery_error).__name__}"
+                            f"Thin-RPC recovery failed: {type(recovery_error).__name__}"
                         )
                         raise transport_error
                     raw = await self.client.read_raw(node, address)
@@ -2331,9 +2592,7 @@ class ThinRpcBackend:
         ):
             return None
         pair_scope = _service_prefix(pair_action, _PAIR_ACTION_SUFFIX)
-        request_scope = _service_prefix(
-            request_service, "_openrbus_gatt_rpc_request"
-        )
+        request_scope = _service_prefix(request_service, "_openrbus_gatt_rpc_request")
         # Bare service names carry no device identity. A fallback is safe
         # only when both configured services have the same explicit ESPHome
         # prefix, which binds the disconnect action to this RPC controller.

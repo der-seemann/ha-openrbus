@@ -147,7 +147,9 @@ class RegisterValidityTracker:
                 if expired:
                     self._expired.add(key)
                 return ValidityObservation(
-                    valid=False, reason=state.reason, invalid_since=state.since,
+                    valid=False,
+                    reason=state.reason,
+                    invalid_since=state.since,
                     expired=expired,
                 )
             # A transport, decode, batch, or correlation failure cannot prove

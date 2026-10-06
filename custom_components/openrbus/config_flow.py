@@ -21,7 +21,6 @@ from .access_storage import (
     normalize_mac,
 )
 from .const import (
-    ACCESS_LEVEL_CHOICES,
     ACCESS_LEVEL_LABELS,
     ACCESS_LEVEL_OPTIONS,
     BACKEND_NATIVE,
@@ -32,6 +31,7 @@ from .const import (
     CONF_AUTH_KEY,
     CONF_BACKEND,
     CONF_BLE_DEVICE,
+    CONF_BLE_NAME,
     CONF_BLE_SOURCE,
     CONF_COOLING_ENABLED,
     CONF_DIAGNOSTICS_ENABLED,
@@ -74,7 +74,6 @@ from .const import (
     FLOW_ACTION_NEXT,
     FLOW_ACTION_OPTIONS,
     LANGUAGE_OPTIONS,
-    WRITE_ACCESS_LEVEL_CHOICES,
     WRITE_ACCESS_LEVEL_OPTIONS,
 )
 from .register_entities import (
@@ -143,6 +142,19 @@ def _flow_schema(fields: dict[vol.Marker, object]) -> vol.Schema:
 
     action, action_selector = _navigation_field()
     return vol.Schema({**fields, action: action_selector})
+
+
+def _access_level_slider(minimum: int, maximum: int) -> selector.NumberSelector:
+    """Return an integer slider; translations explain each numeric level."""
+
+    return selector.NumberSelector(
+        {
+            "min": minimum,
+            "max": maximum,
+            "step": 1,
+            "mode": selector.NumberSelectorMode.SLIDER,
+        }
+    )
 
 
 def _flow_action(user_input: object) -> str:
@@ -356,7 +368,9 @@ def _format_ble_target_label(address: str, name: object = None) -> str:
     # flow: platform identifiers and UUIDs are allowed there as well.
     display_address = address.upper()
     display_name = _usable_ble_name(name, address)
-    return f"{display_name} ({display_address})" if display_name else display_address
+    return (
+        f"{display_name} — MAC {display_address}" if display_name else display_address
+    )
 
 
 def _has_openrbus_service(info: object) -> bool:
@@ -391,6 +405,60 @@ def _stable_label_name(names: Iterable[object], address: str) -> str | None:
         if (name := _usable_ble_name(value, address)) is not None
     ]
     return min(usable, key=lambda name: (name.casefold(), name)) if usable else None
+
+
+def _remember_ble_name(
+    hass,
+    values: dict[str, Any],
+    *,
+    scanned: Mapping[str, Mapping[str, Any]] | None = None,
+    previous: Mapping[str, Any] | None = None,
+) -> None:
+    """Persist only the advertised name matching the currently selected MAC."""
+
+    address = values.get(CONF_BLE_DEVICE)
+    if not isinstance(address, str) or not address.strip():
+        values.pop(CONF_BLE_NAME, None)
+        return
+    name = None
+    if scanned:
+        name = _stable_label_name(
+            (
+                record.get("name")
+                for key, record in scanned.items()
+                if key.casefold() == address.casefold()
+                or str(record.get("address", "")).casefold() == address.casefold()
+            ),
+            address,
+        )
+    if name is None and values.get(CONF_BACKEND, BACKEND_NATIVE) == BACKEND_NATIVE:
+        discovered_names = []
+        for info in bluetooth.async_discovered_service_info(hass, connectable=True):
+            candidate = getattr(info, "address", None) or getattr(
+                getattr(info, "device", None), "address", None
+            )
+            if (
+                isinstance(candidate, str)
+                and candidate.casefold() == address.casefold()
+            ):
+                discovered_names.extend(
+                    (
+                        getattr(info, "name", None),
+                        getattr(getattr(info, "device", None), "name", None),
+                    )
+                )
+        name = _stable_label_name(discovered_names, address)
+    if name is None and previous:
+        old_address = previous.get(CONF_BLE_DEVICE)
+        if (
+            isinstance(old_address, str)
+            and old_address.casefold() == address.casefold()
+        ):
+            name = _usable_ble_name(previous.get(CONF_BLE_NAME), address)
+    if name:
+        values[CONF_BLE_NAME] = name
+    else:
+        values.pop(CONF_BLE_NAME, None)
 
 
 def _choices_from_ble_items(items: Iterable[Mapping[str, Any]]) -> dict[str, str]:
@@ -610,9 +678,10 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                 self._pending_user_input = pending
                 return await self.async_step_user()
             pending.update(_without_flow_action(user_input))
-            self._remember_native_source(pending)
             scan_devices = getattr(self, "_thin_scan_devices", {})
             selected = pending.get(CONF_BLE_DEVICE)
+            _remember_ble_name(self.hass, pending, scanned=scan_devices)
+            self._remember_native_source(pending)
             if selected in scan_devices:
                 pending[CONF_THIN_TARGET_ADDRESS_TYPE] = scan_devices[selected].get(
                     "address_type", 0
@@ -638,8 +707,19 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                         {"address": str(address), "name": getattr(device, "name", None)}
                     )
             choices.update(_choices_from_ble_items(fallback_items))
+        selected = pending.get(CONF_BLE_DEVICE)
+        if isinstance(selected, str) and selected.strip():
+            choices.setdefault(
+                selected,
+                _format_ble_target_label(selected, pending.get(CONF_BLE_NAME)),
+            )
         schema = (
-            {vol.Required(CONF_BLE_DEVICE): vol.In(choices)}
+            {
+                vol.Required(
+                    CONF_BLE_DEVICE,
+                    default=pending.get(CONF_BLE_DEVICE, next(iter(choices))),
+                ): vol.In(choices)
+            }
             if choices
             else {vol.Required(CONF_BLE_DEVICE): str}
         )
@@ -659,6 +739,7 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
             pending.update(_without_flow_action(user_input))
             selected = pending.get(CONF_BLE_DEVICE)
             scan_devices = getattr(self, "_thin_scan_devices", {})
+            _remember_ble_name(self.hass, pending, scanned=scan_devices)
             if selected in scan_devices:
                 pending[CONF_THIN_TARGET_ADDRESS_TYPE] = scan_devices[selected].get(
                     "address_type", 0
@@ -687,7 +768,14 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
         self._pending_user_input = pending
         return self.async_show_form(
             step_id="thin_scan",
-            data_schema=_flow_schema({vol.Required(CONF_BLE_DEVICE): vol.In(choices)}),
+            data_schema=_flow_schema(
+                {
+                    vol.Required(
+                        CONF_BLE_DEVICE,
+                        default=pending.get(CONF_BLE_DEVICE, next(iter(choices))),
+                    ): vol.In(choices)
+                }
+            ),
         )
 
     async def async_step_access_level(self, user_input=None) -> ConfigFlowResult:
@@ -700,11 +788,11 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                         vol.Required(
                             CONF_READ_ACCESS_LEVEL,
                             default=_read_access_level(pending),
-                        ): vol.In(ACCESS_LEVEL_CHOICES),
+                        ): _access_level_slider(1, 3),
                         vol.Required(
                             CONF_WRITE_ACCESS_LEVEL,
                             default=_write_access_level(pending),
-                        ): vol.In(WRITE_ACCESS_LEVEL_CHOICES),
+                        ): _access_level_slider(0, 3),
                         vol.Required(
                             CONF_WRITE_ENABLED,
                             default=pending.get(CONF_WRITE_ENABLED, False),
@@ -915,6 +1003,7 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                 data={
                     CONF_PAIR_ACTION: pair_actions[0] if pair_actions else None,
                     CONF_BLE_DEVICE: user_input.get(CONF_BLE_DEVICE),
+                    CONF_BLE_NAME: user_input.get(CONF_BLE_NAME),
                     CONF_BLE_SOURCE: user_input.get(CONF_BLE_SOURCE),
                     CONF_THIN_TARGET_ADDRESS_TYPE: user_input.get(
                         CONF_THIN_TARGET_ADDRESS_TYPE, 0
@@ -1072,6 +1161,12 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
         offline; it preserves an existing target without inventing a device.
         """
         choices = OpenRBusConfigFlow._ble_target_choices(self.hass, include_thin=False)
+        selected = current.get(CONF_BLE_DEVICE)
+        if isinstance(selected, str) and selected.strip():
+            choices.setdefault(
+                selected,
+                _format_ble_target_label(selected, current.get(CONF_BLE_NAME)),
+            )
         self._native_ble_sources = _native_ble_source_map(self.hass)
         if choices:
             return vol.In(choices)
@@ -1717,6 +1812,12 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                 ) or getattr(self._config_entry, "data", {}).get(CONF_BLE_SOURCE)
                 if existing and not user_input.get(CONF_BLE_SOURCE):
                     user_input[CONF_BLE_SOURCE] = existing
+            _remember_ble_name(
+                self.hass,
+                user_input,
+                scanned=getattr(self, "_options_scan_devices", None),
+                previous=previous,
+            )
             self._remember_native_source(user_input)
             if _warning_required(
                 level, user_input.get(CONF_WRITE_ENABLED, False)
@@ -1856,11 +1957,11 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             vol.Required(
                 CONF_READ_ACCESS_LEVEL,
                 default=_read_access_level(current),
-            ): vol.In(ACCESS_LEVEL_OPTIONS),
+            ): _access_level_slider(1, 3),
             vol.Required(
                 CONF_WRITE_ACCESS_LEVEL,
                 default=_write_access_level(current),
-            ): vol.In(WRITE_ACCESS_LEVEL_CHOICES),
+            ): _access_level_slider(0, 3),
             vol.Required(
                 CONF_LANGUAGE,
                 default=current.get(CONF_LANGUAGE, DEFAULT_LANGUAGE),

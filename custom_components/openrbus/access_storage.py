@@ -62,7 +62,9 @@ async def async_load_access_profile(hass, mac: object) -> dict[str, Any]:
     normalized = normalize_mac(mac)
     if normalized is None:
         return {}
-    payload = await Store[dict[str, Any]](hass, _STORAGE_VERSION, _STORAGE_KEY).async_load()
+    payload = await Store[dict[str, Any]](
+        hass, _STORAGE_VERSION, _STORAGE_KEY
+    ).async_load()
     if not isinstance(payload, Mapping):
         return {}
     profiles = payload.get("profiles")

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Mapping
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -45,7 +46,7 @@ from .const import (
     CONF_TRANSPORT_MIGRATION,
     DOMAIN,
 )
-from .coordinator import OpenRBusCoordinator
+from .coordinator import OpenRBusCoordinator, schedule_first_refresh_in_background
 from .proxy_provisioning import PROXY_SOURCE_VERSION, read_proxy_yaml
 
 PLATFORMS = ["sensor", "binary_sensor", "number", "select", "switch"]
@@ -57,6 +58,19 @@ _LOGGER = logging.getLogger(__name__)
 # transport, while this integration supplies the known profile internally.
 _DEFAULT_THIN_KEY_SECRET = "openrbus_ehc_key"
 _THIN_CCCD = "00002902-0000-1000-8000-00805f9b34fb"
+
+
+def _json_safe_read_value(value: object) -> object:
+    """Return values accepted by HA's service-response JSON encoder.
+
+    Core uses Decimal for scaled CANopen values so reads and writes retain
+    decimal precision. Home Assistant service responses must use JSON-native
+    primitives; expose those scaled values as JSON numbers at this boundary.
+    """
+
+    if isinstance(value, Decimal):
+        return float(value)
+    return value
 
 
 def _default_thin_profile() -> ThinGattProfile:
@@ -342,7 +356,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "object": str(result.address),
                 "status": result.status,
                 "raw_response": result.raw_value.hex(),
-                "value": result.value,
+                "value": _json_safe_read_value(result.value),
             }
 
         hass.services.async_register(
@@ -382,7 +396,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         "object": str(result.address),
                         "status": result.status,
                         "raw_response": result.raw_value.hex(),
-                        "value": result.value,
+                        "value": _json_safe_read_value(result.value),
                     }
                     if not isinstance(result, HomeAssistantError)
                     else {"status": "error", "error": str(result)}
@@ -541,8 +555,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             supports_response=SupportsResponse.OPTIONAL,
         )
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    first_refresh = hass.async_create_task(
-        coordinator.async_config_entry_first_refresh()
+    first_refresh = schedule_first_refresh_in_background(
+        hass,
+        entry,
+        coordinator,
+        name="OpenRBus gateway initial refresh",
     )
 
     entry.async_on_unload(lambda: _cancel_task(first_refresh))

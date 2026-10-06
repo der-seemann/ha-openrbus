@@ -85,6 +85,11 @@ _LOGGER = logging.getLogger(__name__)
 _COORDINATOR_INSTANCE_IDS = itertools.count(1)
 _POLL_BATCH_SIZE = 32
 _DIAGNOSTIC_ITEM_FAILURE_LIMIT = 16
+_ZONE_DISCOVERY_STARTUP_BUDGET = 20.0
+_ZONE_DISCOVERY_READ_TIMEOUT = 1.5
+_ZONE_DISCOVERY_MAX_RETRIES = 3
+_ZONE_PROFILE_CACHE: dict[tuple[str, str], dict[tuple[int, int], ZoneProfile]] = {}
+_ZONE_DISCOVERY_CURSOR: dict[tuple[str, str], int] = {}
 _REGISTRY = Registry.load_default()
 _ERROR_CLASSES = ("abort", "item", "batch", "decode", "correlation", "session")
 _ABORT_CATEGORIES = frozenset(
@@ -101,6 +106,68 @@ _ABORT_CATEGORIES = frozenset(
 _DECODE_DETAILS = frozenset(
     {"visible_string_non_ascii", "visible_string_overlength", "visible_string_other"}
 )
+
+
+def _invalid_value_retirement_period(value: object) -> timedelta:
+    """Convert the user-facing invalid-value threshold, expressed in minutes."""
+    try:
+        minutes = int(value)
+    except (TypeError, ValueError):
+        minutes = DEFAULT_INVALID_VALUE_DISABLE_AFTER
+    return timedelta(minutes=max(1, minutes))
+
+
+def _zone_selection_changed(
+    previous: dict[tuple[int, int], ZoneProfile],
+    current: dict[tuple[int, int], ZoneProfile],
+) -> bool:
+    """Whether late zone evidence changes the set of eligible zone slots."""
+
+    return any(
+        bool(previous.get(key) and previous[key].active)
+        != bool(current.get(key) and current[key].active)
+        for key in previous.keys() | current.keys()
+    )
+
+
+def schedule_background_task(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    target: Any,
+    *,
+    name: str,
+) -> asyncio.Task[Any]:
+    """Create an entry-owned task without holding up HA startup.
+
+    The ConfigEntry owns the task and cancels it when the entry is unloaded.
+    """
+
+    return config_entry.async_create_background_task(hass, target, name=name)
+
+
+def schedule_first_refresh_in_background(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    coordinator: DataUpdateCoordinator[Any],
+    *,
+    name: str,
+) -> asyncio.Task[Any]:
+    """Start initial data fetching without holding up Home Assistant startup.
+
+    Config-entry setup already verifies transport and access. Register polling
+    coordinators before this refresh is scheduled; their first device reads can
+    span many batches, so they must be lifecycle-owned background tasks rather
+    than setup tasks tracked by HA's startup watchdog.
+    """
+
+    return schedule_background_task(
+        hass,
+        config_entry,
+        coordinator.async_config_entry_first_refresh(),
+        name=name,
+    )
+
+
 _SAFE_BATCH_EXCEPTION_TYPES = frozenset(
     {
         "canopen_abort",
@@ -193,6 +260,10 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             update_interval=DEFAULT_UPDATE_INTERVAL,
         )
         configured = _configured_entry_data(entry)
+        self._zone_profile_cache_key = (
+            entry.entry_id,
+            str(configured.get(CONF_BLE_DEVICE, "")).strip().upper(),
+        )
         backend = configured.get(CONF_BACKEND)
         if backend not in {BACKEND_NATIVE, BACKEND_THIN_RPC}:
             raise HomeAssistantError(
@@ -256,16 +327,12 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 )
             ),
         }
-        try:
-            invalid_after = int(
-                configured.get(
-                    CONF_INVALID_VALUE_DISABLE_AFTER,
-                    DEFAULT_INVALID_VALUE_DISABLE_AFTER,
-                )
+        self.invalid_value_disable_after = _invalid_value_retirement_period(
+            configured.get(
+                CONF_INVALID_VALUE_DISABLE_AFTER,
+                DEFAULT_INVALID_VALUE_DISABLE_AFTER,
             )
-        except (TypeError, ValueError):
-            invalid_after = DEFAULT_INVALID_VALUE_DISABLE_AFTER
-        self.invalid_value_disable_after = timedelta(seconds=max(60, invalid_after))
+        )
         # Core/backend authorization is authoritative.  A higher configured
         # value is never treated as proof of effective access.
         self.effective_access_level: int | None = (
@@ -276,7 +343,15 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         self.effective_access_levels: dict[int, int] = {}
         # This is populated by read-only CP020/name reads after discovery.
         # Entries are keyed by protocol identity, never display names.
-        self.zone_profiles: dict[tuple[int, int], ZoneProfile] = {}
+        self.zone_profiles = dict(
+            _ZONE_PROFILE_CACHE.get(self._zone_profile_cache_key, {})
+        )
+        self._zone_entities: set[Any] = set()
+        self._zone_discovery_task: asyncio.Task[None] | None = None
+        # Set before child polling coordinators shut down.  An in-flight poll
+        # may finish its current request, but must not start another batch
+        # after the parent has begun releasing the physical controller.
+        self._shutting_down = False
         self.zone_overrides = normalized_overrides(configured.get(CONF_ZONE_OVERRIDES))
         self.entity_overrides = {
             migrate_legacy_unique_id(self, key): value
@@ -382,7 +457,13 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             self.inventories = tuple(
                 self._inventory_for(identity) for identity in self.devices
             )
-            await self._async_discover_zone_profiles()
+            if not await self._async_discover_zone_profiles():
+                self._zone_discovery_task = schedule_background_task(
+                    self.hass,
+                    self.config_entry,
+                    self._async_retry_zone_discovery(),
+                    name="OpenRBus deferred zone discovery",
+                )
         except BaseException as error:
             # Backend setup can succeed before the remaining discovery and
             # catalog projection steps fail. Stop the partially initialized
@@ -407,7 +488,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                     record_cancel(elapsed)
             raise
 
-    async def _async_discover_zone_profiles(self) -> None:
+    async def _async_discover_zone_profiles(self) -> bool:
         """Read ZoneFunction plus custom labels for advertised zone slots.
 
         This is strictly read-only and best-effort.  CP020 is manufacturer
@@ -416,7 +497,11 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         which is safer than exposing every static SCB-10 zone array.
         """
 
-        profiles: dict[tuple[int, int], ZoneProfile] = {}
+        profiles = dict(self.zone_profiles)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _ZONE_DISCOVERY_STARTUP_BUDGET
+        complete = True
+        candidates: list[tuple[Any, Any, int, int]] = []
         for runtime_node in self.inventories or self.devices:
             identity = getattr(runtime_node, "identity", runtime_node)
             node = getattr(identity, "node", None)
@@ -427,38 +512,118 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 _REGISTRY,
                 experimental_writes=self.write_enabled and self.experimental_writes,
             )
-            slots = zone_function_slots(rows)
-            for slot in slots:
-                try:
-                    function_read = await self.async_read_object(
-                        ObjectAddress(ZONE_FUNCTION_INDEX, slot), node=node
-                    )
-                except (HomeAssistantError, OpenRBusError, TypeError, ValueError):
-                    continue
-                if type(function_read.value) is not int:
-                    continue
-                friendly_name: str | None = None
-                try:
-                    name_read = await self.async_read_object(
-                        ObjectAddress(ZONE_FRIENDLY_NAME_INDEX, slot), node=node
-                    )
-                    if isinstance(name_read.value, str):
-                        friendly_name = name_read.value.strip("\x00 ") or None
-                except (HomeAssistantError, OpenRBusError, TypeError, ValueError):
-                    pass
-                # The device model/family is manufacturer identity evidence.
-                # Keep it on each profile so both the Options Flow and HA's
-                # zone child device show which bus node owns the slot.
-                node_name = (
-                    getattr(identity, "model", None)
-                    or getattr(identity, "family", None)
-                    or getattr(identity, "name", None)
+            candidates.extend(
+                (runtime_node, identity, node, slot)
+                for slot in zone_function_slots(rows)
+            )
+
+        if not candidates:
+            return True
+
+        cursor = _ZONE_DISCOVERY_CURSOR.get(self._zone_profile_cache_key, 0)
+        cursor %= len(candidates)
+        processed = 0
+        for offset in range(len(candidates)):
+            if loop.time() >= deadline:
+                complete = False
+                break
+            index = (cursor + offset) % len(candidates)
+            _runtime_node, identity, node, slot = candidates[index]
+            processed += 1
+            if (node, slot) in profiles:
+                continue
+            try:
+                function_read = await self.async_read_object(
+                    ObjectAddress(ZONE_FUNCTION_INDEX, slot),
+                    node=node,
+                    timeout=_ZONE_DISCOVERY_READ_TIMEOUT,
+                    recover_on_transport_error=False,
                 )
+            except (HomeAssistantError, OpenRBusError, TypeError, ValueError):
+                complete = False
+                continue
+            if type(function_read.value) is not int:
+                complete = False
+                continue
+            if function_read.value == 0:
                 profile = ZoneProfile(
-                    node, slot, function_read.value, friendly_name, node_name
+                    node,
+                    slot,
+                    function_read.value,
+                    node_name=(
+                        getattr(identity, "model", None)
+                        or getattr(identity, "family", None)
+                        or getattr(identity, "name", None)
+                    ),
                 )
                 profiles[(node, slot)] = profile
+                self.zone_profiles = dict(profiles)
+                continue
+            friendly_name: str | None = None
+            try:
+                name_read = await self.async_read_object(
+                    ObjectAddress(ZONE_FRIENDLY_NAME_INDEX, slot),
+                    node=node,
+                    timeout=_ZONE_DISCOVERY_READ_TIMEOUT,
+                    recover_on_transport_error=False,
+                )
+                if isinstance(name_read.value, str):
+                    friendly_name = name_read.value.strip("\x00 ") or None
+            except (HomeAssistantError, OpenRBusError, TypeError, ValueError):
+                # CP020 already proved that this slot is active. A missing
+                # optional label must not block discovery of other slots.
+                _LOGGER.debug("Zone label unavailable for node %s slot %s", node, slot)
+            # The device model/family is manufacturer identity evidence.
+            # Keep it on each profile so both the Options Flow and HA's
+            # zone child device show which bus node owns the slot.
+            node_name = (
+                getattr(identity, "model", None)
+                or getattr(identity, "family", None)
+                or getattr(identity, "name", None)
+            )
+            profile = ZoneProfile(
+                node, slot, function_read.value, friendly_name, node_name
+            )
+            profiles[(node, slot)] = profile
+            self.zone_profiles = dict(profiles)
         self.zone_profiles = profiles
+        _ZONE_PROFILE_CACHE[self._zone_profile_cache_key] = dict(profiles)
+        _ZONE_DISCOVERY_CURSOR[self._zone_profile_cache_key] = (
+            cursor + processed
+        ) % len(candidates)
+        return complete
+
+    async def _async_retry_zone_discovery(self) -> None:
+        """Complete best-effort zone discovery after the entry is available."""
+
+        try:
+            for attempt in range(_ZONE_DISCOVERY_MAX_RETRIES):
+                await asyncio.sleep(15)
+                if self._shutting_down:
+                    return
+                previous = dict(self.zone_profiles)
+                complete = await self._async_discover_zone_profiles()
+                for entity in tuple(self._zone_entities):
+                    entity.async_refresh_zone_name()
+                if self._shutting_down:
+                    return
+                if _zone_selection_changed(previous, self.zone_profiles):
+                    # A late positive CP020 profile changes which zone
+                    # entities and poller rows are safe to expose. One managed
+                    # reload rebuilds both from cached evidence.
+                    self.hass.config_entries.async_schedule_reload(self._entry_id)
+                    return
+                if complete:
+                    return
+                _LOGGER.debug(
+                    "Zone discovery remains incomplete after retry %s/%s",
+                    attempt + 1,
+                    _ZONE_DISCOVERY_MAX_RETRIES,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.debug("Deferred OpenRBus zone discovery failed", exc_info=True)
 
     @staticmethod
     def _inventory_for(identity: DeviceIdentity) -> DeviceInventory:
@@ -482,6 +647,21 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
 
     async def async_shutdown(self) -> None:
         backend = self._backend
+        self._shutting_down = True
+        zone_task = self._zone_discovery_task
+        if zone_task is not None and not zone_task.done():
+            zone_task.cancel()
+            await asyncio.gather(zone_task, return_exceptions=True)
+        # These coordinators own the periodic register reads. Stop their
+        # schedules before stopping the shared backend so an already-running
+        # poll can finish its current transaction and observe _shutting_down
+        # before it tries the next batch. Otherwise a multi-batch refresh can
+        # restart Thin-RPC immediately after async_stop releases its claim.
+        polling_coordinators = tuple(
+            getattr(self, "_openrbus_polling_coordinators", {}).values()
+        )
+        for polling_coordinator in polling_coordinators:
+            await polling_coordinator.async_shutdown()
         session = getattr(backend, "session", None)
         epoch = getattr(session, "epoch", None)
         if type(epoch) is not int or not 0 <= epoch <= _DIAGNOSTIC_COUNTER_MAX:
@@ -521,9 +701,20 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         await super().async_shutdown()
 
     async def async_read_object(
-        self, address: ObjectAddress, *, node: int = 0xFF
+        self,
+        address: ObjectAddress,
+        *,
+        node: int = 0xFF,
+        timeout: float | None = None,
+        recover_on_transport_error: bool = True,
     ) -> GenericRead:
-        return await self._backend.async_read_object(address, node=node)
+        read = self._backend.async_read_object
+        options: dict[str, Any] = {}
+        if timeout is not None:
+            options["timeout"] = timeout
+        if not recover_on_transport_error and self.backend_mode == BACKEND_THIN_RPC:
+            options["recover_on_transport_error"] = False
+        return await read(address, node=node, **options)
 
     async def async_read_object_with_transport_capture(
         self, address: ObjectAddress, *, node: int = 0xFF
@@ -813,6 +1004,8 @@ class OpenRBusPollingCoordinator(
     async def _async_poll_data(
         self,
     ) -> dict[tuple[int, ObjectAddress], GenericRead | HomeAssistantError]:
+        if getattr(self.parent, "_shutting_down", False):
+            return {}
         grouped: dict[int, list[ObjectAddress]] = defaultdict(list)
         scopes: dict[tuple[int, ObjectAddress], object | None] = {}
         quarantined_keys: set[tuple[int, ObjectAddress]] = set()
@@ -867,12 +1060,16 @@ class OpenRBusPollingCoordinator(
         old_available = self._diagnostic_available_items
         available = 0
         for node, addresses in grouped.items():
+            if getattr(self.parent, "_shutting_down", False):
+                break
             # Keep each HA poll transaction bounded even when one family has
             # hundreds of readable rows.  A link loss or malformed response
             # then affects only this chunk; healthy chunks (including typed
             # controls) remain publishable and are retried by the backend's
             # batch/single recovery path.
             for start in range(0, len(addresses), _POLL_BATCH_SIZE):
+                if getattr(self.parent, "_shutting_down", False):
+                    break
                 chunk = tuple(addresses[start : start + _POLL_BATCH_SIZE])
                 try:
                     if self.group == "fast":

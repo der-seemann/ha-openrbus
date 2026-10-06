@@ -353,7 +353,7 @@ class OpenRBusRegisterSensor(
         self._effective_access_level = effective_access_level
         self._attr_name = register_name(register, language)
         if zone_label := entity_zone_label(parent, identity, register):
-            self._attr_name = f"{zone_label} {self._attr_name}"
+            self._attr_name = f"{zone_label} — {self._attr_name}"
         if register.datatype == "TIME_OF_DAY":
             # HA has no time-only sensor device class/native value, so publish
             # a stable clock string. Keep the standardized protocol date

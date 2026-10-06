@@ -20,6 +20,7 @@ from custom_components.openrbus.config_flow import (
     _has_openrbus_service,
     _native_ble_source_map,
     _normalize_access_level,
+    _remember_ble_name,
     _safe_access_level,
     _stable_scan_records,
     _transport_route,
@@ -36,6 +37,7 @@ from custom_components.openrbus.const import (
     CONF_AUTH_KEY,
     CONF_BACKEND,
     CONF_BLE_DEVICE,
+    CONF_BLE_NAME,
     CONF_COOLING_ENABLED,
     CONF_DIAGNOSTICS_ENABLED,
     CONF_FLOW_ACTION,
@@ -174,6 +176,117 @@ async def test_options_form_reopens_independent_read_and_no_write_levels(
     assert defaults[CONF_READ_ACCESS_LEVEL] == 3
     assert defaults[CONF_WRITE_ACCESS_LEVEL] == 0
     assert defaults[config_flow_module.CONF_COOLING_ENABLED] is False
+
+    selectors = {
+        marker.schema: validator
+        for marker, validator in result["data_schema"].schema.items()
+        if getattr(marker, "schema", None)
+        in {CONF_READ_ACCESS_LEVEL, CONF_WRITE_ACCESS_LEVEL}
+    }
+    assert selectors[CONF_READ_ACCESS_LEVEL].config == {
+        "min": 1.0,
+        "max": 3.0,
+        "step": 1.0,
+        "mode": "slider",
+    }
+    assert selectors[CONF_WRITE_ACCESS_LEVEL].config == {
+        "min": 0.0,
+        "max": 3.0,
+        "step": 1.0,
+        "mode": "slider",
+    }
+
+
+@pytest.mark.asyncio
+async def test_access_level_change_saves_and_reopens_without_policy_drift(
+    monkeypatch,
+) -> None:
+    entry = SimpleNamespace(
+        data={
+            CONF_BACKEND: BACKEND_NATIVE,
+            CONF_BLE_DEVICE: "AA:BB:CC:DD:EE:FF",
+            CONF_ACCESS_LEVEL: 1,
+        },
+        options={CONF_READ_ACCESS_LEVEL: 1, CONF_WRITE_ACCESS_LEVEL: 1},
+        runtime_data=SimpleNamespace(zone_profiles={}),
+    )
+    flow = OpenRBusOptionsFlowHandler(entry)
+    monkeypatch.setattr(
+        OpenRBusConfigFlow,
+        "_ble_target_choices",
+        staticmethod(lambda hass, include_thin=True: {}),
+    )
+    monkeypatch.setattr(
+        OpenRBusOptionsFlowHandler, "_entity_choices", lambda *_a, **_k: {}
+    )
+    monkeypatch.setattr(
+        OpenRBusOptionsFlowHandler, "_zone_choices", lambda *_a, **_k: {}
+    )
+    monkeypatch.setattr(config_flow_module, "_async_apply_mac_profile", AsyncMock())
+    monkeypatch.setattr(
+        config_flow_module, "async_load_access_profile", AsyncMock(return_value={})
+    )
+    monkeypatch.setattr(config_flow_module, "_native_ble_source_map", lambda _hass: {})
+    monkeypatch.setattr(
+        config_flow_module.bluetooth,
+        "async_discovered_service_info",
+        lambda _hass, connectable=True: (),
+    )
+    monkeypatch.setattr(config_flow_module, "async_save_access_profile", AsyncMock())
+
+    opened = await flow.async_step_init()
+    submitted = {
+        marker.schema: marker.default()
+        for marker in opened["data_schema"].schema
+        if hasattr(marker, "default")
+    }
+    submitted.update(
+        {
+            CONF_READ_ACCESS_LEVEL: 3,
+            CONF_WRITE_ACCESS_LEVEL: 0,
+            CONF_ACCESS_ACK: True,
+            CONF_AUTH_KEY: "abcdef12",
+        }
+    )
+    monkeypatch.setattr(
+        flow,
+        "async_create_entry",
+        lambda *, title, data: {"title": title, "data": data},
+    )
+    saved = await flow.async_step_init(submitted)
+    assert saved["data"][CONF_READ_ACCESS_LEVEL] == 3
+    assert saved["data"][CONF_WRITE_ACCESS_LEVEL] == 0
+
+    entry.options.update(saved["data"])
+    reopened = await OpenRBusOptionsFlowHandler(entry).async_step_init()
+    defaults = {
+        marker.schema: marker.default()
+        for marker in reopened["data_schema"].schema
+        if getattr(marker, "schema", None)
+        in {CONF_READ_ACCESS_LEVEL, CONF_WRITE_ACCESS_LEVEL}
+    }
+    assert defaults == {CONF_READ_ACCESS_LEVEL: 3, CONF_WRITE_ACCESS_LEVEL: 0}
+
+
+@pytest.mark.asyncio
+async def test_setup_access_levels_are_discrete_numeric_sliders() -> None:
+    flow = OpenRBusConfigFlow()
+    flow._pending_user_input = {
+        CONF_READ_ACCESS_LEVEL: 2,
+        CONF_WRITE_ACCESS_LEVEL: 0,
+    }
+    result = await flow.async_step_access_level()
+    fields = {
+        marker.schema: (marker, validator)
+        for marker, validator in result["data_schema"].schema.items()
+        if getattr(marker, "schema", None)
+        in {CONF_READ_ACCESS_LEVEL, CONF_WRITE_ACCESS_LEVEL}
+    }
+
+    assert fields[CONF_READ_ACCESS_LEVEL][0].default() == 2
+    assert fields[CONF_WRITE_ACCESS_LEVEL][0].default() == 0
+    assert fields[CONF_READ_ACCESS_LEVEL][1].config["step"] == 1.0
+    assert fields[CONF_WRITE_ACCESS_LEVEL][1].config["step"] == 1.0
 
 
 @pytest.mark.asyncio
@@ -454,7 +567,7 @@ def test_ble_choice_shows_name_and_mac_but_keeps_address_as_value() -> None:
     choices = _choices_from_ble_items(
         [{"address": "aa:bb:cc:dd:ee:ff", "name": "Gateway"}]
     )
-    assert choices == {"aa:bb:cc:dd:ee:ff": "Gateway (AA:BB:CC:DD:EE:FF)"}
+    assert choices == {"aa:bb:cc:dd:ee:ff": "Gateway — MAC AA:BB:CC:DD:EE:FF"}
 
 
 def test_ble_choice_uses_only_mac_for_missing_or_placeholder_name() -> None:
@@ -495,9 +608,68 @@ def test_ble_choice_deduplicates_addresses_and_chooses_name_deterministically() 
         {"address": "AA:BB:CC:DD:EE:04", "name": "Other"},
     ]
     assert _choices_from_ble_items(items) == {
-        "AA:BB:CC:DD:EE:03": "Alpha (AA:BB:CC:DD:EE:03)",
-        "AA:BB:CC:DD:EE:04": "Other (AA:BB:CC:DD:EE:04)",
+        "AA:BB:CC:DD:EE:03": "Alpha — MAC AA:BB:CC:DD:EE:03",
+        "AA:BB:CC:DD:EE:04": "Other — MAC AA:BB:CC:DD:EE:04",
     }
+
+
+def test_native_options_fallback_keeps_selected_device_visible_as_mac(
+    monkeypatch,
+) -> None:
+    flow = OpenRBusOptionsFlowHandler(
+        SimpleNamespace(data={}, options={}, runtime_data=None)
+    )
+    monkeypatch.setattr(
+        OpenRBusConfigFlow,
+        "_ble_target_choices",
+        staticmethod(lambda hass, include_thin=True: {}),
+    )
+    schema = flow._native_ble_schema({CONF_BLE_DEVICE: "aa:bb:cc:dd:ee:ff"})
+    assert schema("aa:bb:cc:dd:ee:ff") == "aa:bb:cc:dd:ee:ff"
+    assert schema.container["aa:bb:cc:dd:ee:ff"] == "AA:BB:CC:DD:EE:FF"
+
+
+def test_native_options_fallback_retains_advertised_name_with_mac(monkeypatch) -> None:
+    flow = OpenRBusOptionsFlowHandler(
+        SimpleNamespace(data={}, options={}, runtime_data=None)
+    )
+    monkeypatch.setattr(
+        OpenRBusConfigFlow,
+        "_ble_target_choices",
+        staticmethod(lambda hass, include_thin=True: {}),
+    )
+    schema = flow._native_ble_schema(
+        {CONF_BLE_DEVICE: "aa:bb:cc:dd:ee:ff", CONF_BLE_NAME: "EHC-16"}
+    )
+    assert schema.container["aa:bb:cc:dd:ee:ff"] == ("EHC-16 — MAC AA:BB:CC:DD:EE:FF")
+
+
+def test_ble_advertisement_name_is_persisted_for_selected_mac() -> None:
+    values = {CONF_BACKEND: BACKEND_THIN_RPC, CONF_BLE_DEVICE: "aa:bb:cc:dd:ee:ff"}
+    _remember_ble_name(
+        SimpleNamespace(),
+        values,
+        scanned={
+            "aa:bb:cc:dd:ee:ff": {
+                "address": "AA:BB:CC:DD:EE:FF",
+                "name": "EHC-16",
+            }
+        },
+    )
+    assert values[CONF_BLE_NAME] == "EHC-16"
+
+
+def test_ble_name_is_not_carried_to_a_different_mac() -> None:
+    values = {CONF_BACKEND: BACKEND_THIN_RPC, CONF_BLE_DEVICE: "11:22:33:44:55:66"}
+    _remember_ble_name(
+        SimpleNamespace(),
+        values,
+        previous={
+            CONF_BLE_DEVICE: "aa:bb:cc:dd:ee:ff",
+            CONF_BLE_NAME: "EHC-16",
+        },
+    )
+    assert CONF_BLE_NAME not in values
 
 
 def test_native_choice_filter_matches_current_transparent_service_selector() -> None:

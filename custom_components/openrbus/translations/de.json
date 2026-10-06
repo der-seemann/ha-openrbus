@@ -9,7 +9,7 @@
     "step": {
       "user": {
         "title": "ESPHome-Gateway auswählen",
-        "description": "Wähle einen lokalen Bluetooth-Adapter oder einen ESPHome Thin-RPC-Proxy.",
+        "description": "Wähle einen lokalen Bluetooth-Adapter oder einen ESPHome Thin-RPC-Proxy.\n\nKein passender Bluetooth-Adapter in Reichweite? [ESP-Proxy einrichten](https://github.com/der-seemann/openrbus/blob/v0.4.3/tools/phase1a/esphome/README.md).",
         "data": {
           "backend": "Transport",
           "language": "Sprache der Entitäten",
@@ -21,7 +21,7 @@
           "invalid_value_disable_after": "Entität nach dauerhaft ungültigen Werten deaktivieren nach (Minuten)"
         },
         "data_description": {
-          "backend": "Legt fest, wie Home Assistant eine Verbindung zur Heizungsanlage herstellt.",
+          "backend": "Legt fest, wie Home Assistant eine Verbindung zur Heizungsanlage herstellt. Hinweise zum Einrichten eines ESP-Proxys stehen in der [ESPHome-Anleitung](https://github.com/der-seemann/openrbus/blob/v0.4.3/tools/phase1a/esphome/README.md).",
           "language": "Legt die Sprache für Namen und Beschreibungen der Entitäten fest.",
           "poll_interval_fast": "Abstand zwischen häufigen Leseabfragen in Sekunden. Ein längerer Abstand verringert den Bluetooth-Datenverkehr.",
           "poll_interval_standard": "Abstand zwischen regulären Leseabfragen in Sekunden.",
@@ -56,8 +56,8 @@
           "experimental_writes": "Zusätzliche Register ohne explizite IsReadOnly-Kennzeichnung als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt."
         },
         "data_description": {
-          "read_access_level": "Höchste Registerebene auswählen, deren Werte angezeigt werden sollen.",
-          "write_access_level": "Höchste Registerebene auswählen, auf die geschrieben werden darf. Dadurch wird Schreibzugriff allein nicht aktiviert.",
+          "read_access_level": "Schieberegler: 1 Benutzer, 2 Installateur, 3 Fachhandwerker. Die gespeicherte Stufe ist vorausgewählt.",
+          "write_access_level": "Schieberegler: 0 kein Schreibzugriff, 1 Benutzer, 2 Installateur, 3 Fachhandwerker. Die gespeicherte Stufe ist vorausgewählt.",
           "write_enabled": "Erlaubt unterstützten Bedienelementen, Änderungen an die Heizungsanlage zu senden.",
           "diagnostics_enabled": "Fügt Diagnose-Entitäten mit Transport- und Kommunikationsstatus zur Fehlersuche hinzu.",
           "screed_drying_enabled": "Fügt Entitäten für das Estrichtrocknungsprogramm hinzu, sofern der Regler diese bereitstellt.",
@@ -156,8 +156,8 @@
           "write_enabled": "Erlaubt unterstützten Bedienelementen, Änderungen an die Heizungsanlage zu senden.",
           "diagnostics_enabled": "Fügt Diagnose-Entitäten mit Transport- und Kommunikationsstatus zur Fehlersuche hinzu.",
           "screed_drying_enabled": "Fügt Entitäten für das Estrichtrocknungsprogramm hinzu, sofern der Regler diese bereitstellt.",
-          "read_access_level": "Höchste Registerebene auswählen, deren Werte angezeigt werden sollen.",
-          "write_access_level": "Höchste Registerebene auswählen, auf die geschrieben werden darf. Dadurch wird Schreibzugriff allein nicht aktiviert.",
+          "read_access_level": "Schieberegler: 1 Benutzer, 2 Installateur, 3 Fachhandwerker. Die gespeicherte Stufe ist vorausgewählt.",
+          "write_access_level": "Schieberegler: 0 kein Schreibzugriff, 1 Benutzer, 2 Installateur, 3 Fachhandwerker. Die gespeicherte Stufe ist vorausgewählt.",
           "poll_interval_fast": "Abstand zwischen häufigen Leseabfragen in Sekunden. Ein längerer Abstand verringert den Bluetooth-Datenverkehr.",
           "poll_interval_standard": "Abstand zwischen regulären Leseabfragen in Sekunden.",
           "poll_interval_slow": "Abstand zwischen seltenen Leseabfragen in Sekunden.",
@@ -165,12 +165,13 @@
           "entity_overrides": "Auswählen, welche erkannten Entitäten angelegt werden sollen.",
           "zone_overrides": "Zeigt zugehörigen Node und erkannte Herstellerfunktion; nur geräteseitig aktive Zonen können ausgewählt werden.",
           "backend": "Legt fest, wie Home Assistant eine Verbindung zur Heizungsanlage herstellt.",
-          "ble_device": "Bluetooth-Adresse des Heizungs-Gateways auswählen oder eingeben.",
+          "ble_device": "Das BLE-Gateway auswählen. Erkannte Geräte werden als Name — MAC-Adresse angezeigt; ohne verfügbaren Namen wird die MAC-Adresse verwendet.",
           "passkey": "PIN zum Koppeln des Gateways über Bluetooth.",
           "cooling_enabled": "Register aus der geprüften Funktionszuordnung Kühlung anzeigen. Ist die Option aus, werden genau diese Register vor Auswahl und Entitätserzeugung ausgeschlossen.",
           "_openrbus_entity_picker": "Dreistufige Auswahl öffnen: Gerät, Kategorie, Entitäten. Vorhandene Entitätskennungen und gespeicherte Auswahl bleiben erhalten.",
           "experimental_writes": "Zusätzliche Register ohne explizite IsReadOnly-Kennzeichnung als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt."
-        }
+        },
+        "description": "Kein passender Bluetooth-Adapter in Reichweite? [ESP-Proxy einrichten](https://github.com/der-seemann/openrbus/blob/v0.4.3/tools/phase1a/esphome/README.md)."
       },
       "access_warning": {
         "title": "Zugriffs- und Schreibrechte prüfen",

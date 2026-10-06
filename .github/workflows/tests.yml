@@ -25,7 +25,7 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install -r requirements-test.txt
       - name: Install matching Core package
-        run: python -m pip install "openrbus @ git+https://github.com/der-seemann/openrbus.git@d4bfcc02fe04bd410e669165822d882e562e249f"
+        run: python -m pip install "openrbus @ git+https://github.com/der-seemann/openrbus.git@1afb1d553d2b0522c64ffe5cde881beae40d5ed5"
       - name: Run tests
         run: python -m pytest -q
       - name: Check formatting and imports

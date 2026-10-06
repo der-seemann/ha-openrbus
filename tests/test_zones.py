@@ -54,6 +54,27 @@ def test_zone_array_subindex_and_display_name_are_stable_separate_concerns() -> 
     assert override_key(4, 0) == "4:0"
 
 
+def test_heating_circuit_registers_receive_their_visible_circuit_number() -> None:
+    register = _row(0x340D, 3, name="Name Aktivität HK")
+    parent = SimpleNamespace(zone_profiles={}, zone_overrides={}, language="de")
+    identity = SimpleNamespace(node=7)
+
+    assert zone_subindex(register) == 3
+    assert entity_zone_label(parent, identity, register) == "Heizkreis 3"
+
+
+def test_custom_heating_circuit_name_is_shown_with_its_number() -> None:
+    register = _row(0x340D, 3, name="Name Aktivität HK")
+    profile = ZoneProfile(7, 3, 2, friendly_name="Wohnzimmer")
+    parent = SimpleNamespace(
+        zone_profiles={(7, 3): profile}, zone_overrides={}, language="de"
+    )
+
+    assert entity_zone_label(parent, SimpleNamespace(node=7), register) == (
+        "Heizkreis 3 — Wohnzimmer"
+    )
+
+
 def test_device_disabled_slots_cannot_be_reenabled_by_stale_override() -> None:
     parent = SimpleNamespace(
         zone_profiles={(4, 0): ZoneProfile(4, 0, 0)}, zone_overrides={}
@@ -90,7 +111,7 @@ def test_custom_zone_label_is_applied_without_affecting_identity() -> None:
         language="de",
     )
     assert entity_zone_label(parent, SimpleNamespace(node=4), _row(0x5405, 1)) == (
-        "OpenRBus-Knoten 4 — Zone 1 — Heizkreis (Mischerheizkreis) — Obergeschoss"
+        "Heizkreis 1 — Obergeschoss"
     )
 
 

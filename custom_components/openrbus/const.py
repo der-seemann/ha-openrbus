@@ -23,6 +23,7 @@ CONF_TRANSPORT_MIGRATION = "_transport_migration"
 
 CONF_PAIR_ACTION = "pair_action"
 CONF_BLE_DEVICE = "ble_device"
+CONF_BLE_NAME = "ble_device_name"
 CONF_BLE_SOURCE = "ble_source"
 CONF_THIN_TARGET_ADDRESS_TYPE = "thin_rpc_target_address_type"
 CONF_PASSKEY = "passkey"

@@ -35,7 +35,11 @@ from .const import (
     DEFAULT_COOLING_ENABLED,
     DOMAIN,
 )
-from .coordinator import OpenRBusCoordinator, OpenRBusPollingCoordinator
+from .coordinator import (
+    OpenRBusCoordinator,
+    OpenRBusPollingCoordinator,
+    schedule_first_refresh_in_background,
+)
 from .identity import stable_gateway_id, stable_node_id, stable_object_id
 from .optional_register_filters import OPTIONAL_REGISTER_FILTERS
 from .zones import (
@@ -763,6 +767,15 @@ def async_apply_entity_overrides(
             )
         ):
             continue
+        row = rows_by_uid.get(uid)
+        if row is not None:
+            identity, register = row
+            slot = zone_subindex(register)
+            # A missing CP020 read is unknown, not proof that a previously
+            # enabled zone is inactive. Keep its registry choice until a
+            # positive active/inactive profile arrives.
+            if slot is not None and profile_for(parent, identity.node, slot) is None:
+                continue
         disabled_by = str(getattr(entity, "disabled_by", "") or "").casefold()
         if uid not in safe:
             should_enable = False
@@ -937,7 +950,11 @@ def ensure_polling_coordinators(
             safe_default = register.datatype not in {"STRUCT", "OCTETSTRING"} and any(
                 str(level).casefold() in {"level 0", "user"} for level in levels
             )
-            if register.address not in recommended and not safe_default:
+            if (
+                register.address not in recommended
+                and not safe_default
+                and not entity_enabled_by_default(parent, identity, register)
+            ):
                 selection_counts["not_recommended"] += 1
                 continue
         addresses[group].add((identity.node, register.address))
@@ -975,7 +992,12 @@ def ensure_polling_coordinators(
             )
             cache[group] = existing
             parent.config_entry.async_on_unload(existing.async_shutdown)
-            hass.async_create_task(existing.async_config_entry_first_refresh())
+            schedule_first_refresh_in_background(
+                hass,
+                parent.config_entry,
+                existing,
+                name=f"OpenRBus {group} initial refresh",
+            )
         else:
             existing.add_registers(group_addresses, metadata[group])
     return cache
@@ -1467,11 +1489,41 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
         self._register = register
         self._language = language
         self._effective_access_level = effective_access_level
-        self._attr_name = register_name(register, language)
-        if zone_label := entity_zone_label(parent, identity, register):
-            self._attr_name = f"{zone_label} {self._attr_name}"
+        self._attr_name = self.name_with_zone(
+            register_name(register, language), parent, identity, register
+        )
         self._attr_unique_id = entity_unique_id(parent, identity, register)
         self._attr_native_unit_of_measurement = register.unit
+
+    async def async_added_to_hass(self) -> None:
+        """Track entities whose zone label may be learned after startup."""
+
+        await super().async_added_to_hass()
+        self._parent._zone_entities.add(self)
+
+    async def async_will_remove_from_hass(self) -> None:
+        """Release the coordinator's reference during platform unload."""
+
+        self._parent._zone_entities.discard(self)
+        await super().async_will_remove_from_hass()
+
+    def async_refresh_zone_name(self) -> None:
+        """Apply zone labels discovered by the bounded deferred read pass."""
+
+        self._attr_name = self.name_with_zone(
+            register_name(self._register, self._language),
+            self._parent,
+            self._identity,
+            self._register,
+        )
+        self.async_write_ha_state()
+
+    @staticmethod
+    def name_with_zone(name: str, parent: Any, identity: Any, register: Any) -> str:
+        """Make zone-scoped register names distinguishable in HA's entity list."""
+
+        zone_label = entity_zone_label(parent, identity, register)
+        return f"{zone_label} — {name}" if zone_label else name
 
     @property
     def _result(self) -> GenericRead | Exception | None:

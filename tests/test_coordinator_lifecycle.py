@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
 from homeassistant.exceptions import HomeAssistantError
 from openrbus.protocol.canip import ObjectAddress
 
+import custom_components.openrbus.coordinator as coordinator_module
 from custom_components.openrbus import _async_validate_transport_migration
 from custom_components.openrbus.bridge import GenericRead
 from custom_components.openrbus.const import (
@@ -23,12 +25,19 @@ from custom_components.openrbus.const import (
     CONF_READ_ACCESS_LEVEL,
     CONF_WRITE_ACCESS_LEVEL,
     CONF_WRITE_ENABLED,
+    DEFAULT_INVALID_VALUE_DISABLE_AFTER,
 )
 from custom_components.openrbus.coordinator import (
     OpenRBusCoordinator,
+    OpenRBusPollingCoordinator,
+    _invalid_value_retirement_period,
     _should_poll_registry_entries,
+    _zone_selection_changed,
+    schedule_background_task,
+    schedule_first_refresh_in_background,
 )
 from custom_components.openrbus.transport import ThinRpcCapability, select_backend_mode
+from custom_components.openrbus.zones import ZoneProfile
 
 
 def _entry(backend: str) -> SimpleNamespace:
@@ -90,6 +99,145 @@ def test_enabled_typed_projection_is_not_shadowed_by_disabled_legacy_sensor() ->
     assert _should_poll_registry_entries(())
     assert not _should_poll_registry_entries((disabled,))
     assert _should_poll_registry_entries((disabled, enabled))
+
+
+def test_invalid_value_retirement_option_is_interpreted_as_minutes() -> None:
+    assert _invalid_value_retirement_period(120) == timedelta(hours=2)
+    assert _invalid_value_retirement_period(1) == timedelta(minutes=1)
+    assert _invalid_value_retirement_period(0) == timedelta(minutes=1)
+    assert _invalid_value_retirement_period("invalid") == timedelta(
+        minutes=DEFAULT_INVALID_VALUE_DISABLE_AFTER
+    )
+
+
+def test_deferred_zone_discovery_only_reloads_when_slot_eligibility_changes() -> None:
+    active = ZoneProfile(4, 1, 2)
+    inactive = ZoneProfile(4, 1, 0)
+    same_selection_new_label = ZoneProfile(4, 1, 2, friendly_name="Wohnzimmer")
+
+    assert _zone_selection_changed({}, {(4, 1): active})
+    assert _zone_selection_changed({(4, 1): active}, {(4, 1): inactive})
+    assert not _zone_selection_changed({}, {(4, 1): inactive})
+    assert not _zone_selection_changed(
+        {(4, 1): active}, {(4, 1): same_selection_new_label}
+    )
+
+
+@pytest.mark.asyncio
+async def test_deferred_zone_discovery_reloads_once_for_new_active_slot(
+    monkeypatch,
+) -> None:
+    reloads: list[str] = []
+    refreshes: list[str] = []
+
+    class _ZoneEntity:
+        def async_refresh_zone_name(self) -> None:
+            refreshes.append("refreshed")
+
+    async def _no_wait(_seconds: float) -> None:
+        return None
+
+    async def _discover(self) -> bool:
+        self.zone_profiles = {(4, 1): ZoneProfile(4, 1, 2)}
+        return False
+
+    monkeypatch.setattr(
+        "custom_components.openrbus.coordinator.asyncio.sleep", _no_wait
+    )
+    coordinator = SimpleNamespace(
+        _shutting_down=False,
+        _entry_id="entry",
+        zone_profiles={},
+        _zone_entities={_ZoneEntity()},
+        _async_discover_zone_profiles=lambda: _discover(coordinator),
+        hass=SimpleNamespace(
+            config_entries=SimpleNamespace(async_schedule_reload=reloads.append)
+        ),
+    )
+
+    await OpenRBusCoordinator._async_retry_zone_discovery(coordinator)
+
+    assert refreshes == ["refreshed"]
+    assert reloads == ["entry"]
+
+
+@pytest.mark.asyncio
+async def test_zone_discovery_continues_after_an_earlier_node_read_failure(
+    monkeypatch,
+) -> None:
+    key = ("zone-discovery-fairness-test", "AA:BB")
+    coordinator_module._ZONE_PROFILE_CACHE.pop(key, None)
+    coordinator_module._ZONE_DISCOVERY_CURSOR.pop(key, None)
+    calls: list[tuple[int, int]] = []
+    nodes = tuple(
+        SimpleNamespace(
+            identity=SimpleNamespace(node=node, model=f"Node {node}"),
+        )
+        for node in (1, 4)
+    )
+
+    async def _read(address, *, node, **_kwargs):
+        calls.append((node, address.index))
+        if node == 1:
+            raise HomeAssistantError("CP020 unavailable")
+        if address.index == coordinator_module.ZONE_FUNCTION_INDEX:
+            return SimpleNamespace(value=2)
+        return SimpleNamespace(value="")
+
+    monkeypatch.setattr(coordinator_module, "catalog_for_node", lambda *_a, **_k: ())
+    monkeypatch.setattr(coordinator_module, "zone_function_slots", lambda _rows: (1,))
+    parent = SimpleNamespace(
+        inventories=nodes,
+        devices=nodes,
+        zone_profiles={},
+        _zone_profile_cache_key=key,
+        write_enabled=False,
+        experimental_writes=False,
+        async_read_object=_read,
+    )
+
+    complete = await OpenRBusCoordinator._async_discover_zone_profiles(parent)
+
+    assert not complete
+    assert calls == [
+        (1, coordinator_module.ZONE_FUNCTION_INDEX),
+        (4, coordinator_module.ZONE_FUNCTION_INDEX),
+        (4, coordinator_module.ZONE_FRIENDLY_NAME_INDEX),
+    ]
+    assert parent.zone_profiles[(4, 1)].active
+    assert parent.zone_profiles[(4, 1)].node_name == "Node 4"
+    coordinator_module._ZONE_PROFILE_CACHE.pop(key, None)
+    coordinator_module._ZONE_DISCOVERY_CURSOR.pop(key, None)
+
+
+@pytest.mark.asyncio
+async def test_initial_refresh_is_owned_background_task() -> None:
+    calls: list[tuple[object, str]] = []
+
+    class _Entry:
+        def async_create_background_task(self, hass, coroutine, *, name):
+            calls.append((hass, name))
+            return asyncio.create_task(coroutine)
+
+    class _Coordinator:
+        async def async_config_entry_first_refresh(self):
+            return "refreshed"
+
+    hass = object()
+    entry = _Entry()
+    task = schedule_first_refresh_in_background(
+        hass, entry, _Coordinator(), name="test initial refresh"
+    )
+    background_task = schedule_background_task(
+        hass,
+        entry,
+        asyncio.sleep(0, result="completed"),
+        name="test deferred work",
+    )
+
+    assert calls == [(hass, "test initial refresh"), (hass, "test deferred work")]
+    assert await task == "refreshed"
+    assert await background_task == "completed"
 
 
 class _Backend:
@@ -155,6 +303,102 @@ async def test_coordinator_dispatches_native_and_thin_without_fallback(
     await native_coordinator.async_shutdown()
     await thin_coordinator.async_shutdown()
     assert native.stopped and thin.stopped
+
+
+@pytest.mark.asyncio
+async def test_coordinator_stops_pollers_before_releasing_backend(monkeypatch) -> None:
+    events: list[str] = []
+
+    class _OrderedBackend(_Backend):
+        async def async_stop(self) -> None:
+            events.append("backend_stop")
+            await super().async_stop()
+
+    class _Poller:
+        async def async_shutdown(self) -> None:
+            events.append("poller_shutdown")
+
+    backend = _OrderedBackend()
+    monkeypatch.setattr(
+        "custom_components.openrbus.coordinator.NativeBluetoothBackend",
+        lambda *a, **k: backend,
+    )
+    coordinator = OpenRBusCoordinator(_hass(), _entry(BACKEND_NATIVE))
+    coordinator._openrbus_polling_coordinators = {"fast": _Poller()}
+
+    async def finish_parent_shutdown(_coordinator) -> None:
+        events.append("parent_shutdown")
+
+    monkeypatch.setattr(
+        "custom_components.openrbus.coordinator.DataUpdateCoordinator.async_shutdown",
+        finish_parent_shutdown,
+    )
+
+    await coordinator.async_shutdown()
+
+    assert events == ["poller_shutdown", "backend_stop", "parent_shutdown"]
+    assert coordinator._shutting_down is True
+
+
+@pytest.mark.asyncio
+async def test_polling_coordinator_does_not_start_reads_after_parent_shutdown() -> None:
+    poller = OpenRBusPollingCoordinator.__new__(OpenRBusPollingCoordinator)
+    poller.parent = SimpleNamespace(_shutting_down=True)
+
+    assert await poller._async_poll_data() == {}
+
+
+@pytest.mark.asyncio
+async def test_inflight_poll_stops_before_starting_next_batch(monkeypatch) -> None:
+    parent = SimpleNamespace(
+        _shutting_down=False,
+        backend_mode=BACKEND_NATIVE,
+        effective_access_levels={},
+        config_entry=SimpleNamespace(options={}),
+    )
+    calls: list[tuple[ObjectAddress, ...]] = []
+
+    async def read_objects(addresses, *, node, trace_failure=False):
+        del trace_failure
+        calls.append(tuple(addresses))
+        # Model unload arriving while one physical transaction is in flight.
+        parent._shutting_down = True
+        return tuple(GenericRead(node, address, b"\x01", 1) for address in addresses)
+
+    parent.async_read_objects = read_objects
+    poller = OpenRBusPollingCoordinator.__new__(OpenRBusPollingCoordinator)
+    poller.parent = parent
+    poller.hass = _hass()
+    poller.registers = tuple(
+        (1, ObjectAddress(0x2001, subindex)) for subindex in range(1, 34)
+    )
+    poller.group = "standard"
+    poller.register_metadata = {}
+    poller._diagnostic_poll_count = 0
+    poller._diagnostic_success_items = 0
+    poller._diagnostic_failed_items = 0
+    poller._diagnostic_available_items = 0
+    poller._diagnostic_total_items = 0
+    poller._diagnostic_availability_delta = 0
+    poller._diagnostic_error_counts = {}
+    poller._diagnostic_subtype_counts = {}
+    poller._diagnostic_item_failures = []
+    poller._diagnostic_registry_disabled_count = 0
+    poller.validity = SimpleNamespace(
+        is_expired=lambda _key: False,
+        is_quarantined=lambda _key, _scope: False,
+        observe=lambda *_args: SimpleNamespace(expired=False),
+        is_valid=lambda *_args: True,
+        quarantine_deterministic_failure=lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        "custom_components.openrbus.coordinator.stable_object_id",
+        lambda *_args: "test-row",
+    )
+
+    await poller._async_poll_data()
+
+    assert len(calls) == 1
 
 
 @pytest.mark.asyncio

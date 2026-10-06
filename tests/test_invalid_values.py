@@ -31,7 +31,9 @@ def _read(value):
 
 
 def test_exact_temperature_sentinel_is_metadata_scoped() -> None:
-    assert invalid_value_reason(_read(-327.68), _register()) == "temperature_not_available"
+    assert (
+        invalid_value_reason(_read(-327.68), _register()) == "temperature_not_available"
+    )
     # Same display value is not a rule for a different register type/gain.
     assert invalid_value_reason(_read(-327.68), _register(storage="INT32")) is None
     assert invalid_value_reason(_read(-327.68), _register(scale="0.1")) is None
@@ -39,11 +41,17 @@ def test_exact_temperature_sentinel_is_metadata_scoped() -> None:
 
 def test_pump_modulation_sentinel_does_not_hide_generic_percentages() -> None:
     pump = _register(
-        unit="%", storage="UINT16", datatype="UINT16", scale="0.1",
+        unit="%",
+        storage="UINT16",
+        datatype="UINT16",
+        scale="0.1",
         name_de="Modulation Pumpe AE",
     )
     generic = _register(
-        unit="%", storage="UINT16", datatype="UINT16", scale="0.1",
+        unit="%",
+        storage="UINT16",
+        datatype="UINT16",
+        scale="0.1",
         name_de="Energiezähler Prozent",
     )
     assert invalid_value_reason(_read(6553.5), pump) == "pump_modulation_not_available"
@@ -63,10 +71,14 @@ def test_invalid_lifecycle_unavailable_recovery_and_expiry() -> None:
         key, _read(-327.68), register, now=start + timedelta(hours=47, minutes=59)
     )
     assert not before_expiry.expired
-    expired = tracker.observe(key, _read(-327.68), register, now=start + timedelta(hours=48))
+    expired = tracker.observe(
+        key, _read(-327.68), register, now=start + timedelta(hours=48)
+    )
     assert expired.expired and tracker.is_expired(key)
 
-    recovered = tracker.observe(key, _read(21.5), register, now=start + timedelta(hours=49))
+    recovered = tracker.observe(
+        key, _read(21.5), register, now=start + timedelta(hours=49)
+    )
     assert recovered.valid and recovered.recovered and not tracker.is_expired(key)
     assert tracker.is_valid(key, _read(21.5))
 
@@ -77,9 +89,13 @@ def test_transport_error_neither_starts_nor_clears_sentinel_interval() -> None:
     register = _register()
     start = datetime(2026, 9, 27, tzinfo=timezone.utc)
     tracker.observe(key, _read(-327.68), register, now=start)
-    transient = tracker.observe(key, RuntimeError("link lost"), register, now=start + timedelta(minutes=30))
+    transient = tracker.observe(
+        key, RuntimeError("link lost"), register, now=start + timedelta(minutes=30)
+    )
     assert not transient.valid and transient.invalid_since == start
-    expired = tracker.observe(key, _read(-327.68), register, now=start + timedelta(hours=1))
+    expired = tracker.observe(
+        key, _read(-327.68), register, now=start + timedelta(hours=1)
+    )
     assert expired.expired
 
 
@@ -92,15 +108,13 @@ def test_abort_and_generic_item_errors_expire_only_after_continuous_interval() -
     abort._openrbus_error_class = "abort"
     first = tracker.observe(key, abort, _register(), now=start)
     assert not first.valid and first.reason == "abort" and not first.expired
-    before = tracker.observe(
-        key, abort, _register(), now=start + timedelta(minutes=59)
-    )
+    before = tracker.observe(key, abort, _register(), now=start + timedelta(minutes=59))
     assert before.reason == "abort" and not before.expired
-    expired = tracker.observe(
-        key, abort, _register(), now=start + timedelta(hours=1)
-    )
+    expired = tracker.observe(key, abort, _register(), now=start + timedelta(hours=1))
     assert expired.expired and tracker.is_expired(key)
-    recovered = tracker.observe(key, _read(21.5), _register(), now=start + timedelta(hours=1, minutes=1))
+    recovered = tracker.observe(
+        key, _read(21.5), _register(), now=start + timedelta(hours=1, minutes=1)
+    )
     assert recovered.valid and not tracker.is_expired(key)
 
     generic = RuntimeError("private item error")

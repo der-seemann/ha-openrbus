@@ -61,11 +61,15 @@ async def async_setup_entry(
 class OpenRBusBitfieldSensor(OpenRBusRegisterEntity, BinarySensorEntity):
     """One registry-labelled flag decoded from its parent's packed value."""
 
-    def __init__(self, parent, coordinator, identity, register, structure, field, **kwargs):
+    def __init__(
+        self, parent, coordinator, identity, register, structure, field, **kwargs
+    ):
         super().__init__(parent, coordinator, identity, register, **kwargs)
         self._structure = structure
         self._field = field
-        self._attr_name = field.label(self._language)
+        self._attr_name = self.name_with_zone(
+            field.label(self._language), parent, identity, register
+        )
         self._attr_unique_id = f"{self._attr_unique_id}:bit:{field.name}"
         self._attr_entity_registry_enabled_default = entity_enabled_by_default(
             parent, identity, register, unique_id=self._attr_unique_id
@@ -77,6 +81,8 @@ class OpenRBusBitfieldSensor(OpenRBusRegisterEntity, BinarySensorEntity):
         if result is None or isinstance(result, Exception):
             return None
         try:
-            return decode_bitfields(self._structure, result.raw_value).get(self._field.name)
+            return decode_bitfields(self._structure, result.raw_value).get(
+                self._field.name
+            )
         except (TypeError, ValueError):
             return None

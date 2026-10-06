@@ -172,9 +172,24 @@ def zone_subindex(register: Any) -> int | None:
             str(getattr(register, field, "") or "")
             for field in ("internal_code", "name_en", "name_de")
         ).casefold()
-        if "zone" in semantic or str(
-            getattr(register, "internal_code", "")
-        ).upper().startswith(("CP", "CM", "CC")):
+        if (
+            "zone" in semantic
+            or str(getattr(register, "internal_code", ""))
+            .upper()
+            .startswith(("CP", "CM", "CC"))
+            or any(
+                marker in semantic
+                for marker in (
+                    "heizkreis",
+                    "heating circuit",
+                    "hk,",
+                    "hk ",
+                    " hk",
+                    "hk/",
+                    "hk-",
+                )
+            )
+        ):
             return subindex
     return None
 
@@ -249,18 +264,44 @@ def zone_enabled(parent: Any, node: int, subindex: int) -> bool:
 
 
 def entity_zone_label(parent: Any, identity: Any, register: Any) -> str | None:
-    """Return an active zone's label for entity display, never for its ID."""
+    """Return an explicit zone or heating-circuit label for entity display."""
 
     subindex = zone_subindex(register)
     if subindex is None:
         return None
     profile = profile_for(parent, getattr(identity, "node", -1), subindex)
     language = getattr(parent, "language", "de")
-    return (
-        zone_display_name(profile, language)
-        if profile and zone_enabled(parent, profile.node, subindex)
-        else None
+    if profile and zone_enabled(parent, profile.node, subindex):
+        if profile.kind is ZoneKind.HEATING:
+            circuit = "Heizkreis" if language == "de" else "Heating circuit"
+            friendly = (profile.friendly_name or "").strip()
+            return (
+                f"{circuit} {max(1, subindex)} — {friendly}"
+                if friendly
+                else f"{circuit} {max(1, subindex)}"
+            )
+        return zone_display_name(profile, language)
+
+    semantic = " ".join(
+        str(getattr(register, field, "") or "")
+        for field in ("internal_code", "name_en", "name_de")
+    ).casefold()
+    is_heating_circuit = any(
+        marker in semantic
+        for marker in (
+            "heizkreis",
+            "heating circuit",
+            "hk,",
+            "hk ",
+            " hk",
+            "hk/",
+            "hk-",
+        )
     )
+    if is_heating_circuit:
+        circuit = "Heizkreis" if language == "de" else "Heating circuit"
+        return f"{circuit} {max(1, subindex)}"
+    return None
 
 
 def zone_device_name(profile: ZoneProfile, language: str = "de") -> str:

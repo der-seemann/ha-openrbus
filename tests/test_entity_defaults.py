@@ -111,6 +111,74 @@ def test_manual_entity_override_changes_default_but_keeps_zone_safety(
     assert not register_entities.entity_enabled_by_default(parent, identity, row)
 
 
+@pytest.mark.parametrize("override_scope", ("entity", "group"))
+def test_manual_override_adds_nonrecommended_sensor_to_poll_set(
+    monkeypatch, override_scope: str
+) -> None:
+    """An active picker choice must drive both entity creation and polling."""
+    row = _register("5501:01", levels=("Installer",))
+    identity = SimpleNamespace(node=3)
+    config_entry = SimpleNamespace(
+        entry_id="entry",
+        data={},
+        options=(
+            {CONF_GROUP_OVERRIDES: {"device:3:category:unclassified": True}}
+            if override_scope == "group"
+            else {}
+        ),
+        async_on_unload=lambda _callback: None,
+    )
+    parent = SimpleNamespace(
+        config_entry=config_entry,
+        inventories=(SimpleNamespace(identity=identity, capabilities={}),),
+        devices=(),
+        language="en",
+        effective_access_levels={3: 3},
+        configured_access_level=3,
+        entity_overrides={"uid": True} if override_scope == "entity" else {},
+        zone_profiles={},
+        zone_overrides={},
+        poll_intervals={"fast": 1, "standard": 10, "slow": 60},
+    )
+
+    class FakePollingCoordinator:
+        def __init__(self, _hass, _parent, _group, addresses, _interval, **_kwargs):
+            self.addresses = addresses
+
+        async def async_shutdown(self):
+            pass
+
+    monkeypatch.setattr(register_entities, "entity_unique_id", lambda *_args: "uid")
+    monkeypatch.setattr(
+        register_entities, "recommended_addresses", lambda _identity: frozenset()
+    )
+    monkeypatch.setattr(
+        register_entities,
+        "rows_for_parent",
+        lambda *_args, **_kwargs: ((identity, row, "standard", True),),
+    )
+    monkeypatch.setattr(
+        register_entities, "_poll_selection_filter_counts", lambda *_args: {}
+    )
+    monkeypatch.setattr(register_entities, "_poll_activation_counts", lambda *_args: {})
+    monkeypatch.setattr(register_entities, "bitfield_structure", lambda _row: None)
+    monkeypatch.setattr(register_entities, "control_kind", lambda *_args: None)
+    monkeypatch.setattr(register_entities, "catalog_visible", lambda *_args: True)
+    monkeypatch.setattr(
+        register_entities, "OpenRBusPollingCoordinator", FakePollingCoordinator
+    )
+    monkeypatch.setattr(
+        register_entities,
+        "schedule_first_refresh_in_background",
+        lambda *_args, **_kwargs: None,
+    )
+    hass = SimpleNamespace(data={})
+
+    polling = register_entities.ensure_polling_coordinators(hass, parent)
+
+    assert polling["standard"].addresses == ((3, row.address),)
+
+
 def test_inferred_source_rw_rows_default_off_until_capability_is_discovered(
     monkeypatch,
 ) -> None:
@@ -780,3 +848,79 @@ def test_generic_override_only_changes_integration_owned_safe_rows(monkeypatch) 
     parent.entity_overrides["safe"] = False
     register_entities.async_apply_entity_overrides(object(), parent)
     assert enabled.disabled_by == "integration"
+
+
+def test_unknown_zone_profile_preserves_registry_and_user_choices(monkeypatch) -> None:
+    enabled = SimpleNamespace(
+        platform=DOMAIN,
+        config_entry_id="entry",
+        unique_id="zone-row",
+        entity_id="sensor.zone",
+        disabled_by=None,
+    )
+    integration_disabled = SimpleNamespace(
+        platform=DOMAIN,
+        config_entry_id="entry",
+        unique_id="zone-row",
+        entity_id="sensor.zone_disabled",
+        disabled_by="integration",
+    )
+    user_disabled = SimpleNamespace(
+        platform=DOMAIN,
+        config_entry_id="entry",
+        unique_id="zone-row",
+        entity_id="sensor.zone_user_disabled",
+        disabled_by="user",
+    )
+
+    class Registry:
+        def __init__(self) -> None:
+            self.entities = {
+                item.entity_id: item
+                for item in (enabled, integration_disabled, user_disabled)
+            }
+
+        def async_update_entity(self, entity_id, **changes):
+            self.entities[entity_id].disabled_by = changes["disabled_by"]
+
+    registry = Registry()
+    parent = SimpleNamespace(
+        config_entry=SimpleNamespace(
+            entry_id="entry",
+            data={},
+            options={
+                "group_overrides": {
+                    "device:4:category:unclassified": True,
+                    "device:4:category:zone": True,
+                }
+            },
+        ),
+        entity_overrides={},
+        effective_access_levels={},
+        language="en",
+        configured_access_level=1,
+        write_enabled=False,
+    )
+    row = SimpleNamespace(
+        readable=True,
+        writable=False,
+        write_declared=False,
+        internal_code="zone row",
+        address=ObjectAddress.parse("2001:02"),
+    )
+    monkeypatch.setattr(register_entities.er, "async_get", lambda _hass: registry)
+    monkeypatch.setattr(
+        register_entities,
+        "rows_for_parent",
+        lambda *_a, **_k: ((SimpleNamespace(node=4), row, "standard", True),),
+    )
+    monkeypatch.setattr(register_entities, "entity_unique_id", lambda *_a: "zone-row")
+    monkeypatch.setattr(register_entities, "zone_subindex", lambda _register: 1)
+    monkeypatch.setattr(register_entities, "zone_row_enabled", lambda *_a: False)
+    monkeypatch.setattr(register_entities, "profile_for", lambda *_a: None)
+
+    register_entities.async_apply_entity_overrides(object(), parent)
+
+    assert enabled.disabled_by is None
+    assert integration_disabled.disabled_by == "integration"
+    assert user_disabled.disabled_by == "user"

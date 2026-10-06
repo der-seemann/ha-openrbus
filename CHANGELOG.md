@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.4.4 — release candidate
+
+### Added
+
+- Include the discovered heating-circuit number in visible entity names and
+  use available zone labels to distinguish circuits.
+- Show the BLE advertisement name and MAC address together throughout setup
+  and options, and retain a device name only for its matching MAC.
+- Add an ESPHome Bluetooth-proxy setup link and instructions at transport
+  selection, including a reusable OpenRBus proxy YAML service.
+- Display saved read and write access levels as labeled numeric sliders in the
+  setup and options flows.
+
+### Fixed
+
+- Keep initial polling and deferred zone discovery in config-entry-owned
+  background tasks so they do not hold up integration startup.
+- Make reload wait for in-flight poll/session cleanup and recover from a
+  transient bounded Thin-RPC read failure without reusing an old session.
+- Include persisted entity/group enables in poll selection, so explicitly
+  enabled non-recommended sensors receive state updates.
+- Interpret the invalid-value retirement option in its documented minutes,
+  preventing entities from being disabled after only that many seconds.
+- Recover heating-circuit discovery that completes after startup so eligible
+  zone entities re-enter polling, later devices are reached when one node is
+  unavailable, and unknown profiles do not disable entities.
+
+### Compatibility and limits
+
+- The HA manifest pins the exact OpenRBus Core 0.4.4 dependency.
+- Unsupported per-device objects remain unavailable. On the isolated Test-HA,
+  six Node-1 reads returned `unsupported_access`; the MK3 `2001:01` supplier
+  code remains unavailable because the Core catalog has a visible-string vs.
+  octet-string type conflict and the runtime bytes are not valid ASCII.
+
 ## 0.4.3 — release
 
 ### Added
