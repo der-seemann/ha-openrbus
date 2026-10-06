@@ -9,6 +9,7 @@ polling coordinators so forwarding ``sensor``, ``number``, ``select`` and
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from decimal import Decimal
 from typing import Any
@@ -40,9 +41,11 @@ from .coordinator import (
     OpenRBusPollingCoordinator,
     schedule_first_refresh_in_background,
 )
+from .entity_names import register_display_name, suggested_object_id
 from .identity import stable_gateway_id, stable_node_id, stable_object_id
 from .optional_register_filters import OPTIONAL_REGISTER_FILTERS
 from .zones import (
+    ZoneKind,
     entity_zone_label,
     profile_for,
     zone_device_name,
@@ -55,6 +58,10 @@ CATALOG_REGISTRY = Registry.load_default()
 
 def register_name(register: RegisterCatalogEntry, language: str) -> str:
     """Return a Core locale label while supporting the previous catalog API."""
+
+    reviewed = register_display_name(register, language)
+    if reviewed:
+        return reviewed
 
     localized = getattr(register, "name", None)
     if callable(localized):
@@ -1473,6 +1480,17 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
 
     _attr_has_entity_name = True
 
+    @property
+    def suggested_object_id(self) -> str | None:
+        """Suggest a source-grounded entity ID without changing registry IDs."""
+
+        return suggested_object_id(
+            self._parent,
+            self._identity,
+            self._register,
+            english_name=getattr(self, "_openrbus_english_name", None),
+        )
+
     def __init__(
         self,
         parent: OpenRBusCoordinator,
@@ -1523,6 +1541,31 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
         """Make zone-scoped register names distinguishable in HA's entity list."""
 
         zone_label = entity_zone_label(parent, identity, register)
+        slot = zone_subindex(register)
+        profile = profile_for(parent, identity.node, slot) if slot is not None else None
+        if profile is not None and zone_enabled(parent, identity.node, slot):
+            # The active zone is the entity's HA device, so HA already adds
+            # its localized circuit label to the visible full entity name.
+            # Remove only matching leading labels; never rewrite interior
+            # manufacturer words such as "Heizkreisfunktion".
+            prefixes = [
+                f"Heizkreis {slot}",
+                f"Heating circuit {slot}",
+                (profile.friendly_name or "").strip(),
+            ]
+            for prefix in prefixes:
+                if prefix and name.startswith(f"{prefix} — "):
+                    name = name[len(prefix) + 3 :]
+            if profile.kind is ZoneKind.HEATING:
+                if parent.language == "de":
+                    name = re.sub(r"^Heizkreis(?:[-\s,:]+)", "", name, count=1)
+                else:
+                    name = re.sub(r"^Heating circuit(?:[-\s,:]+)", "", name, count=1)
+            return name
+        if zone_label and zone_label.startswith("Heizkreis "):
+            name = re.sub(r"^Heizkreis(?:[-\s,:]+)", "", name, count=1)
+        elif zone_label and zone_label.startswith("Heating circuit "):
+            name = re.sub(r"^Heating circuit(?:[-\s,:]+)", "", name, count=1)
         return f"{zone_label} — {name}" if zone_label else name
 
     @property

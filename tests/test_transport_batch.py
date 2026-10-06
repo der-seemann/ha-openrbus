@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from homeassistant.exceptions import HomeAssistantError
 from openrbus.access import RawReadResult
-from openrbus.errors import CanOpenAbortError, ProtocolError
+from openrbus.errors import CanOpenAbortError, ProtocolError, TransportError
 from openrbus.registry import Registry
 
 from custom_components.openrbus.transport import _read_objects_batched
@@ -59,6 +59,36 @@ async def test_poll_group_falls_back_to_single_reads_when_batch_is_unsupported()
     assert calls == ["batch", "single"]
     assert events == ["fallback"]
     assert result[0].value == 0
+
+
+@pytest.mark.asyncio
+async def test_poll_group_does_not_single_fallback_after_thin_session_loss() -> None:
+    definitions = Registry.load_default().registers[:2]
+    addresses = tuple(row.address for row in definitions)
+    calls: list[str] = []
+
+    class _Client:
+        async def read_many_raw(self, items):
+            del items
+            calls.append("batch")
+            raise TransportError("Thin-GATT disconnected during operation")
+
+        async def read_raw(self, node, address):
+            del node, address
+            calls.append("single")
+            raise AssertionError("a retired Thin-GATT session must not be reused")
+
+    events: list[str] = []
+    result = await _read_objects_batched(
+        _Client(), addresses, node=7, record_batch_event=events.append
+    )
+
+    assert calls == ["batch"]
+    assert events == []
+    assert len(result) == len(addresses)
+    assert all(isinstance(value, HomeAssistantError) for value in result)
+    assert all(value._openrbus_error_class == "session" for value in result)
+    assert all(value._openrbus_error_subtype == "link_lost" for value in result)
 
 
 @pytest.mark.asyncio

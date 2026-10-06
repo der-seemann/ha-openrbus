@@ -67,6 +67,7 @@ class OpenRBusBitfieldSensor(OpenRBusRegisterEntity, BinarySensorEntity):
         super().__init__(parent, coordinator, identity, register, **kwargs)
         self._structure = structure
         self._field = field
+        self._openrbus_english_name = field.name
         self._attr_name = self.name_with_zone(
             field.label(self._language), parent, identity, register
         )
