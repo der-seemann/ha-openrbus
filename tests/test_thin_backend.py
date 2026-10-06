@@ -11,10 +11,16 @@ import pytest
 from homeassistant.exceptions import HomeAssistantError
 from openrbus.authorization import AuthorizationCorrelationError
 from openrbus.discovery import DeviceIdentity
-from openrbus.errors import ProtocolError, RequestTimeoutError, TransportError
+from openrbus.errors import (
+    CanOpenAbortError,
+    ProtocolError,
+    RequestTimeoutError,
+    TransportError,
+)
 from openrbus.protocol.canip import ObjectAddress
 from openrbus.transport.thin_gatt import (
     CAPABILITY_MARKER,
+    ConnectionIdentity,
     ThinGattCorrelationError,
     ThinGattLink,
     ThinGattProfile,
@@ -52,6 +58,7 @@ from custom_components.openrbus.transport import (
     _PreparedThinGattMessageTransport,
     _read_effective_access_levels,
     _read_thin_access_level,
+    _safe_recovery_error_chain,
     _thin_attach_mode,
     _validate_scan_frame,
     async_scan_thin_rpc_devices,
@@ -411,6 +418,68 @@ async def test_transport_recovery_records_missing_session_guard() -> None:
 
     attempt = backend._recovery_fence_metrics.diagnostics()["disconnect_attempt"]
     assert attempt["outcome"] == "missing_session"
+
+
+def test_safe_recovery_error_chain_redacts_unrecognized_messages() -> None:
+    cause = RuntimeError("private-token 123456789abcdef")
+    error = HomeAssistantError(
+        "Thin-RPC physical disconnect did not complete before reload"
+    )
+    error.__cause__ = cause
+
+    assert _safe_recovery_error_chain(error) == (
+        "home_assistant_error:Thin-RPC physical disconnect did not complete before reload"
+        " <- runtime_error:redacted"
+    )
+
+
+@pytest.mark.asyncio
+async def test_transport_recovery_logs_safe_stage_and_fence_state(caplog) -> None:
+    caplog.set_level("DEBUG", logger="custom_components.openrbus.transport")
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    backend.channel = object()
+    backend.session = SimpleNamespace(
+        identity=SimpleNamespace(gattc_if=17, conn_id=23),
+        epoch=4,
+        retire=lambda: None,
+    )
+    backend._recovery_fence_metrics = RecoveryFenceMetrics()
+    backend._last_disconnect_snapshot = {
+        "link_active": True,
+        "parent_connected": True,
+        "epoch": 4,
+    }
+
+    async def force_disconnect() -> bool:
+        return True
+
+    async def wait_for_disconnect(*, recovery_fence=None) -> None:
+        recovery_fence.record_state(True, True)
+
+    async def prepare() -> None:
+        raise HomeAssistantError("Thin-RPC backend is not started")
+
+    backend._force_disconnect_current_session = force_disconnect
+    backend._wait_for_physical_disconnect = wait_for_disconnect
+    backend._drain_stale_frames = _async_noop
+    backend._ensure_session_ready = prepare
+
+    with pytest.raises(HomeAssistantError, match="backend is not started"):
+        await backend._recover_after_transport_loss()
+
+    record = next(
+        record.message
+        for record in caplog.records
+        if "THIN_RECOVERY event=failed" in record.message
+    )
+    assert "stage=session_prepare" in record
+    assert "guard=identity_fenced" in record
+    assert "expected_identity_present=True" in record
+    assert "expected_epoch_valid=True" in record
+    assert "observed_link=True" in record
+    assert "observed_parent=True" in record
+    assert "observed_epoch=4" in record
+    assert "Thin-RPC backend is not started" in record
 
 
 @pytest.mark.asyncio
@@ -860,6 +929,127 @@ async def test_thin_discovery_retries_once_after_transport_loss(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("retry_fails", (False, True))
+async def test_capability_timeout_recovers_before_probing_next_node(
+    monkeypatch, retry_fails
+) -> None:
+    """Recover one lost session, and stop probing if its retry also fails."""
+
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    backend._read_lock = asyncio.Lock()
+    backend.client = object()
+    backend.timeout = 10.0
+    backend.effective_access_levels = {}
+    backend.session = SimpleNamespace(epoch=1)
+    backend.async_start = _async_noop
+    reads: list[int] = []
+    identities = (
+        DeviceIdentity(1, None, None, None),
+        DeviceIdentity(3, None, None, None),
+    )
+    recoveries = 0
+
+    async def discover(_client, *, include_serial):
+        assert include_serial is False
+        return identities
+
+    async def read_capabilities(_client, node, *, timeout, batch_timeout):
+        assert timeout == 5.0
+        assert batch_timeout == 10.0
+        reads.append(node)
+        if node == 1 and reads.count(1) == 1:
+            raise RequestTimeoutError("Thin-GATT message response timed out")
+        if node == 1 and retry_fails:
+            raise RequestTimeoutError("Thin-GATT message response timed out")
+        return ()
+
+    async def recover() -> None:
+        nonlocal recoveries
+        recoveries += 1
+        backend.session.epoch += 1
+
+    async def read_access(_backend, _node):
+        return None
+
+    backend._recover_after_transport_loss = recover
+    monkeypatch.setattr(
+        "custom_components.openrbus.transport.discover_devices", discover
+    )
+    monkeypatch.setattr(
+        "custom_components.openrbus.transport._discover_capabilities_batched",
+        read_capabilities,
+    )
+    monkeypatch.setattr(
+        "custom_components.openrbus.transport._read_thin_access_level", read_access
+    )
+
+    result = await backend.async_discover_devices()
+
+    assert tuple(identity.node for identity in result) == (1, 3)
+    assert reads == ([1, 1] if retry_fails else [1, 1, 3])
+    assert recoveries == 1
+    assert backend.session.epoch == 2
+
+
+@pytest.mark.asyncio
+async def test_capability_abort_does_not_recover_or_block_next_node(
+    monkeypatch,
+) -> None:
+    """An object-local abort is not treated as a lost Thin session."""
+
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    backend._read_lock = asyncio.Lock()
+    backend.client = object()
+    backend.timeout = 10.0
+    backend.effective_access_levels = {}
+    backend.session = SimpleNamespace(epoch=1)
+    backend.async_start = _async_noop
+    reads: list[int] = []
+    identities = (
+        DeviceIdentity(1, None, None, None),
+        DeviceIdentity(3, None, None, None),
+    )
+    recoveries = 0
+
+    async def discover(_client, *, include_serial):
+        assert include_serial is False
+        return identities
+
+    async def read_capabilities(_client, node, *, timeout, batch_timeout):
+        assert timeout == 5.0
+        assert batch_timeout == 10.0
+        reads.append(node)
+        if node == 1:
+            raise CanOpenAbortError(0x06020000)
+        return ()
+
+    async def recover() -> None:
+        nonlocal recoveries
+        recoveries += 1
+
+    async def read_access(_backend, _node):
+        return None
+
+    backend._recover_after_transport_loss = recover
+    monkeypatch.setattr(
+        "custom_components.openrbus.transport.discover_devices", discover
+    )
+    monkeypatch.setattr(
+        "custom_components.openrbus.transport._discover_capabilities_batched",
+        read_capabilities,
+    )
+    monkeypatch.setattr(
+        "custom_components.openrbus.transport._read_thin_access_level", read_access
+    )
+
+    result = await backend.async_discover_devices()
+
+    assert tuple(identity.node for identity in result) == (1, 3)
+    assert reads == [1, 3]
+    assert recoveries == 0
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("directory_count", (88, 102))
 @pytest.mark.asyncio
 async def test_capability_discovery_batches_large_directories(directory_count) -> None:
@@ -873,7 +1063,7 @@ async def test_capability_discovery_batches_large_directories(directory_count) -
             return bytes((directory_count,))
 
         async def read_many_raw(self, items, *, timeout):
-            assert timeout == 3.0
+            assert timeout == 10.0
             assert len(items) == directory_count
             return tuple(
                 SimpleNamespace(
@@ -883,7 +1073,9 @@ async def test_capability_discovery_batches_large_directories(directory_count) -
                 for item in items
             )
 
-    capabilities = await _discover_capabilities_batched(_Client(), 4, timeout=5.0)
+    capabilities = await _discover_capabilities_batched(
+        _Client(), 4, timeout=5.0, batch_timeout=10.0
+    )
     assert len(capabilities) == directory_count
     assert capabilities[0].address == ObjectAddress(0x5634, 1)
     assert capabilities[-1].address == ObjectAddress(0x5634, directory_count)
@@ -2346,6 +2538,148 @@ async def test_native_response_shapes_are_unwrapped(response) -> None:
 
 
 @pytest.mark.asyncio
+async def test_batch_poll_drains_more_than_firmware_ring_in_order() -> None:
+    frames = [
+        {
+            "kind": "event",
+            "op": "NOTIFICATION",
+            "epoch": 7,
+            "seq": seq,
+            "request_id": 0,
+            "gattc_if": 1,
+            "conn_id": 0,
+            "payload": {"handle": 3, "value": ""},
+        }
+        for seq in range(1, 41)
+    ]
+    frames.append(
+        {
+            "kind": "response",
+            "op": "WRITE_CHAR",
+            "epoch": 7,
+            "seq": 0,
+            "request_id": 12,
+            "gattc_if": 1,
+            "conn_id": 0,
+            "status": "OK",
+        }
+    )
+    expected_frames = [dict(frame) for frame in frames]
+    for frame in expected_frames[:-1]:
+        frame["payload"] = dict(frame["payload"], value=b"")
+        frame["handle"] = 3
+
+    class _BatchClient(_Client):
+        hass = _hass("openrbus_gatt_rpc_poll", "openrbus_gatt_rpc_poll_batch")
+
+        def __init__(self):
+            super().__init__({"frames": [json.dumps(frame) for frame in frames]})
+            self.poll_calls = 0
+
+        async def execute_service(self, service, data, **kwargs):
+            self.calls.append((service, data, kwargs))
+            self.poll_calls += 1
+            start = (self.poll_calls - 1) * 8
+            return {
+                "frames": [json.dumps(frame) for frame in frames[start : start + 8]]
+            }
+
+    client = _BatchClient()
+    channel = HomeAssistantThinGattChannel(
+        client, ThinRpcCapability("request", "openrbus_gatt_rpc_poll", "diagnostics")
+    )
+    session = ThinGattSession(channel)
+    session.connected = True
+    session.epoch = 7
+    session.identity = ConnectionIdentity(1, 0)
+    session.last_seq = 0
+    session.register_request("WRITE_CHAR", request_id=12)
+
+    received = []
+    for _ in frames:
+        frame = await channel.poll(timeout=1)
+        assert frame is not None
+        session.ingest(frame)
+        received.append(frame)
+
+    assert received == expected_frames
+    assert session.last_seq == 40
+    assert not session._pending_operations
+    assert client.poll_calls == 6
+    assert {call[0] for call in client.calls} == {"openrbus_gatt_rpc_poll_batch"}
+
+
+@pytest.mark.asyncio
+async def test_batch_poll_malformed_item_fails_before_buffering_any_frame() -> None:
+    class _BatchClient(_Client):
+        hass = _hass("openrbus_gatt_rpc_poll_batch")
+
+    client = _BatchClient(
+        {
+            "frames": [
+                json.dumps({"kind": "event", "op": "NOTIFICATION"}),
+                "not-json",
+            ]
+        }
+    )
+    channel = HomeAssistantThinGattChannel(
+        client, ThinRpcCapability("request", "openrbus_gatt_rpc_poll", "diagnostics")
+    )
+
+    with pytest.raises(TransportError, match="invalid Thin-RPC poll response"):
+        await channel.poll(timeout=1)
+    assert not channel._batch_poll_frames
+    assert client.calls[0][0] == "openrbus_gatt_rpc_poll_batch"
+
+
+@pytest.mark.asyncio
+async def test_connect_discards_frames_buffered_from_prior_epoch() -> None:
+    frames = [
+        json.dumps(
+            {
+                "kind": "event",
+                "op": "NOTIFICATION",
+                "epoch": 7,
+                "seq": i,
+                "request_id": 0,
+                "gattc_if": 1,
+                "conn_id": 0,
+                "payload": {"handle": 3, "value": ""},
+            }
+        )
+        for i in range(1, 4)
+    ]
+
+    class _BatchClient(_Client):
+        hass = _hass("openrbus_gatt_rpc_poll_batch")
+
+    client = _BatchClient({"frames": frames})
+    channel = HomeAssistantThinGattChannel(
+        client, ThinRpcCapability("request", "openrbus_gatt_rpc_poll", "diagnostics")
+    )
+    assert (await channel.poll(timeout=1))["seq"] == 1
+    assert len(channel._batch_poll_frames) == 2
+
+    await channel.action("request", {"op": "CONNECT", "request_id": 1}, timeout=1)
+
+    assert not channel._batch_poll_frames
+
+
+@pytest.mark.asyncio
+async def test_old_firmware_uses_single_frame_poll_service() -> None:
+    class _OldFirmwareClient(_Client):
+        hass = _hass("openrbus_gatt_rpc_poll")
+
+    client = _OldFirmwareClient({"frame": '{"kind":"event","op":"CAPABILITY"}'})
+    channel = HomeAssistantThinGattChannel(
+        client, ThinRpcCapability("request", "openrbus_gatt_rpc_poll", "diagnostics")
+    )
+
+    assert (await channel.poll(timeout=1))["op"] == "CAPABILITY"
+    assert client.calls[0][0] == "openrbus_gatt_rpc_poll"
+
+
+@pytest.mark.asyncio
 async def test_nested_diagnostics_mapping_is_unwrapped() -> None:
     client = _Client(
         {
@@ -2544,11 +2878,13 @@ async def test_remote_scan_collects_all_visible_devices_until_done() -> None:
                 return self.frames.pop(0)
             return {"success": True}
 
-    hass = SimpleNamespace(
-        services=SimpleNamespace(async_call=ScanClient().execute_service)
-    )
     client = ScanClient()
-    hass.services.async_call = client.execute_service
+    hass = SimpleNamespace(
+        services=SimpleNamespace(
+            async_call=client.execute_service,
+            async_services=lambda: {"esphome": {"openrbus_gatt_rpc_poll": object()}},
+        )
+    )
     devices = await async_scan_thin_rpc_devices(
         hass,
         ThinRpcCapability(

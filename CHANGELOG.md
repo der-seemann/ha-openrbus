@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.5 — release candidate
+
+### Added and changed
+
+- Use source-aligned English entity-name hints for supported registry entries.
+- Drain Thin-RPC notification batches when the proxy supports the additive
+  batch endpoint, while retaining compatibility with older firmware.
+- Bound each Thin-RPC segment dispatch by the remaining request deadline.
+
+### Compatibility and limits
+
+- The manifest pins the exact OpenRBus Core 0.4.5 dependency.
+- Existing stable unique IDs are preserved. New entity-name hints do not
+  automatically rename entity IDs on existing Home Assistant installations;
+  manually changed entity IDs may need migration when recreating an entry.
+- The isolated read-only live gate is qualified, not evidence of perfect
+  transport continuity or physical write safety. See the project release
+  audit for the measured scope and limitations.
+
 ## 0.4.4 — release candidate
 
 ### Added

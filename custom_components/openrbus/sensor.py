@@ -21,6 +21,7 @@ from openrbus.value_codec import CanOpenTimeOfDay
 from .bridge import GenericRead
 from .const import CONF_READ_ACCESS_LEVEL, DOMAIN
 from .coordinator import OpenRBusCoordinator, OpenRBusPollingCoordinator
+from .entity_names import suggested_object_id
 from .identity import stable_node_id, stable_object_id
 from .register_entities import (
     async_apply_diagnostic_visibility,
@@ -239,6 +240,12 @@ class OpenRBusDeviceTypeSensor(CoordinatorEntity[OpenRBusCoordinator], SensorEnt
     _attr_has_entity_name = True
     _attr_entity_category = EntityCategory.DIAGNOSTIC
 
+    @property
+    def suggested_object_id(self) -> str:
+        """Keep the gateway diagnostic ID language-neutral."""
+
+        return "openrbus_device_type"
+
     def __init__(self, coordinator: OpenRBusCoordinator) -> None:
         super().__init__(coordinator)
         self._attr_name = "Device type" if coordinator.language == "en" else "Gerätetyp"
@@ -269,6 +276,16 @@ class OpenRBusIdentitySensor(CoordinatorEntity[OpenRBusCoordinator], SensorEntit
 
     _attr_has_entity_name = True
     _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    @property
+    def suggested_object_id(self) -> str:
+        """Return a node-qualified English suffix for Home Assistant."""
+
+        field_name = {
+            "device_code": "device_identity",
+            "parameter_number": "parameter_number",
+        }[self._field]
+        return f"node_{self._identity.node}_{field_name}"
 
     def __init__(
         self,
@@ -332,6 +349,12 @@ class OpenRBusRegisterSensor(
 
     _attr_has_entity_name = True
     _attr_entity_registry_enabled_default = False
+
+    @property
+    def suggested_object_id(self) -> str | None:
+        """Suggest the same readable identity format as register controls."""
+
+        return suggested_object_id(self._parent, self._identity, self._register)
 
     def __init__(
         self,

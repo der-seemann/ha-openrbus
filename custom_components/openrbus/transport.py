@@ -8,6 +8,7 @@ import binascii
 import contextlib
 import json
 import logging
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, ClassVar
@@ -63,7 +64,9 @@ _LOGGER = logging.getLogger(__name__)
 
 _DEFAULT_REQUEST_SERVICE = "openrbus_gatt_rpc_request"
 _DEFAULT_POLL_SERVICE = "openrbus_gatt_rpc_poll"
+_DEFAULT_BATCH_POLL_SERVICE = "openrbus_gatt_rpc_poll_batch"
 _DEFAULT_DIAGNOSTICS_SERVICE = "openrbus_gatt_rpc_diagnostics"
+_MAX_BATCH_POLL_FRAMES = 8
 _RESPONSE_WRAPPERS = ("response", "service_data", "data", "service_response")
 # The firmware pair watchdog is 10 seconds.  Keep the host-side secure-link
 # deadline above that boundary so its terminal event can arrive before HA
@@ -216,6 +219,33 @@ def safe_batch_exception_type(error: BaseException) -> str:
         if isinstance(error, error_type):
             return value
     return "other_error"
+
+
+_SAFE_RECOVERY_MESSAGES = frozenset(
+    {
+        "Thin-RPC recovery has no scoped ESPHome disconnect action",
+        "Thin-RPC scoped physical disconnect action failed",
+        "Thin-RPC physical disconnect did not complete before reload",
+        "Thin-RPC pairing service is unavailable",
+        "Thin-RPC stale pairing reset/rearm failed",
+        "Thin-RPC pairing arm did not reach the disconnect boundary",
+        "Thin-RPC backend is not started",
+    }
+)
+
+
+def _safe_recovery_error_chain(error: BaseException) -> str:
+    """Describe recovery causes using fixed messages and exception classes only."""
+    chain: list[str] = []
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and len(chain) < 4 and id(current) not in seen:
+        seen.add(id(current))
+        message = str(current)
+        safe_message = message if message in _SAFE_RECOVERY_MESSAGES else "redacted"
+        chain.append(f"{safe_batch_exception_type(current)}:{safe_message}")
+        current = current.__cause__ or current.__context__
+    return " <- ".join(chain)
 
 
 def _abort_category(error: CanOpenAbortError) -> str:
@@ -430,14 +460,16 @@ async def _read_objects_batched(
     ) as error:
         if record_failure_trace is not None:
             record_failure_trace("get_list_call", error)
-        # A dropped prepared link is not a GetList capability failure.  Do
-        # not immediately issue hundreds of single reads on that dead
-        # transport; return object-local errors so the Thin backend can fence
-        # and reprepare once before retrying the original bounded batches.
-        if "link lost" in str(error).casefold():
-            error_class = _read_error_class(error)
-            if error_class == "item":
-                error_class = "session"
+        # A lost prepared session is not a GetList capability failure.  Use
+        # the typed error classification here: Core reports link loss with
+        # several stable TransportError messages (for example
+        # "disconnected during operation" and "session lost its identity"),
+        # none of which need to contain the literal words "link lost".
+        # Returning session errors lets ThinRpcBackend fence/reprepare once
+        # before retrying only the affected addresses.  CANopen aborts remain
+        # on the per-object fallback below.
+        error_class = _read_error_class(error)
+        if error_class == "session":
             return tuple(
                 _tag_read_error(
                     HomeAssistantError(str(error)),
@@ -556,7 +588,11 @@ async def _read_effective_access_levels(
 
 
 async def _discover_capabilities_batched(
-    client: RawObjectClient, node: int, *, timeout: float
+    client: RawObjectClient,
+    node: int,
+    *,
+    timeout: float,
+    batch_timeout: float | None = None,
 ) -> tuple[CapabilityReference, ...]:
     """Read a node capability directory with bounded GetList requests.
 
@@ -579,7 +615,9 @@ async def _discover_capabilities_batched(
         ObjectRead(node, ObjectAddress(0x5826, subindex), 4)
         for subindex in range(1, count + 1)
     )
-    results = await client.read_many_raw(items, timeout=min(timeout, 3.0))
+    results = await client.read_many_raw(
+        items, timeout=timeout if batch_timeout is None else batch_timeout
+    )
     capabilities: list[CapabilityReference] = []
     for item in results:
         raw = item.raw
@@ -1227,6 +1265,10 @@ class HomeAssistantThinGattChannel:
         self.effective_access_levels: dict[int, int] = {}
         self._frame_trace_bytes = 0
         self.trace_operation_id: int | None = None
+        self._batch_poll_service = (
+            capability.poll_service.removesuffix("_poll") + "_poll_batch"
+        )
+        self._batch_poll_frames: deque[Mapping[str, Any]] = deque()
 
     def _record_frame(self, direction: str, frame: Mapping[str, Any]) -> None:
         """Record only bounded, categorical correlation evidence when enabled."""
@@ -1287,6 +1329,10 @@ class HomeAssistantThinGattChannel:
     async def action(
         self, name: str, payload: Mapping[str, Any], *, timeout: float
     ) -> None:
+        if payload.get("op") in {"CONNECT", "DISCONNECT"}:
+            # A bootstrap boundary retires any frames already buffered from
+            # the previous physical/session epoch.
+            self._batch_poll_frames.clear()
         if not name:
             raise ValueError("Thin-RPC request service name is required")
         op = payload.get("op")
@@ -1356,16 +1402,32 @@ class HomeAssistantThinGattChannel:
                 self._setup_handle_lookup_request_ids.add(request_id)
 
     async def poll(self, *, timeout: float) -> Mapping[str, Any] | None:
+        if self._batch_poll_frames:
+            frame = self._batch_poll_frames.popleft()
+            self._record_frame("response", frame)
+            if frame.get("op") == "NOTIFICATION":
+                self._decode_notification(frame)  # type: ignore[arg-type]
+            return frame
+
         observed = self.setup_metrics
         started = asyncio.get_running_loop().time() if observed is not None else 0.0
-        if observed is not None and not _has_esphome_service(
-            self.client.hass, self.capability.poll_service
+        hass = getattr(self.client, "hass", None)
+        use_batch_poll = hass is not None and _has_esphome_service(
+            hass, self._batch_poll_service
+        )
+        selected_poll_service = (
+            self._batch_poll_service if use_batch_poll else self.capability.poll_service
+        )
+        if (
+            observed is not None
+            and hass is not None
+            and not _has_esphome_service(hass, selected_poll_service)
         ):
             observed.record("poll_request", "call_not_sent", 0.0)
             raise TransportError("Thin-RPC poll service is unavailable")
         try:
             response = await self.client.execute_service(
-                self.capability.poll_service,
+                selected_poll_service,
                 {},
                 return_response=True,
                 timeout=timeout,
@@ -1394,9 +1456,27 @@ class HomeAssistantThinGattChannel:
         ):
             raise TransportError("Thin-RPC poll service failed")
         try:
-            body = self._response_object(response, "frame")
-            frame_text = body["frame"]
-            frame = self._decode_json_value(frame_text)
+            if use_batch_poll:
+                body = self._response_object(response, "frames")
+                frame_texts = body["frames"]
+                if (
+                    not isinstance(frame_texts, list)
+                    or len(frame_texts) > _MAX_BATCH_POLL_FRAMES
+                ):
+                    raise ValueError("invalid batch length")
+                frames = [self._decode_json_value(item) for item in frame_texts]
+                if any(not isinstance(frame, dict) for frame in frames):
+                    raise ValueError("batch frame is not an object")
+                self._batch_poll_frames.extend(frames)
+                frame = (
+                    self._batch_poll_frames.popleft()
+                    if self._batch_poll_frames
+                    else None
+                )
+            else:
+                body = self._response_object(response, "frame")
+                frame_text = body["frame"]
+                frame = self._decode_json_value(frame_text)
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             if observed is not None:
                 observed.record("poll_request", "error", elapsed)
@@ -2237,17 +2317,28 @@ class ThinRpcBackend:
                 if isinstance(trace_channel, HomeAssistantThinGattChannel):
                     trace_channel.trace_context = None
             scoped: list[DeviceIdentity] = []
+            capability_recovery_attempted = False
+            capability_session_ready = True
             for identity in identities:
+                capabilities: tuple[CapabilityReference, ...] = ()
+                if not capability_session_ready:
+                    scoped.append(
+                        replace(
+                            identity,
+                            capabilities=_identity_capability_evidence(identity),
+                        )
+                    )
+                    continue
                 try:
                     capabilities = await _discover_capabilities_batched(
                         self.client,
                         identity.node,
                         timeout=min(self.timeout, _THIN_CAPABILITY_DISCOVERY_BUDGET),
+                        batch_timeout=self.timeout,
                     )
                 except (
                     CanOpenAbortError,
                     ProtocolError,
-                    TransportError,
                     TimeoutError,
                     ValueError,
                 ) as error:
@@ -2260,7 +2351,59 @@ class ThinRpcBackend:
                         identity.node,
                         type(error).__name__,
                     )
-                    capabilities = ()
+                except TransportError:
+                    # A transport error retires this session. Recover once and
+                    # retry the idempotent capability read before probing the
+                    # next node. If the replacement also fails, do not issue
+                    # more directory requests on an unproven session.
+                    if capability_recovery_attempted:
+                        capability_session_ready = False
+                    else:
+                        capability_recovery_attempted = True
+                        try:
+                            await self._recover_after_transport_loss()
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as recovery_error:  # noqa: BLE001 - keep discovery fail-safe
+                            _LOGGER.debug(
+                                "THIN_CAPABILITIES node=%s recovery_error_type=%s",
+                                identity.node,
+                                type(recovery_error).__name__,
+                            )
+                            capability_session_ready = False
+                        else:
+                            try:
+                                capabilities = await _discover_capabilities_batched(
+                                    self.client,
+                                    identity.node,
+                                    timeout=min(
+                                        self.timeout,
+                                        _THIN_CAPABILITY_DISCOVERY_BUDGET,
+                                    ),
+                                    batch_timeout=self.timeout,
+                                )
+                            except asyncio.CancelledError:
+                                raise
+                            except (
+                                CanOpenAbortError,
+                                ProtocolError,
+                                TransportError,
+                                TimeoutError,
+                                ValueError,
+                            ) as retry_error:
+                                _LOGGER.debug(
+                                    "THIN_CAPABILITIES node=%s retry_error_type=%s",
+                                    identity.node,
+                                    type(retry_error).__name__,
+                                )
+                                capability_session_ready = not isinstance(
+                                    retry_error, TransportError
+                                )
+                    if not capability_session_ready:
+                        _LOGGER.debug(
+                            "THIN_CAPABILITIES node=%s session_unavailable=true",
+                            identity.node,
+                        )
                 else:
                     _LOGGER.debug(
                         "THIN_CAPABILITIES node=%s count=%s",
@@ -2536,6 +2679,12 @@ class ThinRpcBackend:
                 fence_metrics.record_disconnect_outcome("service_exception", error)
         if fence_metrics is not None:
             fence_metrics.record_dispatch(dispatch_acknowledged)
+        session = getattr(self, "session", None)
+        identity = getattr(session, "identity", None)
+        epoch = getattr(session, "epoch", None)
+        expected_identity_present = identity is not None
+        expected_epoch_valid = type(epoch) is int and epoch > 0
+        stage = "scoped_disconnect"
         if self.session is not None:
             retire = getattr(self.session, "retire", None)
             if callable(retire):
@@ -2546,38 +2695,71 @@ class ThinRpcBackend:
         # old link; its delayed disconnect event then invalidates the new
         # session.  Use the same physical boundary and bounded queue drain as
         # the controlled lifecycle paths before opening the new epoch.
-        if guard_outcome in {"missing_identity", "invalid_epoch", "missing_session"}:
-            # With no usable identity, a Thin DISCONNECT cannot name the
-            # physical connection. Use only the sibling action of the exact
-            # configured pairing action; its proxy template targets the same
-            # BLE client and clears the stale pairing arm before disconnect.
-            disconnect_action = self._configured_disconnect_action()
-            if disconnect_action is None or not _has_esphome_service(
-                self.hass, disconnect_action
-            ):
-                raise HomeAssistantError(
-                    "Thin-RPC recovery has no scoped ESPHome disconnect action"
-                )
-            try:
-                await self.hass.services.async_call(
-                    "esphome", disconnect_action, {}, blocking=True
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                raise HomeAssistantError(
-                    "Thin-RPC scoped physical disconnect action failed"
-                ) from error
-            if fence_metrics is not None:
-                fence_metrics.record_dispatch(True)
-        await self._wait_for_physical_disconnect(recovery_fence=fence_metrics)
-        await self._drain_stale_frames()
-        # openrbus_disconnect clears the proxy's passkey and armed flag. The
-        # ordinary pair action re-establishes that state and independently
-        # confirms its own physical disconnect boundary before CONNECT.
-        if guard_outcome in {"missing_identity", "invalid_epoch", "missing_session"}:
-            await self._arm_pairing_if_configured()
-        await self._ensure_session_ready()
+        try:
+            if guard_outcome in {
+                "missing_identity",
+                "invalid_epoch",
+                "missing_session",
+            }:
+                # With no usable identity, a Thin DISCONNECT cannot name the
+                # physical connection. Use only the sibling action of the exact
+                # configured pairing action; its proxy template targets the same
+                # BLE client and clears the stale pairing arm before disconnect.
+                stage = "scoped_disconnect"
+                disconnect_action = self._configured_disconnect_action()
+                if disconnect_action is None or not _has_esphome_service(
+                    self.hass, disconnect_action
+                ):
+                    raise HomeAssistantError(
+                        "Thin-RPC recovery has no scoped ESPHome disconnect action"
+                    )
+                try:
+                    await self.hass.services.async_call(
+                        "esphome", disconnect_action, {}, blocking=True
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    raise HomeAssistantError(
+                        "Thin-RPC scoped physical disconnect action failed"
+                    ) from error
+                if fence_metrics is not None:
+                    fence_metrics.record_dispatch(True)
+            stage = "physical_disconnect"
+            await self._wait_for_physical_disconnect(recovery_fence=fence_metrics)
+            stage = "stale_frame_drain"
+            await self._drain_stale_frames()
+            # openrbus_disconnect clears the proxy's passkey and armed flag. The
+            # ordinary pair action re-establishes that state and independently
+            # confirms its own physical disconnect boundary before CONNECT.
+            if guard_outcome in {
+                "missing_identity",
+                "invalid_epoch",
+                "missing_session",
+            }:
+                stage = "pairing_rearm"
+                await self._arm_pairing_if_configured()
+            stage = "session_prepare"
+            await self._ensure_session_ready()
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            observed = getattr(self, "_last_disconnect_snapshot", {})
+            _LOGGER.debug(
+                "THIN_RECOVERY event=failed stage=%s guard=%s "
+                "expected_identity_present=%s expected_epoch_valid=%s "
+                "observed_link=%s observed_parent=%s observed_epoch=%s "
+                "error_chain=%s",
+                stage,
+                guard_outcome or "identity_fenced",
+                expected_identity_present,
+                expected_epoch_valid,
+                observed.get("link_active"),
+                observed.get("parent_connected"),
+                observed.get("epoch"),
+                _safe_recovery_error_chain(error),
+            )
+            raise
 
     def _configured_disconnect_action(self) -> str | None:
         """Return only the disconnect sibling of the configured pair action."""
