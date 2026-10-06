@@ -9,7 +9,7 @@
     "step": {
       "user": {
         "title": "Select transport",
-        "description": "Choose a native Bluetooth adapter or an OpenRBus proxy.\n\nNo suitable Bluetooth adapter nearby? [Set up an ESP proxy](https://github.com/der-seemann/openrbus/blob/v0.4.3/tools/phase1a/esphome/README.md).",
+        "description": "Choose a native Bluetooth adapter or an OpenRBus proxy.\n\nNo suitable Bluetooth adapter nearby? [Set up an ESP proxy]({esphome_proxy_setup_url}).",
         "data": {
           "backend": "Transport backend",
           "language": "Entity language",
@@ -171,7 +171,7 @@
           "_openrbus_entity_picker": "Open the three-step selector: Device, Category, then Entities. Existing entity identities and saved choices are retained.",
           "experimental_writes": "Expose additional registers without an explicit IsReadOnly declaration as experimental controls. Requires write access to be enabled; these registers are not confirmed as regular writable parameters."
         },
-        "description": "No suitable Bluetooth adapter nearby? [Set up an ESP proxy](https://github.com/der-seemann/openrbus/blob/v0.4.3/tools/phase1a/esphome/README.md)."
+        "description": "No suitable Bluetooth adapter nearby? [Set up an ESP proxy]({esphome_proxy_setup_url})."
       },
       "access_warning": {
         "title": "Review access and write permissions",

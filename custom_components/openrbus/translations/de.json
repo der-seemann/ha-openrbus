@@ -9,7 +9,7 @@
     "step": {
       "user": {
         "title": "ESPHome-Gateway auswählen",
-        "description": "Wähle einen lokalen Bluetooth-Adapter oder einen ESPHome Thin-RPC-Proxy.\n\nKein passender Bluetooth-Adapter in Reichweite? [ESP-Proxy einrichten](https://github.com/der-seemann/openrbus/blob/v0.4.3/tools/phase1a/esphome/README.md).",
+        "description": "Wähle einen lokalen Bluetooth-Adapter oder einen ESPHome Thin-RPC-Proxy.\n\nKein passender Bluetooth-Adapter in Reichweite? [ESP-Proxy einrichten]({esphome_proxy_setup_url}).",
         "data": {
           "backend": "Transport",
           "language": "Sprache der Entitäten",
@@ -171,7 +171,7 @@
           "_openrbus_entity_picker": "Dreistufige Auswahl öffnen: Gerät, Kategorie, Entitäten. Vorhandene Entitätskennungen und gespeicherte Auswahl bleiben erhalten.",
           "experimental_writes": "Zusätzliche Register ohne explizite IsReadOnly-Kennzeichnung als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt."
         },
-        "description": "Kein passender Bluetooth-Adapter in Reichweite? [ESP-Proxy einrichten](https://github.com/der-seemann/openrbus/blob/v0.4.3/tools/phase1a/esphome/README.md)."
+        "description": "Kein passender Bluetooth-Adapter in Reichweite? [ESP-Proxy einrichten]({esphome_proxy_setup_url})."
       },
       "access_warning": {
         "title": "Zugriffs- und Schreibrechte prüfen",

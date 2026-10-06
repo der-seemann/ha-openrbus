@@ -98,6 +98,11 @@ from .transport import (
 )
 from .zones import override_key, zone_device_name
 
+ESPHOME_PROXY_SETUP_URL = (
+    "https://github.com/der-seemann/openrbus/blob/v0.4.4/"
+    "tools/phase1a/esphome/README.md"
+)
+
 _CONF_ENTITY_PICKER = "_openrbus_entity_picker"
 _CONF_ENTITY_NODES = "_openrbus_entity_nodes"
 _CONF_ENTITY_NODE_PRESET = "_openrbus_entity_node_preset"
@@ -582,6 +587,9 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
             pending = getattr(self, "_pending_user_input", None) or {}
             return self.async_show_form(
                 step_id="user",
+                description_placeholders={
+                    "esphome_proxy_setup_url": ESPHOME_PROXY_SETUP_URL
+                },
                 data_schema=vol.Schema(
                     {
                         vol.Required(
@@ -1104,6 +1112,9 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
         }
         return self.async_show_form(
             step_id="user",
+            description_placeholders={
+                "esphome_proxy_setup_url": ESPHOME_PROXY_SETUP_URL
+            },
             data_schema=vol.Schema(schema),
         )
 
@@ -2060,6 +2071,9 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
         }
         return self.async_show_form(
             step_id="init",
+            description_placeholders={
+                "esphome_proxy_setup_url": ESPHOME_PROXY_SETUP_URL
+            },
             data_schema=vol.Schema(fields),
         )
 

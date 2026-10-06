@@ -85,6 +85,27 @@ def test_config_flow_exposes_only_supported_transports() -> None:
     }
 
 
+@pytest.mark.asyncio
+async def test_transport_forms_include_esp_proxy_setup_link(monkeypatch) -> None:
+    expected_url = config_flow_module.ESPHOME_PROXY_SETUP_URL
+    setup = await OpenRBusConfigFlow().async_step_user()
+    assert setup["description_placeholders"]["esphome_proxy_setup_url"] == expected_url
+
+    monkeypatch.setattr(
+        OpenRBusConfigFlow,
+        "_ble_target_choices",
+        staticmethod(lambda hass, include_thin=True: {}),
+    )
+    monkeypatch.setattr(OpenRBusOptionsFlowHandler, "_entity_choices", lambda *_: {})
+    monkeypatch.setattr(OpenRBusOptionsFlowHandler, "_zone_choices", lambda *_: {})
+    options = await OpenRBusOptionsFlowHandler(
+        SimpleNamespace(data={}, options={})
+    ).async_step_init()
+    assert (
+        options["description_placeholders"]["esphome_proxy_setup_url"] == expected_url
+    )
+
+
 def test_entity_language_options_match_the_manufacturer_locale_catalog() -> None:
     assert len(LANGUAGE_OPTIONS) == 28
     assert {"de", "en", "fr", "nl", "tr", "zh"}.issubset(LANGUAGE_OPTIONS)
