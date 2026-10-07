@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.7 — release candidate
+
+### Changed
+
+- Stage initial discovery so bounded setup work can continue across Home
+  Assistant retry transitions, and cancel/join the zone-profile monitor before
+  backend shutdown.
+- Project active zones as child devices using evidence-supported mappings;
+  unknown selector states and unresolved zone objects remain excluded.
+- Expose bounded Thin-RPC flow-control reasons in diagnostics.
+
+### Compatibility and limits
+
+- Pins the matching OpenRBus Core 0.4.7 release.
+- The source audit retains 22 unresolved zone-object mappings; this release does
+  not claim complete zone coverage or physical write safety.
+
 ## 0.4.6 — release candidate
 
 ### Changed
