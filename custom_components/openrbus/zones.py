@@ -55,6 +55,14 @@ class ZoneAssociation(StrEnum):
     UNRESOLVED = "unresolved"
 
 
+class ZoneReadState(StrEnum):
+    """Fresh CP020 evidence state for one node and slot."""
+
+    CONFIRMED_ACTIVE = "confirmed_active"
+    CONFIRMED_DISABLED = "confirmed_disabled"
+    UNKNOWN = "unknown"
+
+
 _INACTIVE_FUNCTIONS = frozenset({0})
 _DHW_FUNCTIONS = frozenset({6, 7, 10, 11, 12, 13, 31})
 # Direct/mixing/high-temperature/fan-convector/BSB are heating circuits.  The
@@ -530,15 +538,16 @@ def zone_display_name(profile: ZoneProfile, language: str = "de") -> str:
 def zone_subindex(register: Any, identity: Any | None = None) -> int | None:
     """Return the slot for an exact, source-mapped zone-array item."""
 
-    if zone_association(register, identity) is not ZoneAssociation.ZONE_SLOT:
+    address = getattr(register, "address", register)
+    if zone_association(address, identity) is not ZoneAssociation.ZONE_SLOT:
         return None
-    return getattr(getattr(register, "address", None), "subindex", None)
+    return getattr(address, "subindex", None)
 
 
 def zone_association(register: Any, identity: Any | None = None) -> ZoneAssociation:
     """Classify from the reviewed exact object map, never labels or ranges."""
 
-    address = getattr(register, "address", None)
+    address = getattr(register, "address", register)
     index = getattr(address, "index", None)
     subindex = getattr(address, "subindex", None)
     if not isinstance(index, int) or not isinstance(subindex, int):
@@ -632,7 +641,7 @@ def zone_enabled(parent: Any, node: int, subindex: int) -> bool:
     profile = profile_for(parent, node, subindex)
     # A stale override cannot create a zone that the device says is disabled
     # (or one whose function could not be read).
-    if profile is None or not profile.active:
+    if profile is None or not zone_is_active(parent, node, subindex):
         return False
     overrides = normalized_overrides(getattr(parent, "zone_overrides", {}))
     explicit = overrides.get(override_key(node, subindex))
@@ -642,10 +651,40 @@ def zone_enabled(parent: Any, node: int, subindex: int) -> bool:
 
 
 def zone_is_active(parent: Any, node: int, subindex: int) -> bool:
-    """Require recognized, positive CP020 evidence for child entity creation."""
+    """Require a successful, recognized, positive CP020 read."""
 
     profile = profile_for(parent, node, subindex)
-    return profile is not None and profile.active
+    return (
+        zone_read_state(parent, node, subindex) is ZoneReadState.CONFIRMED_ACTIVE
+        and profile is not None
+        and profile.active
+    )
+
+
+def zone_is_confirmed_disabled(parent: Any, node: int, subindex: int) -> bool:
+    """Whether cleanup is authorized by a successful CP020 zero read."""
+
+    states = getattr(parent, "zone_profile_states", None)
+    if states is not None:
+        return states.get((node, subindex)) == ZoneReadState.CONFIRMED_DISABLED
+    profile = profile_for(parent, node, subindex)
+    return profile is not None and profile.function == 0
+
+
+def zone_read_state(parent: Any, node: int, subindex: int) -> ZoneReadState:
+    """Return explicit read evidence, treating missing evidence as unknown."""
+
+    states = getattr(parent, "zone_profile_states", None)
+    if states is not None:
+        return states.get((node, subindex), ZoneReadState.UNKNOWN)
+    profile = profile_for(parent, node, subindex)
+    if profile is None:
+        return ZoneReadState.UNKNOWN
+    if profile.function == 0:
+        return ZoneReadState.CONFIRMED_DISABLED
+    if profile.active:
+        return ZoneReadState.CONFIRMED_ACTIVE
+    return ZoneReadState.UNKNOWN
 
 
 def entity_zone_label(parent: Any, identity: Any, register: Any) -> str | None:
@@ -707,6 +746,7 @@ __all__ = [
     "ZoneAssociation",
     "ZoneKind",
     "ZoneProfile",
+    "ZoneReadState",
     "entity_zone_label",
     "normalized_overrides",
     "normalized_selection_overrides",
@@ -718,5 +758,7 @@ __all__ = [
     "zone_enabled",
     "zone_function_label",
     "zone_is_active",
+    "zone_is_confirmed_disabled",
+    "zone_read_state",
     "zone_subindex",
 ]

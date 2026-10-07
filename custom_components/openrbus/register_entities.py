@@ -33,6 +33,7 @@ from .const import (
     CONF_GROUP_OVERRIDES,
     CONF_NODE_OVERRIDES,
     CONF_SCREED_DRYING_ENABLED,
+    CONF_ZONE_OVERRIDES,
     DEFAULT_COOLING_ENABLED,
     DOMAIN,
 )
@@ -50,11 +51,13 @@ from .zones import (
     ZoneAssociation,
     ZoneKind,
     entity_zone_label,
+    override_key,
     profile_for,
     zone_association,
     zone_device_name,
     zone_enabled,
     zone_is_active,
+    zone_is_confirmed_disabled,
     zone_subindex,
 )
 
@@ -1150,6 +1153,22 @@ def cleanup_inactive_zone_entities(
         return 0
     entry_id = parent.config_entry.entry_id
     inactive_unique_ids: set[str] = set()
+    config_entry = parent.config_entry
+    override_source_present = False
+    validated_overrides: dict[str, object] = {}
+    for source in (
+        getattr(config_entry, "data", {}) or {},
+        getattr(config_entry, "options", {}) or {},
+    ):
+        if CONF_ZONE_OVERRIDES in source:
+            override_source_present = True
+            values = source.get(CONF_ZONE_OVERRIDES)
+            if isinstance(values, Mapping):
+                validated_overrides.update(values)
+    if not override_source_present:
+        configured_overrides = getattr(parent, "zone_overrides", {})
+        if isinstance(configured_overrides, Mapping):
+            validated_overrides.update(configured_overrides)
     for runtime_node in runtime_nodes(parent):
         identity = identity_for_runtime(runtime_node)
         for index in ZONE_SLOT_OBJECT_SOURCES:
@@ -1162,7 +1181,12 @@ def cleanup_inactive_zone_entities(
                 if str(family or "").strip().casefold() not in allowed_families:
                     continue
             for slot in range(1, 11):
-                if zone_is_active(parent, identity.node, slot):
+                override = validated_overrides.get(override_key(identity.node, slot))
+                explicitly_disabled = type(override) is bool and override is False
+                if not (
+                    zone_is_confirmed_disabled(parent, identity.node, slot)
+                    or explicitly_disabled
+                ):
                     continue
                 inactive_unique_ids.add(
                     stable_object_id(parent, identity.node, index, slot)
@@ -1666,6 +1690,11 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
 
     @property
     def available(self) -> bool:
+        slot = zone_subindex(self._register, self._identity)
+        if slot is not None and not zone_is_active(
+            self._parent, self._identity.node, slot
+        ):
+            return False
         return (
             self._effective_access_level is not None
             and catalog_visible(self._register, self._effective_access_level)
@@ -1777,6 +1806,13 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
     async def _async_write(self, value: Any) -> None:
         """Write through Core and publish only the confirmed read-back value."""
 
+        slot = zone_subindex(self._register, self._identity)
+        if slot is not None and not zone_is_active(
+            self._parent, self._identity.node, slot
+        ):
+            raise HomeAssistantError(
+                "OpenRBus zone function state is not confirmed active"
+            )
         if not write_access_allowed(
             self._parent, self._register, self._effective_access_level
         ):

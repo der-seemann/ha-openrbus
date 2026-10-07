@@ -19,7 +19,7 @@ from custom_components.openrbus.register_entities import OpenRBusRegisterEntity
 from custom_components.openrbus.select import OpenRBusSelect
 from custom_components.openrbus.sensor import _entity_enabled_by_default
 from custom_components.openrbus.switch import OpenRBusSwitch
-from custom_components.openrbus.zones import ZoneProfile
+from custom_components.openrbus.zones import ZoneProfile, ZoneReadState
 
 
 def _register(
@@ -541,6 +541,7 @@ def test_shared_row_projection_gates_zone_activity_before_platforms_and_picker(
         for address in (
             "340f:01",  # confirmed slot label, active below
             "3410:02",  # confirmed slot label, explicitly inactive below
+            "3410:03",  # historical profile, but CP020 read is unknown
             "3404:02",  # CP021 function selector always remains on parent
             "340c:01",  # unresolved flattened activity dimension
             "3500:00",  # ordinary non-zone parent entity
@@ -557,6 +558,12 @@ def test_shared_row_projection_gates_zone_activity_before_platforms_and_picker(
         zone_profiles={
             (5, 1): ZoneProfile(5, 1, 2),
             (5, 2): ZoneProfile(5, 2, 0),
+            (5, 3): ZoneProfile(5, 3, 2),
+        },
+        zone_profile_states={
+            (5, 1): ZoneReadState.CONFIRMED_ACTIVE,
+            (5, 2): ZoneReadState.CONFIRMED_DISABLED,
+            (5, 3): ZoneReadState.UNKNOWN,
         },
     )
     monkeypatch.setattr(
@@ -566,9 +573,9 @@ def test_shared_row_projection_gates_zone_activity_before_platforms_and_picker(
     projected = [row[1].address for row in register_entities.rows_for_parent(parent)]
     assert projected == [
         rows[0].address,
-        rows[2].address,
-        rows[4].address,
+        rows[3].address,
         rows[5].address,
+        rows[6].address,
     ]
 
 
@@ -577,19 +584,32 @@ def test_inactive_zone_registry_cleanup_is_exact_and_entry_scoped(monkeypatch) -
     parent = SimpleNamespace(
         config_entry=SimpleNamespace(
             entry_id="entry-one",
-            data={"ble_device": "00:11:22:33:44:55"},
+            data={
+                "ble_device": "00:11:22:33:44:55",
+                "zone_overrides": {"5:4": False, "5:5": "false"},
+            },
             options={},
         ),
         inventories=(SimpleNamespace(identity=identity),),
         zone_profiles={
             (5, 1): ZoneProfile(5, 1, 2),
             (5, 2): ZoneProfile(5, 2, 0),
+            (5, 3): ZoneProfile(5, 3, 2),
         },
+        zone_profile_states={
+            (5, 1): ZoneReadState.CONFIRMED_ACTIVE,
+            (5, 2): ZoneReadState.CONFIRMED_DISABLED,
+            (5, 3): ZoneReadState.UNKNOWN,
+        },
+        zone_overrides={"5:4": False, "5:5": "false"},
     )
     inactive_uid = stable_object_id(parent, 5, 0x3410, 2)
     active_uid = stable_object_id(parent, 5, 0x340F, 1)
     unresolved_uid = stable_object_id(parent, 5, 0x340D, 2)
     global_uid = stable_object_id(parent, 5, 0x540E, 2)
+    unknown_uid = stable_object_id(parent, 5, 0x3410, 3)
+    override_disabled_uid = stable_object_id(parent, 5, 0x3410, 4)
+    malformed_override_uid = stable_object_id(parent, 5, 0x3410, 5)
     entries = {
         "sensor.inactive": SimpleNamespace(
             entity_id="sensor.inactive",
@@ -622,6 +642,30 @@ def test_inactive_zone_registry_cleanup_is_exact_and_entry_scoped(monkeypatch) -
             config_entry_id="entry-one",
             domain="sensor",
         ),
+        "sensor.unknown": SimpleNamespace(
+            entity_id="sensor.unknown",
+            unique_id=unknown_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="sensor",
+            name="Unknown remains recoverable",
+            area_id="unknown-area",
+            disabled_by="user",
+        ),
+        "sensor.override_disabled": SimpleNamespace(
+            entity_id="sensor.override_disabled",
+            unique_id=override_disabled_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="sensor",
+        ),
+        "sensor.malformed_override": SimpleNamespace(
+            entity_id="sensor.malformed_override",
+            unique_id=malformed_override_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="sensor",
+        ),
         "sensor.other_entry": SimpleNamespace(
             entity_id="sensor.other_entry",
             unique_id=inactive_uid,
@@ -642,13 +686,31 @@ def test_inactive_zone_registry_cleanup_is_exact_and_entry_scoped(monkeypatch) -
     registry = Registry()
     monkeypatch.setattr(register_entities.er, "async_get", lambda _hass: registry)
 
-    assert register_entities.cleanup_inactive_zone_entities(object(), parent) == 1
-    assert registry.removed == ["sensor.inactive"]
+    assert register_entities.cleanup_inactive_zone_entities(object(), parent) == 2
+    assert registry.removed == ["sensor.inactive", "sensor.override_disabled"]
     # HA's async_remove persists a deleted-entity tombstone; this helper does
     # not mutate user metadata or remove device-registry rows.
     assert entries["sensor.inactive"].name == "My custom entity name"
     assert entries["sensor.inactive"].area_id == "zone-area"
     assert entries["sensor.inactive"].disabled_by == "user"
+    assert entries["sensor.unknown"].entity_id == "sensor.unknown"
+    assert entries["sensor.unknown"].name == "Unknown remains recoverable"
+    assert entries["sensor.unknown"].area_id == "unknown-area"
+    assert entries["sensor.unknown"].disabled_by == "user"
+
+
+def test_zone_entity_is_unavailable_during_unknown_selector_state() -> None:
+    entity = OpenRBusRegisterEntity.__new__(OpenRBusRegisterEntity)
+    entity._register = _register("346a:01", levels=("User",))
+    entity._identity = SimpleNamespace(node=4, family="Ehc-16")
+    entity._parent = SimpleNamespace(
+        zone_profiles={(4, 1): ZoneProfile(4, 1, 2)},
+        zone_profile_states={(4, 1): ZoneReadState.UNKNOWN},
+    )
+    entity._effective_access_level = 1
+    entity.coordinator = SimpleNamespace(is_value_available=lambda *_args: True)
+
+    assert not entity.available
 
 
 def test_diagnostic_visibility_toggles_only_integration_owned_registry_rows(

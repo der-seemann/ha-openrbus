@@ -77,9 +77,12 @@ from .zones import (
     ZONE_FUNCTION_INDEX,
     ZONE_SHORT_NAME_INDEX,
     ZoneProfile,
+    ZoneReadState,
     normalized_overrides,
     normalized_selection_overrides,
     zone_function_slots,
+    zone_is_active,
+    zone_subindex,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -125,14 +128,54 @@ def _invalid_value_retirement_period(value: object) -> timedelta:
 def _zone_selection_changed(
     previous: dict[tuple[int, int], ZoneProfile],
     current: dict[tuple[int, int], ZoneProfile],
+    previous_states: dict[tuple[int, int], ZoneReadState] | None = None,
+    current_states: dict[tuple[int, int], ZoneReadState] | None = None,
 ) -> bool:
-    """Whether late zone evidence changes the set of eligible zone slots."""
+    """Whether confirmed CP020 evidence changes child eligibility.
 
-    return any(
-        bool(previous.get(key) and previous[key].active)
-        != bool(current.get(key) and current[key].active)
-        for key in previous.keys() | current.keys()
+    An unknown read is neither active nor inactive evidence. It must never
+    schedule an entry reload by itself; only a transition between confirmed
+    states can cause the entity projection to be rebuilt.
+    """
+
+    previous_states = previous_states or {}
+    current_states = current_states or {}
+    keys = (
+        previous.keys()
+        | current.keys()
+        | previous_states.keys()
+        | current_states.keys()
     )
+    for key in keys:
+        old_state = previous_states.get(key)
+        if old_state is None:
+            old_profile = previous.get(key)
+            if old_profile is not None:
+                old_state = (
+                    ZoneReadState.CONFIRMED_DISABLED
+                    if old_profile.function == 0
+                    else ZoneReadState.CONFIRMED_ACTIVE
+                    if old_profile.active
+                    else ZoneReadState.UNKNOWN
+                )
+            else:
+                old_state = ZoneReadState.UNKNOWN
+        new_state = current_states.get(key)
+        if new_state is None:
+            new_profile = current.get(key)
+            if new_profile is not None:
+                new_state = (
+                    ZoneReadState.CONFIRMED_DISABLED
+                    if new_profile.function == 0
+                    else ZoneReadState.CONFIRMED_ACTIVE
+                    if new_profile.active
+                    else ZoneReadState.UNKNOWN
+                )
+            else:
+                new_state = ZoneReadState.UNKNOWN
+        if new_state is not ZoneReadState.UNKNOWN and old_state is not new_state:
+            return True
+    return False
 
 
 def schedule_background_task(
@@ -355,6 +398,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         # CP020 activity is live device evidence. Never reuse it across a
         # coordinator reload; the new instance must positively reread selectors.
         self.zone_profiles: dict[tuple[int, int], ZoneProfile] = {}
+        self.zone_profile_states: dict[tuple[int, int], ZoneReadState] = {}
         self._zone_entities: set[Any] = set()
         self._zone_discovery_task: asyncio.Task[None] | None = None
         self._startup_task: asyncio.Task[None] | None = None
@@ -658,14 +702,13 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         """Read ZoneFunction plus custom labels for advertised zone slots.
 
         This is strictly read-only and best-effort.  CP020 is manufacturer
-        evidence for active/inactive and heating/DHW semantics.  A transport
-        error leaves that slot absent (and therefore disabled by default),
-        which is safer than exposing every static SCB-10 zone array.
+        evidence for active/inactive and heating/DHW semantics. Failed reads
+        are recorded as unknown: they fail closed for entity use, but do not
+        erase the last display profile or authorize registry cleanup.
         """
 
-        # Build from this read cycle only. Failed/unread selectors must remove
-        # old positive evidence so they cannot keep child rows eligible.
-        profiles: dict[tuple[int, int], ZoneProfile] = {}
+        profiles = dict(getattr(self, "zone_profiles", {}) or {})
+        states: dict[tuple[int, int], ZoneReadState] = {}
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _ZONE_DISCOVERY_STARTUP_BUDGET
         complete = True
@@ -687,8 +730,12 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
 
         if not candidates:
             self._has_zone_function_slots = False
+            self.zone_profiles = {}
+            self.zone_profile_states = {}
             return True
         self._has_zone_function_slots = True
+        for _runtime_node, _identity, node, slot in candidates:
+            states[(node, slot)] = ZoneReadState.UNKNOWN
 
         cursor = _ZONE_DISCOVERY_CURSOR.get(self._zone_profile_cache_key, 0)
         cursor %= len(candidates)
@@ -714,6 +761,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 complete = False
                 continue
             if function_read.value == 0:
+                states[(node, slot)] = ZoneReadState.CONFIRMED_DISABLED
                 profile = ZoneProfile(
                     node,
                     slot,
@@ -725,8 +773,21 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                     ),
                 )
                 profiles[(node, slot)] = profile
-                self.zone_profiles = dict(profiles)
                 continue
+            if not ZoneProfile(node, slot, function_read.value).active:
+                complete = False
+                profiles[(node, slot)] = ZoneProfile(
+                    node,
+                    slot,
+                    function_read.value,
+                    node_name=(
+                        getattr(identity, "model", None)
+                        or getattr(identity, "family", None)
+                        or getattr(identity, "name", None)
+                    ),
+                )
+                continue
+            states[(node, slot)] = ZoneReadState.CONFIRMED_ACTIVE
             friendly_name: str | None = None
             short_name: str | None = None
             try:
@@ -780,8 +841,8 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 short_name,
             )
             profiles[(node, slot)] = profile
-            self.zone_profiles = dict(profiles)
         self.zone_profiles = profiles
+        self.zone_profile_states = states
         _ZONE_DISCOVERY_CURSOR[self._zone_profile_cache_key] = (
             cursor + processed
         ) % len(candidates)
@@ -796,15 +857,19 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 if self._shutting_down:
                     return
                 previous = dict(self.zone_profiles)
+                previous_states = dict(getattr(self, "zone_profile_states", {}) or {})
                 complete = await self._async_discover_zone_profiles()
                 for entity in tuple(self._zone_entities):
                     entity.async_refresh_zone_name()
                 if self._shutting_down:
                     return
-                if _zone_selection_changed(previous, self.zone_profiles):
-                    # A late positive CP020 profile changes which zone
-                    # entities and poller rows are safe to expose. One managed
-                    # reload rebuilds both from cached evidence.
+                if _zone_selection_changed(
+                    previous,
+                    self.zone_profiles,
+                    previous_states,
+                    self.zone_profile_states,
+                ):
+                    # Only confirmed CP020 transitions rebuild the projection.
                     self.hass.config_entries.async_schedule_reload(self._entry_id)
                     return
                 if complete:
@@ -815,6 +880,11 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                     attempt + 1,
                     _ZONE_DISCOVERY_MAX_RETRIES,
                 )
+            if not self._shutting_down:
+                # The bounded short retry phase is complete. Continue only on
+                # the existing slow monitor cadence so an unknown slot can
+                # recover without a tight transport-failure loop.
+                self._schedule_zone_profile_monitor()
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -843,12 +913,18 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             if self._shutting_down:
                 return
             previous = dict(self.zone_profiles)
+            previous_states = dict(getattr(self, "zone_profile_states", {}) or {})
             await self._async_discover_zone_profiles()
             for entity in tuple(self._zone_entities):
                 entity.async_refresh_zone_name()
             if self._shutting_down:
                 return
-            if _zone_selection_changed(previous, self.zone_profiles):
+            if _zone_selection_changed(
+                previous,
+                self.zone_profiles,
+                previous_states,
+                self.zone_profile_states,
+            ):
                 self.hass.config_entries.async_schedule_reload(self._entry_id)
                 return
 
@@ -1030,6 +1106,20 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                     raise HomeAssistantError(
                         "OpenRBus write requires a higher effective access level"
                     )
+
+        identity = next(
+            (
+                getattr(runtime, "identity", runtime)
+                for runtime in (self.inventories or self.devices)
+                if getattr(getattr(runtime, "identity", runtime), "node", None) == node
+            ),
+            None,
+        )
+        slot = zone_subindex(address, identity)
+        if slot is not None and not zone_is_active(self, node, slot):
+            raise HomeAssistantError(
+                "OpenRBus zone function state is not confirmed active"
+            )
 
         return await self._backend.async_write_object(
             node,
@@ -1246,6 +1336,29 @@ class OpenRBusPollingCoordinator(
         for node, address in self.registers:
             if self.validity.is_expired((node, address)):
                 continue
+            register = self.register_metadata.get((node, address))
+            if register is not None:
+                identity = next(
+                    (
+                        getattr(inventory, "identity", inventory)
+                        for inventory in (
+                            getattr(self.parent, "inventories", ())
+                            or getattr(self.parent, "devices", ())
+                        )
+                        if getattr(
+                            getattr(inventory, "identity", inventory),
+                            "node",
+                            None,
+                        )
+                        == node
+                    ),
+                    None,
+                )
+                slot = zone_subindex(register, identity)
+                if slot is not None and not zone_is_active(self.parent, node, slot):
+                    # CP020 uncertainty fails closed at the poll boundary,
+                    # including rows retained by an already-running poller.
+                    continue
             unique_id = stable_object_id(
                 self.parent, node, address.index, address.subindex
             )
