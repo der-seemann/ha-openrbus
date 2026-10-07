@@ -4,18 +4,31 @@
 
 ### Changed
 
-- Stage initial discovery so bounded setup work can continue across Home
-  Assistant retry transitions, and cancel/join the zone-profile monitor before
-  backend shutdown.
-- Project active zones as child devices using evidence-supported mappings;
-  unknown selector states and unresolved zone objects remain excluded.
-- Expose bounded Thin-RPC flow-control reasons in diagnostics.
+- Keep bounded initial discovery attached to retryable Home Assistant setup;
+  replace a stopped coordinator only after cleanup is proven complete. Stop and
+  join register polling before backend teardown, and retain ownership when
+  native or Thin-RPC disconnect cleanup cannot prove the transport is stopped.
+- Preserve safe user-enabled registry rows across default reconciliation and
+  same-session zone-selector uncertainty, subject to access, safety, and
+  explicit category/zone choices.
+- Retire legacy rows for exact mapped child objects when selector state is
+  initially unknown, and for exact source-audited unresolved objects, using
+  Home Assistant's recoverable registry tombstones. A previously confirmed
+  active slot remains available in the registry through transient same-session
+  uncertainty.
+- Project only evidence-supported active zones and expose bounded Thin-RPC
+  flow-control reasons in diagnostics.
 
 ### Compatibility and limits
 
 - Pins the matching OpenRBus Core 0.4.7 release.
-- The source audit retains 22 unresolved zone-object mappings; this release does
-  not claim complete zone coverage or physical write safety.
+- The audit has 262 exact positive slot-map keys; 22 unresolved zone-object
+  mappings remain excluded from projection. The map is not complete for every
+  zone-related object. An initially unknown selector after restart may retire
+  old exact rows into recoverable tombstones before the active state is reread;
+  no prior-session active history is assumed.
+- Registry projection and successful reads do not establish physical write
+  safety.
 
 ## 0.4.6 — release candidate
 
