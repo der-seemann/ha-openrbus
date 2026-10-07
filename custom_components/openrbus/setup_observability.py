@@ -53,6 +53,7 @@ READ_OPERATION_ORIGINS = frozenset(
         "coordinator_single",
         "control_readback",
         "access_discovery",
+        "startup_discovery",
         "unspecified",
     }
 )

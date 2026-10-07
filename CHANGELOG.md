@@ -32,9 +32,9 @@
 - Project only evidence-supported active zones and expose bounded Thin-RPC
   flow-control reasons in diagnostics.
 - Attribute a bounded read-only recovery attempt to its fixed call category
-  (bridge health, zone discovery, polling, or the explicit read service), so
-  diagnostics can distinguish integration-owned work without retaining object
-  addresses, arguments, values, or caller identities.
+  (startup discovery, bridge health, zone discovery, polling, or the explicit
+  read service), so diagnostics can distinguish integration-owned work without
+  retaining object addresses, arguments, values, or caller identities.
 
 ### Compatibility and limits
 

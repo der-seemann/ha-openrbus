@@ -2399,7 +2399,8 @@ class ThinRpcBackend:
                 # loses its Thin-GATT response, then repeat discovery once.
                 # Protocol/abort errors are not retried or reinterpreted.
                 try:
-                    await self._recover_after_transport_loss()
+                    with read_operation_origin("startup_discovery"):
+                        await self._recover_after_transport_loss()
                 except asyncio.CancelledError:
                     raise
                 except Exception as recovery_error:  # noqa: BLE001
@@ -2456,7 +2457,8 @@ class ThinRpcBackend:
                     else:
                         capability_recovery_attempted = True
                         try:
-                            await self._recover_after_transport_loss()
+                            with read_operation_origin("startup_discovery"):
+                                await self._recover_after_transport_loss()
                         except asyncio.CancelledError:
                             raise
                         except Exception as recovery_error:  # noqa: BLE001 - keep discovery fail-safe

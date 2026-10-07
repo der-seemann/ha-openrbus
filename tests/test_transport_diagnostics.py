@@ -546,6 +546,11 @@ def test_recovery_fence_metrics_are_bounded_and_privacy_safe() -> None:
 
     metrics.begin_attempt(17, "bridge_health")
     assert metrics.diagnostics()["disconnect_attempt"]["origin"] == "bridge_health"
+    metrics.begin_attempt(18, "startup_discovery")
+    assert (
+        _safe_recovery_fence(metrics.diagnostics())["disconnect_attempt"]["origin"]
+        == "startup_discovery"
+    )
     assert (
         _safe_recovery_fence(
             {
