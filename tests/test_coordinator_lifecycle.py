@@ -41,12 +41,21 @@ from custom_components.openrbus.coordinator import (
     OpenRBusPollingCoordinator,
     _invalid_value_retirement_period,
     _should_poll_registry_entries,
-    _zone_selection_changed,
     schedule_background_task,
     schedule_first_refresh_in_background,
 )
+from custom_components.openrbus.identity import stable_object_id
 from custom_components.openrbus.transport import ThinRpcCapability, select_backend_mode
-from custom_components.openrbus.zones import ZoneProfile, ZoneReadState
+from custom_components.openrbus.zone_projection_storage import (
+    async_load_zone_projection,
+)
+from custom_components.openrbus.zones import (
+    ZoneProfile,
+    ZoneReadState,
+    zone_is_active,
+    zone_projection_exists,
+    zone_read_state,
+)
 
 
 def _entry(backend: str) -> SimpleNamespace:
@@ -373,6 +382,9 @@ async def test_entry_setup_keeps_coordinator_until_retry_then_forwards_once(
     monkeypatch.setattr(
         integration, "async_load_access_profile", AsyncMock(return_value={})
     )
+    monkeypatch.setattr(
+        integration, "async_load_zone_projection", AsyncMock(return_value={})
+    )
     monkeypatch.setattr(integration, "async_save_access_profile", AsyncMock())
     monkeypatch.setattr(
         integration,
@@ -485,6 +497,9 @@ async def test_real_config_entry_retry_unload_reload_and_poll_io(
     monkeypatch.setattr(integration, "_thin_runtime", lambda *_args: (None, None))
     monkeypatch.setattr(
         integration, "async_load_access_profile", AsyncMock(return_value={})
+    )
+    monkeypatch.setattr(
+        integration, "async_load_zone_projection", AsyncMock(return_value={})
     )
     monkeypatch.setattr(integration, "async_save_access_profile", AsyncMock())
     monkeypatch.setattr(
@@ -904,6 +919,9 @@ async def test_setup_retains_runtime_owner_when_bounded_shutdown_is_unproven(
     monkeypatch.setattr(
         integration, "async_load_access_profile", AsyncMock(return_value={})
     )
+    monkeypatch.setattr(
+        integration, "async_load_zone_projection", AsyncMock(return_value={})
+    )
     monkeypatch.setattr(integration, "async_save_access_profile", AsyncMock())
     cleanup_cancelled = asyncio.Event()
     created = []
@@ -998,40 +1016,8 @@ def test_invalid_value_retirement_option_is_interpreted_as_minutes() -> None:
     )
 
 
-def test_deferred_zone_discovery_only_reloads_when_slot_eligibility_changes() -> None:
-    active = ZoneProfile(4, 1, 2)
-    inactive = ZoneProfile(4, 1, 0)
-    same_selection_new_label = ZoneProfile(4, 1, 2, friendly_name="Wohnzimmer")
-
-    assert _zone_selection_changed({}, {(4, 1): active})
-    assert _zone_selection_changed({(4, 1): active}, {(4, 1): inactive})
-    assert _zone_selection_changed({}, {(4, 1): inactive})
-    assert not _zone_selection_changed({(4, 1): inactive}, {(4, 1): inactive})
-    assert not _zone_selection_changed(
-        {(4, 1): active}, {(4, 1): same_selection_new_label}
-    )
-    assert not _zone_selection_changed(
-        {(4, 1): active},
-        {},
-        {(4, 1): ZoneReadState.CONFIRMED_ACTIVE},
-        {(4, 1): ZoneReadState.UNKNOWN},
-    )
-    assert _zone_selection_changed(
-        {},
-        {},
-        {(4, 1): ZoneReadState.UNKNOWN},
-        {(4, 1): ZoneReadState.CONFIRMED_DISABLED},
-    )
-    assert _zone_selection_changed(
-        {},
-        {},
-        {(4, 1): ZoneReadState.UNKNOWN},
-        {(4, 1): ZoneReadState.CONFIRMED_ACTIVE},
-    )
-
-
 @pytest.mark.asyncio
-async def test_deferred_zone_discovery_reloads_once_for_new_active_slot(
+async def test_deferred_zone_discovery_reloads_once_for_new_projection_manifest(
     monkeypatch,
 ) -> None:
     reloads: list[str] = []
@@ -1046,6 +1032,7 @@ async def test_deferred_zone_discovery_reloads_once_for_new_active_slot(
 
     async def _discover(self) -> bool:
         self.zone_profiles = {(4, 1): ZoneProfile(4, 1, 2)}
+        self._zone_projection_reload_pending = True
         return False
 
     monkeypatch.setattr(
@@ -1053,6 +1040,7 @@ async def test_deferred_zone_discovery_reloads_once_for_new_active_slot(
     )
     coordinator = SimpleNamespace(
         _shutting_down=False,
+        _zone_projection_reload_pending=False,
         _entry_id="entry",
         zone_profiles={},
         zone_profile_states={},
@@ -1271,6 +1259,7 @@ async def test_unknown_zone_recovers_active_and_reloads_once(monkeypatch) -> Non
     async def _discover(self) -> bool:
         self.zone_profile_states[(4, 1)] = ZoneReadState.CONFIRMED_ACTIVE
         self.zone_profiles[(4, 1)] = ZoneProfile(4, 1, 2)
+        self._zone_projection_reload_pending = True
         return False
 
     monkeypatch.setattr(
@@ -1278,6 +1267,7 @@ async def test_unknown_zone_recovers_active_and_reloads_once(monkeypatch) -> Non
     )
     coordinator = SimpleNamespace(
         _shutting_down=False,
+        _zone_projection_reload_pending=False,
         _entry_id="entry",
         zone_profiles={(4, 1): ZoneProfile(4, 1, 2)},
         zone_profile_states={(4, 1): ZoneReadState.UNKNOWN},
@@ -1336,6 +1326,7 @@ async def test_selector_refresh_confirms_zero_and_reloads_once(monkeypatch) -> N
     async def _discover(self) -> bool:
         self.zone_profiles[(4, 1)] = ZoneProfile(4, 1, 0)
         self.zone_profile_states[(4, 1)] = ZoneReadState.CONFIRMED_DISABLED
+        self._zone_projection_reload_pending = True
         return True
 
     monkeypatch.setattr(
@@ -1343,6 +1334,7 @@ async def test_selector_refresh_confirms_zero_and_reloads_once(monkeypatch) -> N
     )
     coordinator = SimpleNamespace(
         _shutting_down=False,
+        _zone_projection_reload_pending=False,
         _entry_id="entry",
         zone_profiles={(4, 1): ZoneProfile(4, 1, 2)},
         zone_profile_states={(4, 1): ZoneReadState.CONFIRMED_ACTIVE},
@@ -1357,6 +1349,167 @@ async def test_selector_refresh_confirms_zero_and_reloads_once(monkeypatch) -> N
 
     assert reloads == ["entry"]
     assert coordinator.zone_profile_states[(4, 1)] is ZoneReadState.CONFIRMED_DISABLED
+
+
+@pytest.mark.asyncio
+async def test_zone_projection_ledger_stops_reload_after_restart_unknown_then_active(
+    monkeypatch,
+) -> None:
+    saved = []
+
+    async def _save(_hass, _entry_id, _target, history):
+        saved.append({key: dict(slots) for key, slots in history.items()})
+
+    monkeypatch.setattr(coordinator_module, "async_save_zone_projection", _save)
+    monkeypatch.setattr(
+        OpenRBusCoordinator,
+        "_zone_projection_manifest",
+        staticmethod(
+            lambda parent, _runtime, identity, slot: [
+                stable_object_id(parent, identity.node, 0x346A, slot)
+            ]
+        ),
+    )
+    monkeypatch.setattr(coordinator_module, "catalog_for_node", lambda *_a, **_k: ())
+    monkeypatch.setattr(coordinator_module, "zone_function_slots", lambda _rows: (1,))
+    key = ("zone-ledger-restart-test", "aa:bb")
+    coordinator_module._ZONE_DISCOVERY_CURSOR.pop(key, None)
+    identity = SimpleNamespace(node=4, family="Scb-10", model="SCB-10")
+    runtime_node = SimpleNamespace(identity=identity)
+
+    async def _read_active(address, *, node, **_kwargs):
+        if address.index == coordinator_module.ZONE_FUNCTION_INDEX:
+            return SimpleNamespace(value=2)
+        return SimpleNamespace(value="")
+
+    def _coordinator(history, reader):
+        return SimpleNamespace(
+            config_entry=SimpleNamespace(data={"ble_device": "aa:bb"}, options={}),
+            inventories=(runtime_node,),
+            devices=(runtime_node,),
+            zone_profiles={},
+            zone_profile_states={},
+            zone_projection_history=history,
+            _zone_profile_cache_key=key,
+            _entry_id="entry",
+            _zone_confirmed_active_slots=set(),
+            _zone_projection_store_blocked=False,
+            _zone_projection_reload_pending=False,
+            _zone_projection_setup_pending=True,
+            _has_zone_function_slots=False,
+            write_enabled=False,
+            experimental_writes=False,
+            effective_access_levels={},
+            hass=SimpleNamespace(),
+            async_read_object=reader,
+        )
+
+    first = _coordinator({}, _read_active)
+    assert await OpenRBusCoordinator._async_discover_zone_profiles(first)
+    assert first._zone_projection_reload_pending
+    history = first.zone_projection_history
+    assert history["4:scb-10"][1]["uids"] == [stable_object_id(first, 4, 0x346A, 1)]
+    assert len(saved) == 1
+
+    async def _read_unknown(_address, *, node, **_kwargs):
+        raise HomeAssistantError("CP020 unavailable")
+
+    restarted = _coordinator(history, _read_unknown)
+    assert not await OpenRBusCoordinator._async_discover_zone_profiles(restarted)
+    assert not restarted._zone_projection_reload_pending
+    assert restarted.zone_projection_history == history
+    assert not zone_is_active(restarted, 4, 1)
+    assert zone_read_state(restarted, 4, 1) is ZoneReadState.UNKNOWN
+
+    recovered = _coordinator(history, _read_active)
+    assert await OpenRBusCoordinator._async_discover_zone_profiles(recovered)
+    assert not recovered._zone_projection_reload_pending
+    assert len(saved) == 1
+
+    monkeypatch.setattr(
+        OpenRBusCoordinator,
+        "_zone_projection_manifest",
+        staticmethod(
+            lambda parent, _runtime, identity, slot: [
+                stable_object_id(parent, identity.node, 0x346A, slot),
+                stable_object_id(parent, identity.node, 0x346A, slot + 1),
+            ]
+        ),
+    )
+    expanded = _coordinator(history, _read_active)
+    assert await OpenRBusCoordinator._async_discover_zone_profiles(expanded)
+    assert expanded._zone_projection_reload_pending
+    history = expanded.zone_projection_history
+    assert len(saved) == 2
+
+    async def _read_disabled(address, *, node, **_kwargs):
+        assert address.index == coordinator_module.ZONE_FUNCTION_INDEX
+        return SimpleNamespace(value=0)
+
+    disabled = _coordinator(history, _read_disabled)
+    assert await OpenRBusCoordinator._async_discover_zone_profiles(disabled)
+    assert disabled.zone_projection_history == {"4:scb-10": {}}
+    assert disabled._zone_projection_reload_pending
+    assert len(saved) == 3
+    coordinator_module._ZONE_DISCOVERY_CURSOR.pop(key, None)
+
+
+@pytest.mark.asyncio
+async def test_zone_projection_store_failure_blocks_without_reload_loop(
+    monkeypatch,
+) -> None:
+    async def _save(*_args):
+        raise OSError("storage unavailable")
+
+    monkeypatch.setattr(coordinator_module, "async_save_zone_projection", _save)
+    monkeypatch.setattr(
+        OpenRBusCoordinator,
+        "_zone_projection_manifest",
+        staticmethod(
+            lambda parent, _runtime, identity, slot: [
+                stable_object_id(parent, identity.node, 0x346A, slot)
+            ]
+        ),
+    )
+    monkeypatch.setattr(coordinator_module, "catalog_for_node", lambda *_a, **_k: ())
+    monkeypatch.setattr(coordinator_module, "zone_function_slots", lambda _rows: (1,))
+    key = ("zone-ledger-store-failure", "aa:cc")
+    coordinator_module._ZONE_DISCOVERY_CURSOR.pop(key, None)
+    runtime_node = SimpleNamespace(
+        identity=SimpleNamespace(node=4, family="Scb-10", model="SCB-10")
+    )
+
+    async def _read(address, *, node, **_kwargs):
+        return SimpleNamespace(
+            value=2 if address.index == coordinator_module.ZONE_FUNCTION_INDEX else ""
+        )
+
+    coordinator = SimpleNamespace(
+        config_entry=SimpleNamespace(data={"ble_device": "aa:cc"}, options={}),
+        inventories=(runtime_node,),
+        devices=(runtime_node,),
+        zone_profiles={},
+        zone_profile_states={},
+        zone_projection_history={},
+        _zone_profile_cache_key=key,
+        _entry_id="entry",
+        _zone_confirmed_active_slots=set(),
+        _zone_projection_store_blocked=False,
+        _zone_projection_reload_pending=False,
+        _zone_projection_setup_pending=True,
+        write_enabled=False,
+        experimental_writes=False,
+        effective_access_levels={},
+        hass=SimpleNamespace(),
+        async_read_object=_read,
+    )
+
+    assert not await OpenRBusCoordinator._async_discover_zone_profiles(coordinator)
+    assert coordinator._zone_projection_store_blocked
+    assert coordinator.zone_projection_history == {}
+    assert not coordinator._zone_projection_reload_pending
+    assert not zone_is_active(coordinator, 4, 1)
+    coordinator_module._ZONE_DISCOVERY_CURSOR.pop(key, None)
 
 
 @pytest.mark.asyncio
@@ -1972,3 +2125,150 @@ def test_coordinator_persists_language_write_policy_and_poll_groups(
     assert coordinator.poll_intervals["fast"].total_seconds() == 11
     assert coordinator.poll_intervals["standard"].total_seconds() == 22
     assert coordinator.poll_intervals["slow"].total_seconds() == 33
+
+
+@pytest.mark.asyncio
+async def test_real_coordinator_restart_uses_store_and_polls_only_after_fresh_active(
+    tmp_path, monkeypatch
+) -> None:
+    hass = HomeAssistant(str(tmp_path))
+    entry = ConfigEntry(
+        version=1,
+        minor_version=1,
+        domain=integration.DOMAIN,
+        title="zone projection restart test",
+        data=MappingProxyType({CONF_BACKEND: BACKEND_NATIVE, "ble_device": "target"}),
+        options=MappingProxyType({}),
+        source="user",
+        unique_id="zone-projection-restart-test",
+        entry_id="zone-projection-restart-test",
+        discovery_keys=MappingProxyType({}),
+        subentries_data=None,
+        state=ConfigEntryState.SETUP_IN_PROGRESS,
+    )
+    identity = SimpleNamespace(node=4, family="Scb-10", model="SCB-10")
+    key = (entry.entry_id, "TARGET")
+    coordinator_module._ZONE_DISCOVERY_CURSOR.pop(key, None)
+    reloads = []
+    hass.config_entries = SimpleNamespace(async_schedule_reload=reloads.append)
+    registry = SimpleNamespace(entities={}, async_get_entity_id=lambda *_args: None)
+    monkeypatch.setattr(coordinator_module.er, "async_get", lambda _hass: registry)
+    monkeypatch.setattr(coordinator_module, "catalog_for_node", lambda *_a, **_k: ())
+    monkeypatch.setattr(coordinator_module, "zone_function_slots", lambda _rows: (1, 2))
+    monkeypatch.setattr(
+        OpenRBusCoordinator,
+        "_zone_projection_manifest",
+        staticmethod(
+            lambda parent, _runtime, identity, slot: [
+                stable_object_id(parent, identity.node, 0x346A, slot)
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        coordinator_module,
+        "schedule_background_task",
+        lambda _hass, _entry, coroutine, **_kwargs: (coroutine.close(), None)[1],
+    )
+
+    class ZoneBackend:
+        effective_access_level = 1
+
+        def __init__(self):
+            self.effective_access_levels = {4: 1}
+            self.unknown_slots = {2}
+            self.reads = []
+            self.started = False
+
+        async def async_start(self):
+            self.started = True
+
+        async def async_stop(self):
+            self.started = False
+
+        async def async_discover_devices(self):
+            return (identity,)
+
+        async def async_read_object(self, address, *, node=0xFF, **_kwargs):
+            self.reads.append((node, address))
+            if address.index == coordinator_module.ZONE_FUNCTION_INDEX:
+                if address.subindex in self.unknown_slots:
+                    self.unknown_slots.remove(address.subindex)
+                    raise HomeAssistantError("CP020 temporarily unavailable")
+                function = 0 if address.subindex == 1 else 2
+                return GenericRead(node, address, bytes([function]), function)
+            return GenericRead(node, address, b"", "")
+
+        async def async_read_objects(self, addresses, *, node=0xFF, **_kwargs):
+            return tuple(
+                [
+                    await self.async_read_object(address, node=node)
+                    for address in addresses
+                ]
+            )
+
+    backend = ZoneBackend()
+    monkeypatch.setattr(
+        coordinator_module, "NativeBluetoothBackend", lambda *_args, **_kwargs: backend
+    )
+
+    first = OpenRBusCoordinator(hass, entry)
+    first.zone_projection_history = await async_load_zone_projection(
+        hass, entry.entry_id, "target"
+    )
+    second = None
+    try:
+        await first.async_start()
+        first._zone_entities = set()
+        assert first.zone_profile_states[(4, 1)] is ZoneReadState.CONFIRMED_DISABLED
+        assert first.zone_profile_states[(4, 2)] is ZoneReadState.UNKNOWN
+        assert not zone_is_active(first, 4, 2)
+
+        async def _no_wait(_seconds):
+            future = asyncio.get_running_loop().create_future()
+            future.set_result(None)
+            await future
+
+        monkeypatch.setattr(coordinator_module.asyncio, "sleep", _no_wait)
+        await OpenRBusCoordinator._async_retry_zone_discovery(first)
+        assert reloads == [entry.entry_id]
+        assert zone_is_active(first, 4, 2)
+        await first.async_shutdown()
+
+        second = OpenRBusCoordinator(hass, entry)
+        second.zone_projection_history = await async_load_zone_projection(
+            hass, entry.entry_id, "TARGET"
+        )
+        backend.unknown_slots = {2}
+        await second.async_start()
+        second._zone_entities = set()
+        zone_uid = stable_object_id(first, 4, 0x346A, 2)
+        assert zone_projection_exists(second, 4, 2, identity, zone_uid)
+        assert second.zone_profile_states[(4, 2)] is ZoneReadState.UNKNOWN
+        assert not zone_is_active(second, 4, 2)
+
+        address = ObjectAddress(0x346A, 0x02)
+        row = SimpleNamespace(address=address)
+        poller = OpenRBusPollingCoordinator(
+            hass,
+            second,
+            "fast",
+            ((4, address),),
+            timedelta(seconds=30),
+            register_metadata={(4, address): row},
+        )
+        await poller._async_poll_data()
+        assert all(read != address for _, read in backend.reads)
+
+        await OpenRBusCoordinator._async_retry_zone_discovery(second)
+        assert reloads == [entry.entry_id]
+        assert zone_is_active(second, 4, 2)
+        await poller._async_poll_data()
+        assert backend.reads[-1] == (4, address)
+        assert poller._diagnostic_success_items == 1
+        await second.async_shutdown()
+    finally:
+        coordinator_module._ZONE_DISCOVERY_CURSOR.pop(key, None)
+        if not first._shutdown_complete:
+            await first.async_shutdown()
+        if second is not None and not second._shutdown_complete:
+            await second.async_shutdown()

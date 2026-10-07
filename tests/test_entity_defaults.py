@@ -370,7 +370,7 @@ def test_existing_inferred_rw_rows_reconcile_defaults_and_preserve_user_choices(
 async def test_user_enabled_zone_row_survives_retained_profile_read_failure(
     monkeypatch,
 ) -> None:
-    identity = SimpleNamespace(node=5)
+    identity = SimpleNamespace(node=5, family="SCB-10")
     runtime_node = SimpleNamespace(identity=identity, capabilities={})
     row = _register("3410:01", levels=("User",))
     enabled = SimpleNamespace(
@@ -580,7 +580,9 @@ def test_poll_selection_counts_report_aggregate_filter_reason(monkeypatch) -> No
     normal = _register("3500:02", levels=("User",))
     identity = SimpleNamespace(node=5)
     parent = SimpleNamespace(
-        config_entry=SimpleNamespace(data={}, options={}),
+        config_entry=SimpleNamespace(
+            data={"ble_device": "00:11:22:33:44:55"}, options={}
+        ),
         inventories=(SimpleNamespace(identity=identity),),
         devices=(),
         language="en",
@@ -635,7 +637,9 @@ def test_shared_row_projection_gates_zone_activity_before_platforms_and_picker(
         effective_access_levels={5: 1},
         configured_access_level=1,
         configured_read_access_level=1,
-        config_entry=SimpleNamespace(data={}, options={}),
+        config_entry=SimpleNamespace(
+            data={"ble_device": "00:11:22:33:44:55"}, options={}
+        ),
         zone_profiles={
             (5, 1): ZoneProfile(5, 1, 2),
             (5, 2): ZoneProfile(5, 2, 0),
@@ -658,6 +662,19 @@ def test_shared_row_projection_gates_zone_activity_before_platforms_and_picker(
         rows[5].address,
         rows[6].address,
     ]
+
+    disabled_uid = stable_object_id(parent, 5, 0x3410, 3)
+    parent.zone_projection_history = {
+        "5:scb-10": {
+            3: {"uids": [disabled_uid], "family": "scb-10", "node": 5, "slot": 3}
+        }
+    }
+    parent.zone_profile_states[(5, 3)] = ZoneReadState.CONFIRMED_DISABLED
+    parent._zone_projection_store_blocked = True
+    projected_after_fresh_zero = [
+        row[1].address for row in register_entities.rows_for_parent(parent)
+    ]
+    assert rows[2].address not in projected_after_fresh_zero
 
 
 def test_inactive_zone_registry_cleanup_is_exact_and_entry_scoped(monkeypatch) -> None:

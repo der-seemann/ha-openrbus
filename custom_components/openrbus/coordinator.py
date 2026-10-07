@@ -72,6 +72,7 @@ from .transport import (
     safe_batch_exception_type,
 )
 from .validity import RegisterValidityTracker
+from .zone_projection_storage import async_save_zone_projection, node_family_key
 from .zones import (
     ZONE_FRIENDLY_NAME_INDEX,
     ZONE_FUNCTION_INDEX,
@@ -95,7 +96,6 @@ _ZONE_DISCOVERY_MAX_RETRIES = 3
 _INITIAL_SETUP_TOTAL_BUDGET = 300.0
 _INITIAL_SETUP_CLEANUP_BUDGET = 8.0
 _INITIAL_SETUP_WAIT_SLICE = 15.0
-_ZONE_PROFILE_CACHE: dict[tuple[str, str], dict[tuple[int, int], ZoneProfile]] = {}
 _ZONE_DISCOVERY_CURSOR: dict[tuple[str, str], int] = {}
 _ZONE_PROFILE_REFRESH_INTERVAL = 300
 _REGISTRY = Registry.load_default()
@@ -123,59 +123,6 @@ def _invalid_value_retirement_period(value: object) -> timedelta:
     except (TypeError, ValueError):
         minutes = DEFAULT_INVALID_VALUE_DISABLE_AFTER
     return timedelta(minutes=max(1, minutes))
-
-
-def _zone_selection_changed(
-    previous: dict[tuple[int, int], ZoneProfile],
-    current: dict[tuple[int, int], ZoneProfile],
-    previous_states: dict[tuple[int, int], ZoneReadState] | None = None,
-    current_states: dict[tuple[int, int], ZoneReadState] | None = None,
-) -> bool:
-    """Whether confirmed CP020 evidence changes child eligibility.
-
-    An unknown read is neither active nor inactive evidence. It must never
-    schedule an entry reload by itself; only a transition between confirmed
-    states can cause the entity projection to be rebuilt.
-    """
-
-    previous_states = previous_states or {}
-    current_states = current_states or {}
-    keys = (
-        previous.keys()
-        | current.keys()
-        | previous_states.keys()
-        | current_states.keys()
-    )
-    for key in keys:
-        old_state = previous_states.get(key)
-        if old_state is None:
-            old_profile = previous.get(key)
-            if old_profile is not None:
-                old_state = (
-                    ZoneReadState.CONFIRMED_DISABLED
-                    if old_profile.function == 0
-                    else ZoneReadState.CONFIRMED_ACTIVE
-                    if old_profile.active
-                    else ZoneReadState.UNKNOWN
-                )
-            else:
-                old_state = ZoneReadState.UNKNOWN
-        new_state = current_states.get(key)
-        if new_state is None:
-            new_profile = current.get(key)
-            if new_profile is not None:
-                new_state = (
-                    ZoneReadState.CONFIRMED_DISABLED
-                    if new_profile.function == 0
-                    else ZoneReadState.CONFIRMED_ACTIVE
-                    if new_profile.active
-                    else ZoneReadState.UNKNOWN
-                )
-            else:
-                new_state = ZoneReadState.UNKNOWN
-        if new_state is not ZoneReadState.UNKNOWN and old_state is not new_state:
-            return True
-    return False
 
 
 def schedule_background_task(
@@ -407,6 +354,10 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         # coordinator reload; the new instance must positively reread selectors.
         self.zone_profiles: dict[tuple[int, int], ZoneProfile] = {}
         self.zone_profile_states: dict[tuple[int, int], ZoneReadState] = {}
+        self.zone_projection_history: dict[str, dict[int, dict[str, Any]]] = {}
+        self._zone_projection_store_blocked = False
+        self._zone_projection_reload_pending = False
+        self._zone_projection_setup_pending = False
         self._zone_confirmed_active_slots: set[tuple[int, int]] = set()
         self._zone_entities: set[Any] = set()
         self._zone_discovery_task: asyncio.Task[None] | None = None
@@ -525,7 +476,12 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             self.inventories = tuple(
                 self._inventory_for(identity) for identity in self.devices
             )
-            if not await self._async_discover_zone_profiles():
+            complete = await self._async_discover_zone_profiles()
+            # The first platform setup consumes this exact projection. Later
+            # confirmed projection changes need at most one reconciliation.
+            self._zone_projection_setup_pending = True
+            self._zone_projection_reload_pending = False
+            if not complete:
                 self._zone_discovery_task = schedule_background_task(
                     self.hass,
                     self.config_entry,
@@ -718,6 +674,18 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         """
 
         profiles = dict(getattr(self, "zone_profiles", {}) or {})
+        if not isinstance(getattr(self, "zone_projection_history", None), dict):
+            self.zone_projection_history = {}
+        previous_history = {
+            key: {slot: dict(record) for slot, record in slots.items()}
+            for key, slots in getattr(self, "zone_projection_history", {}).items()
+        }
+        projection_membership_before = {
+            (key, slot, tuple(record.get("uids", ())))
+            for key, slots in previous_history.items()
+            for slot, record in slots.items()
+            if record.get("uids")
+        }
         active_slots = getattr(self, "_zone_confirmed_active_slots", None)
         if not isinstance(active_slots, set):
             active_slots = set()
@@ -744,7 +712,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
 
         if not candidates:
             self._has_zone_function_slots = False
-            self.zone_profiles = {}
+            self.zone_profiles = profiles
             self.zone_profile_states = {}
             active_slots.clear()
             return True
@@ -791,6 +759,13 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                     ),
                 )
                 profiles[(node, slot)] = profile
+                family = OpenRBusCoordinator._zone_projection_family(identity)
+                if family:
+                    records = self.zone_projection_history.get(
+                        node_family_key(node, family)
+                    )
+                    if records is not None:
+                        records.pop(slot, None)
                 continue
             if not ZoneProfile(node, slot, function_read.value).active:
                 complete = False
@@ -860,12 +835,102 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 short_name,
             )
             profiles[(node, slot)] = profile
+            # The manifest is derived through the same live row projection
+            # the platforms use, so expose this fresh read to that helper
+            # before asking it which exact rows would be materialized.
+            self.zone_profiles = profiles
+            self.zone_profile_states = states
+            family = OpenRBusCoordinator._zone_projection_family(identity)
+            if family:
+                manifest = OpenRBusCoordinator._zone_projection_manifest(
+                    self, _runtime_node, identity, slot
+                )
+                if manifest:
+                    self.zone_projection_history.setdefault(
+                        node_family_key(node, family), {}
+                    )[slot] = {
+                        "slot": slot,
+                        "node": node,
+                        "family": family.casefold(),
+                        "function": function_read.value,
+                        "friendly_name": friendly_name,
+                        "short_name": short_name,
+                        "node_name": node_name,
+                        "uids": manifest,
+                    }
         self.zone_profiles = profiles
         self.zone_profile_states = states
         _ZONE_DISCOVERY_CURSOR[self._zone_profile_cache_key] = (
             cursor + processed
         ) % len(candidates)
+        membership_after = {
+            (key, slot, tuple(record.get("uids", ())))
+            for key, slots in self.zone_projection_history.items()
+            for slot, record in slots.items()
+            if record.get("uids")
+        }
+        self._zone_projection_store_blocked = False
+        if self.zone_projection_history != previous_history:
+            try:
+                await async_save_zone_projection(
+                    self.hass,
+                    self._entry_id,
+                    self._zone_profile_cache_key[1],
+                    self.zone_projection_history,
+                )
+            except Exception:
+                self.zone_projection_history = previous_history
+                self._zone_projection_store_blocked = True
+                _LOGGER.warning(
+                    "Could not persist OpenRBus zone projection history; "
+                    "zone rows remain blocked until storage recovers",
+                    exc_info=True,
+                )
+                return False
+        if membership_after != projection_membership_before and getattr(
+            self, "_zone_projection_setup_pending", False
+        ):
+            self._zone_projection_reload_pending = True
         return complete
+
+    @staticmethod
+    def _zone_projection_family(identity: Any) -> str | None:
+        family = getattr(identity, "family", None)
+        if not isinstance(family, str) or not family.strip():
+            family = getattr(
+                getattr(identity, "registry_resolution", None), "family", None
+            )
+        return family.strip() if isinstance(family, str) and family.strip() else None
+
+    def _zone_projection_manifest(
+        parent: Any, runtime_node: Any, identity: Any, slot: int
+    ) -> list[str]:
+        # Import at call time to avoid the coordinator/entity module cycle.
+        from .register_entities import (
+            bitfield_structure,
+            entity_unique_id,
+            rows_for_parent,
+        )
+
+        manifest: set[str] = set()
+        for row_identity, register, _group, _allowed in rows_for_parent(parent):
+            if (
+                row_identity.node != identity.node
+                or zone_subindex(register, row_identity) != slot
+            ):
+                continue
+            unique_id = entity_unique_id(parent, row_identity, register)
+            manifest.add(unique_id)
+            structure = bitfield_structure(register)
+            if structure is not None and parent.effective_access_levels.get(
+                identity.node
+            ):
+                manifest.update(
+                    f"{unique_id}:bit:{field.name}"
+                    for field in structure.fields
+                    if field.bit_length == 1
+                )
+        return sorted(manifest)
 
     async def _async_retry_zone_discovery(self) -> None:
         """Complete best-effort zone discovery after the entry is available."""
@@ -875,20 +940,13 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 await asyncio.sleep(15)
                 if self._shutting_down:
                     return
-                previous = dict(self.zone_profiles)
-                previous_states = dict(getattr(self, "zone_profile_states", {}) or {})
                 complete = await self._async_discover_zone_profiles()
                 for entity in tuple(self._zone_entities):
                     entity.async_refresh_zone_name()
                 if self._shutting_down:
                     return
-                if _zone_selection_changed(
-                    previous,
-                    self.zone_profiles,
-                    previous_states,
-                    self.zone_profile_states,
-                ):
-                    # Only confirmed CP020 transitions rebuild the projection.
+                if getattr(self, "_zone_projection_reload_pending", False):
+                    self._zone_projection_reload_pending = False
                     self.hass.config_entries.async_schedule_reload(self._entry_id)
                     return
                 if complete:
@@ -931,19 +989,13 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             await asyncio.sleep(_ZONE_PROFILE_REFRESH_INTERVAL)
             if self._shutting_down:
                 return
-            previous = dict(self.zone_profiles)
-            previous_states = dict(getattr(self, "zone_profile_states", {}) or {})
             await self._async_discover_zone_profiles()
             for entity in tuple(self._zone_entities):
                 entity.async_refresh_zone_name()
             if self._shutting_down:
                 return
-            if _zone_selection_changed(
-                previous,
-                self.zone_profiles,
-                previous_states,
-                self.zone_profile_states,
-            ):
+            if getattr(self, "_zone_projection_reload_pending", False):
+                self._zone_projection_reload_pending = False
                 self.hass.config_entries.async_schedule_reload(self._entry_id)
                 return
 

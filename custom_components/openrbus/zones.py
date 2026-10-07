@@ -605,11 +605,71 @@ def zone_function_slots(rows: Any) -> tuple[int, ...]:
     return tuple(range(1, maximum + 1))
 
 
-def profile_for(parent: Any, node: int, subindex: int) -> ZoneProfile | None:
-    """Read a coordinator's discovered profile without coupling to its type."""
+def profile_for(
+    parent: Any, node: int, subindex: int, identity: Any | None = None
+) -> ZoneProfile | None:
+    """Read fresh profile or retained display identity, never activity proof."""
 
     profiles = getattr(parent, "zone_profiles", {}) or {}
-    return profiles.get((node, subindex))
+    profile = profiles.get((node, subindex))
+    if profile is not None:
+        return profile
+    record = zone_projection_record(parent, node, subindex, identity)
+    if record is None:
+        return None
+    try:
+        return ZoneProfile(
+            node,
+            subindex,
+            int(record["function"]),
+            record.get("friendly_name"),
+            record.get("node_name"),
+            record.get("short_name"),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def zone_projection_record(
+    parent: Any, node: int, subindex: int, identity: Any | None = None
+):
+    """Return durable projection identity for a previously planned slot."""
+    history = getattr(parent, "zone_projection_history", {}) or {}
+    wanted_family = None
+    if identity is not None:
+        wanted_family = getattr(identity, "family", None)
+        if not isinstance(wanted_family, str) or not wanted_family.strip():
+            wanted_family = getattr(
+                getattr(identity, "registry_resolution", None), "family", None
+            )
+        if isinstance(wanted_family, str):
+            wanted_family = wanted_family.strip().casefold()
+    for key, slots in history.items():
+        if isinstance(slots, Mapping) and subindex in slots:
+            record = slots[subindex]
+            if (
+                isinstance(record, Mapping)
+                and record.get("node") == node
+                and (wanted_family is None or key == f"{node}:{wanted_family}")
+            ):
+                return record
+    return None
+
+
+def zone_projection_exists(
+    parent: Any,
+    node: int,
+    subindex: int,
+    identity: Any | None = None,
+    unique_id: str | None = None,
+) -> bool:
+    """Whether exact history says this slot had a planned entity projection."""
+    record = zone_projection_record(parent, node, subindex, identity)
+    return bool(
+        record
+        and record.get("uids")
+        and (unique_id is None or unique_id in record.get("uids", ()))
+    )
 
 
 def normalized_overrides(value: object) -> dict[str, bool]:
@@ -653,9 +713,11 @@ def zone_enabled(parent: Any, node: int, subindex: int) -> bool:
 def zone_is_active(parent: Any, node: int, subindex: int) -> bool:
     """Require a successful, recognized, positive CP020 read."""
 
-    profile = profile_for(parent, node, subindex)
+    profiles = getattr(parent, "zone_profiles", {}) or {}
+    profile = profiles.get((node, subindex))
     return (
-        zone_read_state(parent, node, subindex) is ZoneReadState.CONFIRMED_ACTIVE
+        not getattr(parent, "_zone_projection_store_blocked", False)
+        and zone_read_state(parent, node, subindex) is ZoneReadState.CONFIRMED_ACTIVE
         and profile is not None
         and profile.active
     )
@@ -667,7 +729,7 @@ def zone_is_confirmed_disabled(parent: Any, node: int, subindex: int) -> bool:
     states = getattr(parent, "zone_profile_states", None)
     if states is not None:
         return states.get((node, subindex)) == ZoneReadState.CONFIRMED_DISABLED
-    profile = profile_for(parent, node, subindex)
+    profile = (getattr(parent, "zone_profiles", {}) or {}).get((node, subindex))
     return profile is not None and profile.function == 0
 
 
@@ -677,7 +739,7 @@ def zone_read_state(parent: Any, node: int, subindex: int) -> ZoneReadState:
     states = getattr(parent, "zone_profile_states", None)
     if states is not None:
         return states.get((node, subindex), ZoneReadState.UNKNOWN)
-    profile = profile_for(parent, node, subindex)
+    profile = (getattr(parent, "zone_profiles", {}) or {}).get((node, subindex))
     if profile is None:
         return ZoneReadState.UNKNOWN
     if profile.function == 0:
@@ -759,6 +821,8 @@ __all__ = [
     "zone_function_label",
     "zone_is_active",
     "zone_is_confirmed_disabled",
+    "zone_projection_exists",
+    "zone_projection_record",
     "zone_read_state",
     "zone_subindex",
 ]

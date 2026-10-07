@@ -42,6 +42,8 @@ from .zones import (
     zone_device_name,
     zone_enabled,
     zone_is_active,
+    zone_projection_exists,
+    zone_read_state,
     zone_subindex,
 )
 
@@ -431,12 +433,21 @@ class OpenRBusRegisterSensor(
     def device_info(self) -> DeviceInfo:
         slot = zone_subindex(self._register, self._identity)
         profile = (
-            profile_for(self._parent, self._identity.node, slot)
+            profile_for(self._parent, self._identity.node, slot, self._identity)
             if slot is not None
             else None
         )
-        if profile is not None and zone_enabled(
-            self._parent, profile.node, profile.subindex
+        projected_unknown = (
+            profile is not None
+            and zone_projection_exists(
+                self._parent, profile.node, profile.subindex, self._identity
+            )
+            and zone_read_state(self._parent, profile.node, profile.subindex).value
+            == "unknown"
+        )
+        if profile is not None and (
+            zone_enabled(self._parent, profile.node, profile.subindex)
+            or projected_unknown
         ):
             node_identifier = stable_node_id(self._parent, self._identity.node)
             return DeviceInfo(

@@ -52,6 +52,7 @@ from .coordinator import (
     schedule_first_refresh_in_background,
 )
 from .proxy_provisioning import PROXY_SOURCE_VERSION, read_proxy_yaml
+from .zone_projection_storage import async_load_zone_projection
 
 PLATFORMS = ["sensor", "binary_sensor", "number", "select", "switch"]
 _LOGGER = logging.getLogger(__name__)
@@ -330,6 +331,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await async_load_access_profile(hass, configured.get(CONF_BLE_DEVICE))
     )
     await async_save_access_profile(hass, configured)
+    try:
+        zone_projection = await async_load_zone_projection(
+            hass, entry.entry_id, configured.get(CONF_BLE_DEVICE)
+        )
+    except Exception as error:
+        raise ConfigEntryNotReady(
+            "OpenRBus zone projection history is temporarily unavailable"
+        ) from error
     backend = configured.get(CONF_BACKEND)
     profile, key_provider = _thin_runtime(hass, configured)
     if backend not in {BACKEND_NATIVE, BACKEND_THIN_RPC}:
@@ -374,6 +383,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             thin_frame_trace=thin_frame_trace,
         )
         entry.runtime_data = coordinator
+    coordinator.zone_projection_history = zone_projection
     coordinator.ensure_startup_lifecycle(entry)
     startup_retryable = False
 

@@ -61,6 +61,8 @@ from .zones import (
     zone_enabled,
     zone_is_active,
     zone_is_confirmed_disabled,
+    zone_projection_exists,
+    zone_projection_record,
     zone_read_state,
     zone_subindex,
 )
@@ -337,13 +339,29 @@ def rows_for_parent(
                 # Exact source-known zone data without a proven slot dimension
                 # must not become a duplicate parent entity.
                 continue
-            if association is ZoneAssociation.ZONE_SLOT and not zone_is_active(
-                parent, identity.node, register.address.subindex
-            ):
+            zone_active = (
+                zone_is_active(parent, identity.node, register.address.subindex)
+                if association is ZoneAssociation.ZONE_SLOT
+                else True
+            )
+            if association is ZoneAssociation.ZONE_SLOT and not zone_active:
+                if (
+                    zone_read_state(parent, identity.node, register.address.subindex)
+                    is not ZoneReadState.UNKNOWN
+                ):
+                    continue
+                projected_uid = entity_unique_id(parent, identity, register)
+                if not zone_projection_exists(
+                    parent,
+                    identity.node,
+                    register.address.subindex,
+                    identity,
+                    projected_uid,
+                ):
+                    continue
                 # Activity must be known and positive before any platform sees
-                # a zone row. CP020 selectors are classified separately and
-                # remain on the parent for disabled slots to be activated.
-                continue
+                # a new zone row. Historical manifest rows are retained only
+                # to preserve identity while current state is unknown.
             if not include_diagnostics and is_diagnostic_register(register):
                 continue
             if not include_screed_drying and is_optional_filter_register(
@@ -632,7 +650,7 @@ def entity_category(
     if slot is not None:
         from .zones import ZoneKind, profile_for
 
-        profile = profile_for(parent, identity.node, slot)
+        profile = profile_for(parent, identity.node, slot, identity)
         if profile is not None and profile.kind is ZoneKind.HEATING:
             return "zone"
         if profile is not None and profile.kind is ZoneKind.DHW:
@@ -856,10 +874,15 @@ def async_apply_entity_overrides(
             # A missing CP020 read is unknown, not proof that a previously
             # enabled zone is inactive. Keep its registry choice until a
             # positive active/inactive profile arrives.
-            if slot is not None and profile_for(parent, identity.node, slot) is None:
+            if (
+                slot is not None
+                and profile_for(parent, identity.node, slot, identity) is None
+            ):
                 continue
             profile = (
-                profile_for(parent, identity.node, slot) if slot is not None else None
+                profile_for(parent, identity.node, slot, identity)
+                if slot is not None
+                else None
             )
             previously_active = (profile is not None and profile.active) or (
                 slot is not None
@@ -1268,26 +1291,32 @@ def cleanup_inactive_zone_entities(
                 override = validated_overrides.get(override_key(identity.node, slot))
                 explicitly_disabled = type(override) is bool and override is False
                 confirmed_disabled = zone_is_confirmed_disabled(parent, node, slot)
-                # On the first coordinator projection, an unknown selector
-                # cannot safely expose its old child rows. Retiring those
-                # exact rows preserves their HA tombstones for restoration if
-                # a later read confirms the same stable slot. A profile that
-                # was previously confirmed active is retained across a
-                # transient read failure so the entities remain unavailable
-                # without registry churn.
-                profile = profile_for(parent, node, slot)
-                initial_unknown = (
-                    not zone_is_active(parent, node, slot)
-                    and not (
-                        (profile is not None and profile.active)
-                        or (node, slot)
-                        in getattr(parent, "_zone_confirmed_active_slots", set())
-                    )
-                    and not confirmed_disabled
+                # Only a persisted exact projection manifest can retain rows
+                # through UNKNOWN. A registry ghost or a cached activity label
+                # is not enough to keep a never-projected slot alive.
+                record = zone_projection_record(parent, node, slot, identity)
+                unique_id = stable_object_id(parent, node, index, slot)
+                manifested = bool(record and unique_id in record.get("uids", ()))
+                session_confirmed = (node, slot) in getattr(
+                    parent, "_zone_confirmed_active_slots", set()
                 )
-                if not (confirmed_disabled or explicitly_disabled or initial_unknown):
+                unknown_without_history = (
+                    zone_read_state(parent, node, slot) is ZoneReadState.UNKNOWN
+                    and not record
+                    and not session_confirmed
+                )
+                if (
+                    confirmed_disabled
+                    or explicitly_disabled
+                    or unknown_without_history
+                    or (
+                        not zone_is_active(parent, node, slot)
+                        and record is not None
+                        and not manifested
+                    )
+                ):
+                    inactive_unique_ids.add(unique_id)
                     continue
-                inactive_unique_ids.add(stable_object_id(parent, node, index, slot))
     removed = 0
     allowed_domains = {"sensor", "binary_sensor", "number", "select", "switch"}
     for entity in tuple(registry.entities.values()):
@@ -1758,7 +1787,11 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
 
         zone_label = entity_zone_label(parent, identity, register)
         slot = zone_subindex(register, identity)
-        profile = profile_for(parent, identity.node, slot) if slot is not None else None
+        profile = (
+            profile_for(parent, identity.node, slot, identity)
+            if slot is not None
+            else None
+        )
         if profile is not None and zone_enabled(parent, identity.node, slot):
             # The active zone is the entity's HA device, so HA already adds
             # its localized circuit label to the visible full entity name.
@@ -1809,12 +1842,21 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
     def device_info(self) -> DeviceInfo:
         slot = zone_subindex(self._register, self._identity)
         profile = (
-            profile_for(self._parent, self._identity.node, slot)
+            profile_for(self._parent, self._identity.node, slot, self._identity)
             if slot is not None
             else None
         )
-        if profile is not None and zone_enabled(
-            self._parent, profile.node, profile.subindex
+        projected_unknown = (
+            profile is not None
+            and zone_projection_exists(
+                self._parent, profile.node, profile.subindex, self._identity
+            )
+            and zone_read_state(self._parent, profile.node, profile.subindex)
+            is ZoneReadState.UNKNOWN
+        )
+        if profile is not None and (
+            zone_enabled(self._parent, profile.node, profile.subindex)
+            or projected_unknown
         ):
             node_identifier = stable_node_id(self._parent, self._identity.node)
             return DeviceInfo(
