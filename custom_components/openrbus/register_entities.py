@@ -45,17 +45,17 @@ from .entity_names import register_display_name, suggested_object_id
 from .identity import stable_gateway_id, stable_node_id, stable_object_id
 from .optional_register_filters import OPTIONAL_REGISTER_FILTERS
 from .zones import (
+    ZONE_FAMILY_SLOT_OBJECTS,
+    ZONE_SLOT_OBJECT_SOURCES,
     ZoneAssociation,
     ZoneKind,
     entity_zone_label,
     profile_for,
+    zone_association,
     zone_device_name,
     zone_enabled,
-    zone_association,
     zone_is_active,
     zone_subindex,
-    ZONE_SLOT_OBJECT_SOURCES,
-    ZONE_FAMILY_SLOT_OBJECTS,
 )
 
 CATALOG_REGISTRY = Registry.load_default()
@@ -1631,7 +1631,7 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
         """Make zone-scoped register names distinguishable in HA's entity list."""
 
         zone_label = entity_zone_label(parent, identity, register)
-        slot = zone_subindex(register, self._identity)
+        slot = zone_subindex(register, identity)
         profile = profile_for(parent, identity.node, slot) if slot is not None else None
         if profile is not None and zone_enabled(parent, identity.node, slot):
             # The active zone is the entity's HA device, so HA already adds
@@ -1815,8 +1815,8 @@ __all__ = [
     "OpenRBusRegisterEntity",
     "access_level",
     "catalog_visible",
-    "cleanup_legacy_sensor_entities",
     "cleanup_inactive_zone_entities",
+    "cleanup_legacy_sensor_entities",
     "control_kind",
     "definition_for",
     "ensure_polling_coordinators",

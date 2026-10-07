@@ -851,6 +851,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             if _zone_selection_changed(previous, self.zone_profiles):
                 self.hass.config_entries.async_schedule_reload(self._entry_id)
                 return
+
     @staticmethod
     def _inventory_for(identity: DeviceIdentity) -> DeviceInventory:
         """Project Core discovery evidence into its inventory/catalog model."""

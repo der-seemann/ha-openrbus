@@ -531,7 +531,9 @@ async def test_selector_refresh_discards_stale_active_profile_on_read_failure(
 
 
 @pytest.mark.asyncio
-async def test_selector_refresh_reloads_when_active_slot_becomes_unread(monkeypatch) -> None:
+async def test_selector_refresh_reloads_when_active_slot_becomes_unread(
+    monkeypatch,
+) -> None:
     key = ("zone-selector-monitor-test", "AA:DD")
     coordinator_module._ZONE_DISCOVERY_CURSOR.pop(key, None)
     reloads: list[str] = []

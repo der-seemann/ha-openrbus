@@ -359,8 +359,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # registry-only projection migration; it performs no transport reads or
     # writes and is safe to repeat on every reload.
     from .register_entities import (
-        cleanup_legacy_sensor_entities,
         cleanup_inactive_zone_entities,
+        cleanup_legacy_sensor_entities,
         migrate_stable_registry_ids,
     )
 

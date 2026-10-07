@@ -14,11 +14,11 @@ from custom_components.openrbus.zones import (
     entity_zone_label,
     normalized_overrides,
     override_key,
+    zone_association,
     zone_device_name,
     zone_enabled,
     zone_function_label,
     zone_function_slots,
-    zone_association,
     zone_subindex,
 )
 
@@ -84,13 +84,15 @@ def test_exact_catalog_map_has_parent_selectors_and_unresolved_exclusions() -> N
     assert zone_association(_row(0x340C, 2)) is ZoneAssociation.UNRESOLVED
     assert zone_association(_row(0x346A, 2)) is ZoneAssociation.ZONE_SLOT
     assert zone_association(_row(0x340D, 2)) is ZoneAssociation.UNRESOLVED
-    assert zone_association(
-        _row(0x3406, 2), SimpleNamespace(family="Ehc-16")
-    ) is ZoneAssociation.ZONE_SLOT
+    assert (
+        zone_association(_row(0x3406, 2), SimpleNamespace(family="Ehc-16"))
+        is ZoneAssociation.ZONE_SLOT
+    )
     assert zone_association(_row(0x3406, 2)) is ZoneAssociation.UNRESOLVED
-    assert zone_association(
-        _row(0x3406, 2), SimpleNamespace(family="unknown")
-    ) is ZoneAssociation.UNRESOLVED
+    assert (
+        zone_association(_row(0x3406, 2), SimpleNamespace(family="unknown"))
+        is ZoneAssociation.UNRESOLVED
+    )
     assert zone_association(_row(0x540E, 2)) is ZoneAssociation.PARENT
     assert zone_association(_row(0x5422, 2)) is ZoneAssociation.PARENT
     assert zone_association(_row(0x5423, 2)) is ZoneAssociation.PARENT
