@@ -701,6 +701,201 @@ async def test_real_config_entry_retry_unload_reload_and_poll_io(
 
 
 @pytest.mark.asyncio
+async def test_real_coordinator_survives_home_assistant_not_ready_unload_callbacks(
+    tmp_path, monkeypatch
+) -> None:
+    """HA's failed-setup callback stack must preserve staged startup work."""
+    monkeypatch.setattr(coordinator_module, "_INITIAL_SETUP_WAIT_SLICE", 0.01)
+    hass = HomeAssistant(str(tmp_path))
+    backend = _Backend()
+    monkeypatch.setattr(
+        coordinator_module, "NativeBluetoothBackend", lambda *_args, **_kwargs: backend
+    )
+    entry = ConfigEntry(
+        version=1,
+        minor_version=1,
+        domain=integration.DOMAIN,
+        title="staged coordinator callback test",
+        data=MappingProxyType({CONF_BACKEND: BACKEND_NATIVE, "ble_device": "target"}),
+        options=MappingProxyType({}),
+        source="user",
+        unique_id="staged-coordinator-callback-test",
+        entry_id="staged-coordinator-callback-test",
+        discovery_keys=MappingProxyType({}),
+        subentries_data=None,
+        state=ConfigEntryState.SETUP_IN_PROGRESS,
+    )
+    coordinator = OpenRBusCoordinator(hass, entry)
+    entry.runtime_data = coordinator
+    coordinator.ensure_startup_lifecycle(entry)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_start() -> None:
+        started.set()
+        await release.wait()
+        await backend.async_start()
+        await backend.async_discover_devices()
+
+    coordinator.async_start = delayed_start
+    startup_retryable = False
+
+    async def cleanup_failed_setup() -> None:
+        if startup_retryable:
+            return
+        await coordinator.async_shutdown()
+        if getattr(entry, "runtime_data", None) is coordinator:
+            delattr(entry, "runtime_data")
+
+    # This is the same callback order as async_setup_entry: the coordinator is
+    # created first, and retry cleanup is registered after its construction.
+    entry.async_on_unload(cleanup_failed_setup)
+    try:
+        with pytest.raises(ConfigEntryNotReady):
+            await coordinator.async_wait_for_initial_startup()
+        await started.wait()
+        pending = coordinator._startup_task
+
+        with pytest.raises(ConfigEntryNotReady):
+            await coordinator.async_wait_for_initial_startup()
+        assert coordinator._startup_task is pending
+
+        startup_retryable = True
+        entry._async_set_state(hass, ConfigEntryState.SETUP_RETRY, "still starting")
+        # Home Assistant calls this for every unsuccessful setup attempt,
+        # including ConfigEntryNotReady, and processes callbacks LIFO.
+        await entry._async_process_on_unload(hass)
+
+        assert coordinator.config_entry is entry
+        assert coordinator._startup_task is pending
+        assert not pending.cancelled()
+        assert not coordinator._shutting_down
+        assert not backend.stopped
+
+        release.set()
+        await coordinator.async_wait_for_initial_startup()
+        assert coordinator._startup_task is pending
+        assert backend.started
+        address = ObjectAddress(0x2001, 0x02)
+        result = await coordinator.async_read_object(address, node=1)
+        assert result.value == 1
+        assert backend.reads == [(address, 1)]
+    finally:
+        release.set()
+        await coordinator.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_pending_staged_startup_cleans_backend_when_home_assistant_stops(
+    tmp_path, monkeypatch
+) -> None:
+    """HA background-task cancellation runs the startup backend cleanup."""
+    monkeypatch.setattr(coordinator_module, "_INITIAL_SETUP_WAIT_SLICE", 0.01)
+    hass = HomeAssistant(str(tmp_path))
+    backend = _Backend()
+    monkeypatch.setattr(
+        coordinator_module, "NativeBluetoothBackend", lambda *_args, **_kwargs: backend
+    )
+    entry = ConfigEntry(
+        version=1,
+        minor_version=1,
+        domain=integration.DOMAIN,
+        title="staged coordinator HA stop test",
+        data=MappingProxyType({CONF_BACKEND: BACKEND_NATIVE, "ble_device": "target"}),
+        options=MappingProxyType({}),
+        source="user",
+        unique_id="staged-coordinator-stop-test",
+        entry_id="staged-coordinator-stop-test",
+        discovery_keys=MappingProxyType({}),
+        subentries_data=None,
+        state=ConfigEntryState.SETUP_IN_PROGRESS,
+    )
+    coordinator = OpenRBusCoordinator(hass, entry)
+    coordinator.ensure_startup_lifecycle(entry)
+    started = asyncio.Event()
+    never_ready = asyncio.Event()
+
+    async def delayed_backend_start() -> None:
+        backend.started = True
+        started.set()
+        await never_ready.wait()
+
+    backend.async_start = delayed_backend_start
+    try:
+        with pytest.raises(ConfigEntryNotReady):
+            await coordinator.async_wait_for_initial_startup()
+        await started.wait()
+        pending = coordinator._startup_task
+        assert backend.started
+
+        await hass.async_stop(force=True)
+
+        assert pending.cancelled()
+        assert backend.stopped
+        assert not backend.started
+        assert not coordinator._startup_cleanup_failed
+    finally:
+        never_ready.set()
+        if not coordinator._shutdown_complete:
+            await coordinator.async_shutdown()
+
+
+@pytest.mark.asyncio
+async def test_fatal_setup_error_still_runs_owned_coordinator_cleanup(
+    tmp_path, monkeypatch
+) -> None:
+    """Suppressing HA's implicit callback keeps fatal cleanup explicit."""
+    monkeypatch.setattr(coordinator_module, "_INITIAL_SETUP_WAIT_SLICE", 0.2)
+    hass = HomeAssistant(str(tmp_path))
+    backend = _Backend()
+    monkeypatch.setattr(
+        coordinator_module, "NativeBluetoothBackend", lambda *_args, **_kwargs: backend
+    )
+    entry = ConfigEntry(
+        version=1,
+        minor_version=1,
+        domain=integration.DOMAIN,
+        title="fatal staged coordinator test",
+        data=MappingProxyType({CONF_BACKEND: BACKEND_NATIVE, "ble_device": "target"}),
+        options=MappingProxyType({}),
+        source="user",
+        unique_id="fatal-staged-coordinator-test",
+        entry_id="fatal-staged-coordinator-test",
+        discovery_keys=MappingProxyType({}),
+        subentries_data=None,
+        state=ConfigEntryState.SETUP_IN_PROGRESS,
+    )
+    coordinator = OpenRBusCoordinator(hass, entry)
+    entry.runtime_data = coordinator
+    coordinator.ensure_startup_lifecycle(entry)
+
+    async def fatal_start() -> None:
+        raise HomeAssistantError("authentication rejected")
+
+    coordinator.async_start = fatal_start
+    startup_retryable = False
+
+    async def cleanup_failed_setup() -> None:
+        if startup_retryable:
+            return
+        await coordinator.async_shutdown()
+        if getattr(entry, "runtime_data", None) is coordinator:
+            delattr(entry, "runtime_data")
+
+    entry.async_on_unload(cleanup_failed_setup)
+    with pytest.raises(HomeAssistantError, match="authentication rejected"):
+        await coordinator.async_wait_for_initial_startup()
+
+    entry._async_set_state(hass, ConfigEntryState.SETUP_ERROR, "authentication")
+    await entry._async_process_on_unload(hass)
+
+    assert not hasattr(entry, "runtime_data")
+    assert coordinator._shutdown_complete
+    assert backend.stopped
+    assert not backend.started
+
+
+@pytest.mark.asyncio
 async def test_setup_retains_runtime_owner_when_bounded_shutdown_is_unproven(
     monkeypatch,
 ) -> None:

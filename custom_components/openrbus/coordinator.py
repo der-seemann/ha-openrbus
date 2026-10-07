@@ -303,10 +303,18 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         super().__init__(
             hass,
             _LOGGER,
-            config_entry=entry,
+            # HA registers DataUpdateCoordinator.async_shutdown as an unload
+            # callback at construction. Failed setup also runs unload callbacks,
+            # including for ConfigEntryNotReady; that would shut down this
+            # staged coordinator before the next retry can finish discovery.
+            # Keep its lifetime under OpenRBus' retry/unload cleanup below.
+            config_entry=None,
             name=DOMAIN,
             update_interval=DEFAULT_UPDATE_INTERVAL,
         )
+        # Preserve HA's entry identity for config-entry-owned tasks, polling
+        # preferences, first-refresh checks, and the child poll coordinators.
+        self.config_entry = entry
         configured = _configured_entry_data(entry)
         self._zone_profile_cache_key = (
             entry.entry_id,
