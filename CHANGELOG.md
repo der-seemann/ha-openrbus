@@ -4,10 +4,12 @@
 
 ### Changed
 
-- Keep bounded initial discovery attached to retryable Home Assistant setup;
-  replace a stopped coordinator only after cleanup is proven complete. Stop and
-  join register polling before backend teardown, and retain ownership when
-  native or Thin-RPC disconnect cleanup cannot prove the transport is stopped.
+- Preserve in-flight initial discovery across Home Assistant's retryable
+  `ConfigEntryNotReady` setup callbacks. Keep fatal setup and shutdown cleanup
+  explicit; replace a stopped coordinator only after cleanup is proven
+  complete. Stop and join register polling before backend teardown, and retain
+  ownership when native or Thin-RPC disconnect cleanup cannot prove the
+  transport is stopped.
 - Preserve safe user-enabled registry rows across default reconciliation and
   same-session zone-selector uncertainty, subject to access, safety, and
   explicit category/zone choices.
