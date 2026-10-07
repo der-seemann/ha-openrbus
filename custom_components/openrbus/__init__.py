@@ -12,7 +12,7 @@ from typing import Any
 
 import voluptuous as vol
 from annotatedyaml import YAMLException
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
@@ -315,15 +315,46 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Retain only a tiny redacted Thin-RPC frame trace so a failed initial
     # discovery can be correlated with the proxy without retaining payloads.
     thin_frame_trace: list[dict[str, Any]] = []
-    coordinator = OpenRBusCoordinator(
-        hass,
-        entry,
-        thin_key_provider=key_provider,
-        thin_profile=profile,
-        thin_frame_trace=thin_frame_trace,
-    )
-    entry.runtime_data = coordinator
-    await coordinator.async_start()
+    config_snapshot = (dict(entry.data), dict(getattr(entry, "options", {})))
+    coordinator = getattr(entry, "runtime_data", None)
+    if isinstance(coordinator, OpenRBusCoordinator) and (
+        coordinator._startup_config_snapshot != config_snapshot
+    ):
+        # An options change must not reuse a session authorized with stale
+        # credentials or transport settings. Fence the old attempt first.
+        await coordinator.async_shutdown()
+        coordinator.detach_startup_lifecycle()
+        delattr(entry, "runtime_data")
+        coordinator = None
+    if not isinstance(coordinator, OpenRBusCoordinator):
+        coordinator = OpenRBusCoordinator(
+            hass,
+            entry,
+            thin_key_provider=key_provider,
+            thin_profile=profile,
+            thin_frame_trace=thin_frame_trace,
+        )
+        entry.runtime_data = coordinator
+    coordinator.ensure_startup_lifecycle(entry)
+
+    async def cleanup_failed_setup() -> None:
+        # ConfigEntryNotReady is the continuation point: retain its shared
+        # startup task. For fatal errors or external cancellation, tear down
+        # any partial transport before HA finishes processing this attempt.
+        if entry.state in {
+            ConfigEntryState.SETUP_RETRY,
+            ConfigEntryState.UNLOAD_IN_PROGRESS,
+        }:
+            return
+        try:
+            await coordinator.async_shutdown()
+            if getattr(entry, "runtime_data", None) is coordinator:
+                delattr(entry, "runtime_data")
+        finally:
+            coordinator.detach_startup_lifecycle()
+
+    entry.async_on_unload(cleanup_failed_setup)
+    await coordinator.async_wait_for_initial_startup()
     # Migrate registry rows before any platform is forwarded.  This is a
     # registry-only projection migration; it performs no transport reads or
     # writes and is safe to repeat on every reload.
@@ -571,6 +602,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         committed_options = dict(entry.options)
         committed_options.pop(CONF_TRANSPORT_MIGRATION, None)
         hass.config_entries.async_update_entry(entry, options=committed_options)
+    coordinator.detach_startup_lifecycle()
     return True
 
 
@@ -604,6 +636,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             bool(getattr(backend, "_owns_controller", False)),
         )
         hass.data.get(f"{DOMAIN}_polling_coordinators", {}).pop(entry.entry_id, None)
+        coordinator.detach_startup_lifecycle()
     else:
         _LOGGER.warning("UNLOAD_TRACE event=coordinator_shutdown_skipped")
     if not hass.config_entries.async_entries(DOMAIN):
@@ -614,6 +647,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.services.async_remove(DOMAIN, "reactivate_register")
         hass.services.async_remove(DOMAIN, "prepare_proxy_yaml")
     return unloaded
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Stop a staged initial setup when HA removes an entry in retry state."""
+
+    coordinator = getattr(entry, "runtime_data", None)
+    if isinstance(coordinator, OpenRBusCoordinator):
+        await coordinator.async_shutdown()
+        coordinator.detach_startup_lifecycle()
 
 
 async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:

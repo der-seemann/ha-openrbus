@@ -74,6 +74,7 @@ _RESPONSE_WRAPPERS = ("response", "service_data", "data", "service_response")
 # cancels the Core operation.  Object reads retain the configured timeout.
 _THIN_SECURE_TIMEOUT = 20.0
 _THIN_DISCONNECT_TIMEOUT = 5.0
+_STARTUP_CLEANUP_TIMEOUT = 8.0
 _THIN_CAPABILITY_DISCOVERY_BUDGET = 5.0
 _PAIR_ACTION_SUFFIX = "openrbus_pair"
 _DISCONNECT_ACTION_SUFFIX = "openrbus_disconnect"
@@ -868,12 +869,20 @@ class NativeBluetoothBackend:
                 self.client = client
                 self.authentication = authentication
                 self._started = True
-            except Exception:
-                with contextlib.suppress(Exception):
-                    await transport.disconnect()
-                self.transport = None
-                self.client = None
-                self.authentication = None
+            except BaseException as error:
+                try:
+                    async with asyncio.timeout(_STARTUP_CLEANUP_TIMEOUT):
+                        await transport.disconnect()
+                except BaseException as cleanup_error:  # noqa: BLE001 - preserve startup error
+                    error.add_note(
+                        "Native Bluetooth startup disconnect did not complete: "
+                        f"{type(cleanup_error).__name__}"
+                    )
+                    self.transport = transport
+                else:
+                    self.transport = None
+                    self.client = None
+                    self.authentication = None
                 raise
 
     async def _start_transport_once(
@@ -908,12 +917,14 @@ class NativeBluetoothBackend:
 
     async def async_stop(self) -> None:
         async with self._lock:
-            transport, self.transport = self.transport, None
+            transport = self.transport
+            if transport is not None:
+                async with asyncio.timeout(_STARTUP_CLEANUP_TIMEOUT):
+                    await transport.disconnect()
+            self.transport = None
             self.client = None
             self.authentication = None
             self._started = False
-            if transport is not None:
-                await transport.disconnect()
 
     async def async_discover_devices(self) -> tuple[DeviceIdentity, ...]:
         await self.async_start()
@@ -1923,7 +1934,8 @@ class ThinRpcBackend:
                 elapsed = (asyncio.get_running_loop().time() - setup_started) * 1000
                 self.setup_metrics.record_setup_cancellation(elapsed)
                 try:
-                    await self._cleanup_owned_session()
+                    async with asyncio.timeout(_STARTUP_CLEANUP_TIMEOUT):
+                        await self._cleanup_owned_session()
                 except BaseException as cleanup_error:  # noqa: BLE001 - preserve cancellation while reporting cleanup failure
                     error.add_note(
                         "Thin-RPC startup cleanup did not prove physical disconnect: "
@@ -1932,7 +1944,8 @@ class ThinRpcBackend:
                 raise
             except Exception as error:
                 try:
-                    await self._cleanup_owned_session()
+                    async with asyncio.timeout(_STARTUP_CLEANUP_TIMEOUT):
+                        await self._cleanup_owned_session()
                 except BaseException as cleanup_error:  # noqa: BLE001 - preserve cancellation while reporting cleanup failure
                     error.add_note(
                         "Thin-RPC startup cleanup did not prove physical disconnect: "

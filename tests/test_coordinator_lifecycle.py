@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import timedelta
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.config_entries import (
+    ConfigEntries,
+    ConfigEntry,
+    ConfigEntryState,
+)
+from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from openrbus.protocol.canip import ObjectAddress
 
+import custom_components.openrbus as integration
 import custom_components.openrbus.coordinator as coordinator_module
 from custom_components.openrbus import _async_validate_transport_migration
 from custom_components.openrbus.bridge import GenericRead
@@ -53,6 +62,330 @@ def _hass() -> SimpleNamespace:
     return SimpleNamespace(
         services=SimpleNamespace(async_services=lambda: {"esphome": {}})
     )
+
+
+class _StartupHarness:
+    """Small lifecycle surface for testing staged HA startup retries."""
+
+    async_wait_for_initial_startup = OpenRBusCoordinator.async_wait_for_initial_startup
+    _async_run_initial_startup = OpenRBusCoordinator._async_run_initial_startup
+    _consume_startup_exception = OpenRBusCoordinator._consume_startup_exception
+    ensure_startup_lifecycle = OpenRBusCoordinator.ensure_startup_lifecycle
+    async_cancel_initial_startup = OpenRBusCoordinator.async_cancel_initial_startup
+
+    def __init__(self, *, hass, backend, start) -> None:
+        self.hass = hass
+        self._backend = backend
+        self._entry_id = "startup-test"
+        self._startup_task = None
+        self._startup_retryable = False
+        self._startup_cleanup_failed = False
+        self._startup_lifecycle_unsubscribe = None
+        self.async_start = start
+
+
+def _startup_hass() -> SimpleNamespace:
+    def create_background_task(coroutine, _name, eager_start=False):
+        assert not eager_start
+        return asyncio.create_task(coroutine)
+
+    return SimpleNamespace(async_create_background_task=create_background_task)
+
+
+@pytest.mark.asyncio
+async def test_initial_setup_retry_reuses_pending_discovery_task(monkeypatch) -> None:
+    monkeypatch.setattr(coordinator_module, "_INITIAL_SETUP_WAIT_SLICE", 0.01)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def start() -> None:
+        nonlocal calls
+        calls += 1
+        started.set()
+        await release.wait()
+
+    coordinator = _StartupHarness(
+        hass=_startup_hass(), backend=SimpleNamespace(), start=start
+    )
+    with pytest.raises(ConfigEntryNotReady):
+        await coordinator.async_wait_for_initial_startup()
+    await started.wait()
+    pending = coordinator._startup_task
+    with pytest.raises(ConfigEntryNotReady):
+        await coordinator.async_wait_for_initial_startup()
+    assert coordinator._startup_task is pending
+    assert calls == 1
+
+    release.set()
+    await coordinator.async_wait_for_initial_startup()
+    assert coordinator._startup_task is pending
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_entry_state_preserves_setup_retry_and_cancels_on_removal(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(coordinator_module, "_INITIAL_SETUP_WAIT_SLICE", 0.01)
+    started = asyncio.Event()
+    backend = SimpleNamespace(_owns_controller=False, started=False)
+
+    async def stop() -> None:
+        backend._owns_controller = False
+
+    backend.async_stop = stop
+
+    async def start() -> None:
+        backend._owns_controller = True
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await backend.async_stop()
+            raise
+
+    coordinator = _StartupHarness(hass=_startup_hass(), backend=backend, start=start)
+    callbacks = []
+    entry = SimpleNamespace(
+        state=ConfigEntryState.SETUP_IN_PROGRESS,
+        async_on_state_change=lambda callback: (
+            callbacks.append(callback) or (lambda: callbacks.remove(callback))
+        ),
+    )
+    coordinator.ensure_startup_lifecycle(entry)
+
+    with pytest.raises(ConfigEntryNotReady):
+        await coordinator.async_wait_for_initial_startup()
+    await started.wait()
+    task = coordinator._startup_task
+    entry.state = ConfigEntryState.SETUP_RETRY
+    callbacks[0]()
+    assert task.cancelling() == 0
+    assert backend._owns_controller is True
+
+    entry.state = ConfigEntryState.NOT_LOADED
+    callbacks[0]()
+    await coordinator.async_cancel_initial_startup()
+    assert task.cancelled()
+    assert backend._owns_controller is False
+
+
+@pytest.mark.asyncio
+async def test_initial_startup_preserves_authentication_errors(monkeypatch) -> None:
+    monkeypatch.setattr(coordinator_module, "_INITIAL_SETUP_WAIT_SLICE", 0.2)
+
+    async def start() -> None:
+        raise HomeAssistantError("invalid key provider")
+
+    coordinator = _StartupHarness(
+        hass=_startup_hass(), backend=SimpleNamespace(), start=start
+    )
+    with pytest.raises(HomeAssistantError, match="invalid key provider"):
+        await coordinator.async_wait_for_initial_startup()
+
+
+@pytest.mark.asyncio
+async def test_initial_setup_total_deadline_cleans_up_then_becomes_retryable(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(coordinator_module, "_INITIAL_SETUP_TOTAL_BUDGET", 0.01)
+    monkeypatch.setattr(coordinator_module, "_INITIAL_SETUP_WAIT_SLICE", 0.2)
+    backend = SimpleNamespace(_owns_controller=False, started=False)
+
+    async def stop() -> None:
+        backend._owns_controller = False
+
+    backend.async_stop = stop
+
+    async def start() -> None:
+        backend._owns_controller = True
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await backend.async_stop()
+            raise
+
+    coordinator = _StartupHarness(hass=_startup_hass(), backend=backend, start=start)
+    with pytest.raises(ConfigEntryNotReady, match="300 second budget"):
+        await coordinator.async_wait_for_initial_startup()
+
+    assert coordinator._startup_retryable
+    assert backend._owns_controller is False
+
+
+@pytest.mark.asyncio
+async def test_cleanup_failure_keeps_thin_owner_fenced(monkeypatch) -> None:
+    monkeypatch.setattr(coordinator_module, "_INITIAL_SETUP_CLEANUP_BUDGET", 0.01)
+    backend = SimpleNamespace(_owns_controller=True, started=False)
+
+    async def stop() -> None:
+        await asyncio.sleep(1)
+        backend._owns_controller = False
+
+    backend.async_stop = stop
+    coordinator = _StartupHarness(
+        hass=_startup_hass(), backend=backend, start=lambda: asyncio.sleep(0)
+    )
+
+    with pytest.raises(HomeAssistantError, match="cleanup did not prove disconnect"):
+        await coordinator.async_cancel_initial_startup()
+
+    assert coordinator._startup_cleanup_failed
+    assert backend._owns_controller is True
+
+
+@pytest.mark.asyncio
+async def test_entry_setup_keeps_coordinator_until_retry_then_forwards_once(
+    monkeypatch,
+) -> None:
+    created = []
+    forwarded = []
+
+    class _Coordinator:
+        def __init__(self, _hass, entry, **_kwargs) -> None:
+            self._startup_config_snapshot = (
+                dict(entry.data),
+                dict(entry.options),
+            )
+            self.wait_calls = 0
+            self.entry = entry
+            created.append(self)
+
+        def ensure_startup_lifecycle(self, entry) -> None:
+            assert entry is self.entry
+
+        def detach_startup_lifecycle(self) -> None:
+            return
+
+        async def async_wait_for_initial_startup(self) -> None:
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                raise ConfigEntryNotReady("discovery remains active")
+
+    async def forward(_entry, platforms) -> None:
+        forwarded.append(tuple(platforms))
+
+    class _Services:
+        @staticmethod
+        def has_service(_domain, _service) -> bool:
+            return True
+
+    callbacks = []
+    entry = SimpleNamespace(
+        entry_id="staged-startup-entry",
+        data={CONF_BACKEND: BACKEND_NATIVE, "ble_device": "target"},
+        options={},
+        async_on_unload=callbacks.append,
+        add_update_listener=lambda _listener: lambda: None,
+    )
+    hass = SimpleNamespace(
+        services=_Services(),
+        data={},
+        config_entries=SimpleNamespace(async_forward_entry_setups=forward),
+    )
+
+    monkeypatch.setattr(integration, "OpenRBusCoordinator", _Coordinator)
+    monkeypatch.setattr(integration, "_thin_runtime", lambda *_args: (None, None))
+    monkeypatch.setattr(
+        integration, "async_load_access_profile", AsyncMock(return_value={})
+    )
+    monkeypatch.setattr(integration, "async_save_access_profile", AsyncMock())
+    monkeypatch.setattr(
+        integration,
+        "schedule_first_refresh_in_background",
+        lambda *_args, **_kwargs: asyncio.create_task(asyncio.sleep(0)),
+    )
+    monkeypatch.setattr(
+        "custom_components.openrbus.register_entities.migrate_stable_registry_ids",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        "custom_components.openrbus.register_entities.cleanup_legacy_sensor_entities",
+        lambda *_args: None,
+    )
+
+    with pytest.raises(ConfigEntryNotReady, match="discovery remains active"):
+        await integration.async_setup_entry(hass, entry)
+    first_coordinator = entry.runtime_data
+    assert created == [first_coordinator]
+    assert forwarded == []
+
+    assert await integration.async_setup_entry(hass, entry)
+    assert entry.runtime_data is first_coordinator
+    assert first_coordinator.wait_calls == 2
+    assert created == [first_coordinator]
+    assert forwarded == [tuple(integration.PLATFORMS)]
+
+
+@pytest.mark.asyncio
+async def test_home_assistant_config_entry_add_saves_after_not_ready(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(ConfigEntry, "async_migrate", AsyncMock(return_value=True))
+    hass = HomeAssistant(str(tmp_path))
+    saves = []
+    calls = 0
+
+    class _Entries:
+        def __init__(self) -> None:
+            self.data = {}
+
+        def __setitem__(self, key, value) -> None:
+            self.data[key] = value
+
+    class _Component:
+        async def async_setup_entry(self, _hass, _entry) -> bool:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ConfigEntryNotReady("initial discovery still running")
+            return True
+
+    class _Integration:
+        domain = integration.DOMAIN
+        logger = logging.getLogger(integration.DOMAIN)
+
+        async def async_get_component(self):
+            return _Component()
+
+        async def async_get_platform(self, _platform):
+            return object()
+
+    entry = ConfigEntry(
+        version=1,
+        minor_version=1,
+        domain=integration.DOMAIN,
+        title="staged setup",
+        data=MappingProxyType({}),
+        options=MappingProxyType({}),
+        source="user",
+        unique_id="staged-setup-test",
+        entry_id="staged-setup-test",
+        discovery_keys=MappingProxyType({}),
+        subentries_data=None,
+    )
+    entry.supports_unload = True
+    entry.supports_remove_device = True
+    entry._integration_for_domain = _Integration()
+
+    async def setup(_entry_id):
+        async with entry.setup_lock:
+            await entry.async_setup(hass, integration=entry._integration_for_domain)
+
+    manager = object.__new__(ConfigEntries)
+    manager.hass = hass
+    manager._entries = _Entries()
+    manager.async_update_issues = lambda: None
+    manager._async_dispatch = lambda *_args: None
+    manager.async_setup = setup
+    manager._async_schedule_save = lambda: saves.append("saved")
+
+    await ConfigEntries.async_add(manager, entry)
+
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert manager._entries.data[entry.entry_id] is entry
+    assert saves == ["saved"]
 
 
 def test_transport_selection_has_exactly_two_modes() -> None:

@@ -9,9 +9,9 @@ from collections import defaultdict
 from datetime import timedelta
 from typing import Any
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
@@ -88,6 +88,9 @@ _DIAGNOSTIC_ITEM_FAILURE_LIMIT = 16
 _ZONE_DISCOVERY_STARTUP_BUDGET = 20.0
 _ZONE_DISCOVERY_READ_TIMEOUT = 1.5
 _ZONE_DISCOVERY_MAX_RETRIES = 3
+_INITIAL_SETUP_TOTAL_BUDGET = 300.0
+_INITIAL_SETUP_CLEANUP_BUDGET = 8.0
+_INITIAL_SETUP_WAIT_SLICE = 15.0
 _ZONE_PROFILE_CACHE: dict[tuple[str, str], dict[tuple[int, int], ZoneProfile]] = {}
 _ZONE_DISCOVERY_CURSOR: dict[tuple[str, str], int] = {}
 _REGISTRY = Registry.load_default()
@@ -270,6 +273,10 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 "Unsupported OpenRBus transport; choose Local Bluetooth or ESPHome Thin-RPC"
             )
         self._entry_id = entry.entry_id
+        self._startup_config_snapshot = (
+            dict(getattr(entry, "data", {})),
+            dict(getattr(entry, "options", {})),
+        )
         self._instance_id = next(_COORDINATOR_INSTANCE_IDS)
         self._diagnostic_error_counts = dict.fromkeys(_ERROR_CLASSES, 0)
         self._diagnostic_item_failures: list[dict[str, int | str]] = []
@@ -348,6 +355,10 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         )
         self._zone_entities: set[Any] = set()
         self._zone_discovery_task: asyncio.Task[None] | None = None
+        self._startup_task: asyncio.Task[None] | None = None
+        self._startup_retryable = False
+        self._startup_cleanup_failed = False
+        self._startup_lifecycle_unsubscribe = None
         # Set before child polling coordinators shut down.  An in-flight poll
         # may finish its current request, but must not start another batch
         # after the parent has begun releasing the physical controller.
@@ -472,8 +483,10 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             # fence succeeds, so a cleanup failure remains fail-closed.
             if backend_start_invoked:
                 try:
-                    await self._backend.async_stop()
+                    async with asyncio.timeout(_INITIAL_SETUP_CLEANUP_BUDGET):
+                        await self._backend.async_stop()
                 except BaseException as cleanup_error:  # noqa: BLE001 - preserve cancellation while reporting cleanup failure
+                    self._startup_cleanup_failed = True
                     error.add_note(
                         "OpenRBus backend cleanup failed after startup error: "
                         f"{type(cleanup_error).__name__}"
@@ -487,6 +500,154 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                     elapsed = (asyncio.get_running_loop().time() - started) * 1000
                     record_cancel(elapsed)
             raise
+
+    def ensure_startup_lifecycle(self, entry: ConfigEntry) -> None:
+        """Keep one initial discovery attempt alive across HA setup retries."""
+
+        if self._startup_lifecycle_unsubscribe is not None:
+            return
+
+        def state_changed() -> None:
+            # A normal ConfigEntryNotReady transition must retain the same
+            # session/task. Explicit unload, removal, fatal setup errors, and
+            # external cancellation terminate it instead.
+            if entry.state in {
+                ConfigEntryState.NOT_LOADED,
+                ConfigEntryState.UNLOAD_IN_PROGRESS,
+                ConfigEntryState.SETUP_ERROR,
+                ConfigEntryState.FAILED_UNLOAD,
+            }:
+                self._startup_retryable = True
+                task = self._startup_task
+                if task is not None and not task.done():
+                    task.cancel("OpenRBus config entry is no longer setting up")
+
+        self._startup_lifecycle_unsubscribe = entry.async_on_state_change(state_changed)
+
+    def detach_startup_lifecycle(self) -> None:
+        """Remove the state listener when the entry is unloaded or removed."""
+
+        unsubscribe = self._startup_lifecycle_unsubscribe
+        self._startup_lifecycle_unsubscribe = None
+        if unsubscribe is not None:
+            unsubscribe()
+
+    async def async_wait_for_initial_startup(self) -> None:
+        """Wait briefly for one shared, bounded initial transport/discovery task."""
+
+        task = self._startup_task
+        if task is not None and (task.cancelled() or task.cancelling()):
+            # Explicit reload/removal cancels the old attempt. A later setup
+            # may start over only after that task's cleanup has completed.
+            try:
+                async with asyncio.timeout(_INITIAL_SETUP_CLEANUP_BUDGET + 1.0):
+                    await asyncio.gather(task, return_exceptions=True)
+            except TimeoutError as error:
+                raise ConfigEntryNotReady(
+                    "OpenRBus startup cancellation cleanup is still pending"
+                ) from error
+            if self._startup_cleanup_failed or getattr(
+                self._backend, "_owns_controller", False
+            ):
+                try:
+                    async with asyncio.timeout(_INITIAL_SETUP_CLEANUP_BUDGET):
+                        await self._backend.async_stop()
+                except asyncio.CancelledError:
+                    raise
+                except BaseException as error:
+                    self._startup_cleanup_failed = True
+                    raise ConfigEntryNotReady(
+                        "OpenRBus startup cleanup has not proven disconnect"
+                    ) from error
+                self._startup_cleanup_failed = False
+            self._startup_task = None
+            task = None
+        if task is not None and task.done():
+            if self._startup_retryable:
+                # A previous total-budget timeout is retryable only after its
+                # cleanup proved safe. If not, retry that physical fence first.
+                if self._startup_cleanup_failed:
+                    try:
+                        async with asyncio.timeout(_INITIAL_SETUP_CLEANUP_BUDGET):
+                            await self._backend.async_stop()
+                    except asyncio.CancelledError:
+                        raise
+                    except BaseException as error:
+                        self._startup_cleanup_failed = True
+                        raise ConfigEntryNotReady(
+                            "OpenRBus startup cleanup has not proven disconnect"
+                        ) from error
+                    self._startup_cleanup_failed = False
+                self._startup_task = None
+                task = None
+            else:
+                task.result()
+
+        if task is None:
+            self._startup_retryable = False
+            self._startup_cleanup_failed = False
+            task = self.hass.async_create_background_task(
+                self._async_run_initial_startup(),
+                f"OpenRBus initial setup {self._entry_id}",
+                eager_start=False,
+            )
+            self._startup_task = task
+            task.add_done_callback(self._consume_startup_exception)
+
+        done, _pending = await asyncio.wait({task}, timeout=_INITIAL_SETUP_WAIT_SLICE)
+        if not done:
+            raise ConfigEntryNotReady(
+                "OpenRBus is still connecting and discovering devices"
+            )
+        task.result()
+
+    async def _async_run_initial_startup(self) -> None:
+        """Run initial discovery once with a hard total budget."""
+
+        try:
+            async with asyncio.timeout(_INITIAL_SETUP_TOTAL_BUDGET):
+                await self.async_start()
+        except TimeoutError as error:
+            self._startup_retryable = True
+            raise ConfigEntryNotReady(
+                "OpenRBus initial discovery exceeded its 300 second budget"
+            ) from error
+
+    @staticmethod
+    def _consume_startup_exception(task: asyncio.Task[None]) -> None:
+        """Retrieve late startup errors when HA's setup retry is sleeping."""
+
+        if not task.cancelled():
+            task.exception()
+
+    async def async_cancel_initial_startup(self) -> None:
+        """Cancel and join startup before unloading/removing this coordinator."""
+
+        task = self._startup_task
+        if task is not None and not task.done():
+            task.cancel("OpenRBus initial setup is unloading")
+            try:
+                async with asyncio.timeout(_INITIAL_SETUP_CLEANUP_BUDGET + 1.0):
+                    await asyncio.gather(task, return_exceptions=True)
+            except TimeoutError as error:
+                raise HomeAssistantError(
+                    "OpenRBus initial startup did not stop before unload"
+                ) from error
+
+        backend = self._backend
+        if getattr(backend, "started", False) or getattr(
+            backend, "_owns_controller", False
+        ):
+            try:
+                async with asyncio.timeout(_INITIAL_SETUP_CLEANUP_BUDGET):
+                    await backend.async_stop()
+            except asyncio.CancelledError:
+                raise
+            except BaseException as error:
+                self._startup_cleanup_failed = True
+                raise HomeAssistantError(
+                    "OpenRBus backend cleanup did not prove disconnect"
+                ) from error
 
     async def _async_discover_zone_profiles(self) -> bool:
         """Read ZoneFunction plus custom labels for advertised zone slots.
@@ -648,6 +809,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
     async def async_shutdown(self) -> None:
         backend = self._backend
         self._shutting_down = True
+        await self.async_cancel_initial_startup()
         zone_task = self._zone_discovery_task
         if zone_task is not None and not zone_task.done():
             zone_task.cancel()
