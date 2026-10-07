@@ -63,6 +63,7 @@ from custom_components.openrbus.transport import (
     _validate_scan_frame,
     async_scan_thin_rpc_devices,
     detect_thin_rpc_capability,
+    read_operation_origin,
     resolve_thin_rpc_capability,
     select_backend_mode,
     thin_rpc_controller_choices,
@@ -330,7 +331,8 @@ async def test_transport_recovery_waits_and_drains_before_reprepare() -> None:
     backend._drain_stale_frames = drain_stale_frames
     backend._ensure_session_ready = ensure_session_ready
 
-    await backend._recover_after_transport_loss()
+    with read_operation_origin("bridge_health"):
+        await backend._recover_after_transport_loss()
 
     assert events == [
         "disconnect",
@@ -347,6 +349,7 @@ async def test_transport_recovery_waits_and_drains_before_reprepare() -> None:
         "session_epoch": 1,
         "outcome": "service_completed",
         "exception_class": None,
+        "origin": "bridge_health",
     }
     assert fence["link_active"] is False
     assert fence["parent_connected"] is False
@@ -691,6 +694,7 @@ async def test_transport_recovery_records_disconnect_exception_class() -> None:
         "session_epoch": 23,
         "outcome": "service_exception",
         "exception_class": "HomeAssistantError",
+        "origin": "unspecified",
     }
     assert "private detail" not in repr(attempt)
 
@@ -869,7 +873,13 @@ async def test_single_read_capture_tags_frames_and_brackets_proxy_counters() -> 
     assert result.raw_value == b"\x00"
     assert [frame["read_operation_id"] for frame in trace] == [1, 1]
     assert backend._read_operation_trace == [
-        {"operation_id": 1, "kind": "single", "outcome": "success", "epoch": 8}
+        {
+            "operation_id": 1,
+            "kind": "single",
+            "outcome": "success",
+            "origin": "unspecified",
+            "epoch": 8,
+        }
     ]
     capture = backend._last_read_transport_capture
     assert capture["before"]["rpc_requests"] == 4

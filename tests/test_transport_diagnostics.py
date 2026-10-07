@@ -126,9 +126,15 @@ def test_read_transport_diagnostics_retain_only_safe_join_fields() -> None:
                 "kind": "single",
                 "outcome": "success",
                 "epoch": 12,
+                "origin": "bridge_health",
                 "address": "private object",
             },
-            {"operation_id": -1, "address": "private object"},
+            {
+                "operation_id": -1,
+                "origin": "manual_read_service",
+                "address": "private object",
+            },
+            {"operation_id": 8, "kind": "single", "origin": "private origin"},
         ]
     )
     capture = _safe_read_transport_capture(
@@ -176,7 +182,14 @@ def test_read_transport_diagnostics_retain_only_safe_join_fields() -> None:
         }
     )
     assert operations == [
-        {"operation_id": 7, "kind": "single", "outcome": "success", "epoch": 12}
+        {
+            "operation_id": 7,
+            "kind": "single",
+            "outcome": "success",
+            "origin": "bridge_health",
+            "epoch": 12,
+        },
+        {"operation_id": 8, "kind": "single"},
     ]
     assert capture["operation_id"] == 7
     assert capture["before"]["epoch"] == 12
@@ -526,9 +539,27 @@ def test_recovery_fence_metrics_are_bounded_and_privacy_safe() -> None:
             "session_epoch": None,
             "outcome": None,
             "exception_class": None,
+            "origin": "unspecified",
         },
     }
     assert _safe_recovery_fence({**snapshot, "identity": "private"}) == snapshot
+
+    metrics.begin_attempt(17, "bridge_health")
+    assert metrics.diagnostics()["disconnect_attempt"]["origin"] == "bridge_health"
+    assert (
+        _safe_recovery_fence(
+            {
+                "disconnect_attempt": {
+                    "attempt_id": 2,
+                    "session_epoch": 17,
+                    "outcome": "missing_identity",
+                    "origin": "bridge_health",
+                    "address": "private object",
+                }
+            }
+        )["disconnect_attempt"]["origin"]
+        == "bridge_health"
+    )
 
     unsafe = _safe_recovery_fence(
         {
@@ -603,6 +634,7 @@ async def test_entry_diagnostics_add_only_redacted_transport_metrics() -> None:
                         "session_epoch": 17,
                         "outcome": "service_exception",
                         "exception_class": "TimeoutError",
+                        "origin": "private caller string",
                         "exception_message": "private detail",
                     },
                     "private": "must not escape",

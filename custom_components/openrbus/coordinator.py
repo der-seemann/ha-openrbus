@@ -68,6 +68,7 @@ from .transport import (
     _read_error_class,
     _read_error_subtype,
     controller_prefix,
+    read_operation_origin,
     resolve_thin_rpc_capability,
     safe_batch_exception_type,
 )
@@ -434,7 +435,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         )
         try:
             result = await self.async_read_object(
-                ObjectAddress(0x2001, 0x02), node=0xFF
+                ObjectAddress(0x2001, 0x02), node=0xFF, read_origin="bridge_health"
             )
         except Exception as error:
             error_class = _read_error_class(error)
@@ -738,6 +739,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                     node=node,
                     timeout=_ZONE_DISCOVERY_READ_TIMEOUT,
                     recover_on_transport_error=False,
+                    read_origin="zone_profile",
                 )
             except (HomeAssistantError, OpenRBusError, TypeError, ValueError):
                 complete = False
@@ -790,6 +792,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                     node=node,
                     timeout=_ZONE_DISCOVERY_READ_TIMEOUT,
                     recover_on_transport_error=False,
+                    read_origin="zone_profile",
                 )
                 if isinstance(name_read.value, str):
                     friendly_name = name_read.value.strip("\x00").strip() or None
@@ -804,6 +807,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                         node=node,
                         timeout=_ZONE_DISCOVERY_READ_TIMEOUT,
                         recover_on_transport_error=False,
+                        read_origin="zone_profile",
                     )
                     if isinstance(short_name_read.value, str):
                         short_name = short_name_read.value.strip("\x00").strip() or None
@@ -1112,6 +1116,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         node: int = 0xFF,
         timeout: float | None = None,
         recover_on_transport_error: bool = True,
+        read_origin: str = "coordinator_single",
     ) -> GenericRead:
         read = self._backend.async_read_object
         options: dict[str, Any] = {}
@@ -1119,6 +1124,9 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             options["timeout"] = timeout
         if not recover_on_transport_error and self.backend_mode == BACKEND_THIN_RPC:
             options["recover_on_transport_error"] = False
+        if self.backend_mode == BACKEND_THIN_RPC:
+            with read_operation_origin(read_origin):
+                return await read(address, node=node, **options)
         return await read(address, node=node, **options)
 
     async def async_read_object_with_transport_capture(
@@ -1129,7 +1137,8 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         )
         if not callable(capture):
             raise HomeAssistantError("Transport capture requires Thin-RPC")
-        return await capture(address, node=node)
+        with read_operation_origin("manual_read_service"):
+            return await capture(address, node=node)
 
     async def read_raw(
         self, node: int, address: ObjectAddress, *, timeout=None
@@ -1142,11 +1151,15 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         *,
         node: int = 0xFF,
         trace_failure: bool = False,
+        read_origin: str = "poll_batch",
     ) -> tuple[GenericRead | HomeAssistantError, ...]:
-        if trace_failure and isinstance(self._backend, ThinRpcBackend):
-            return await self._backend.async_read_objects(
-                addresses, node=node, trace_failure=True
-            )
+        if self.backend_mode == BACKEND_THIN_RPC:
+            with read_operation_origin(read_origin):
+                if trace_failure:
+                    return await self._backend.async_read_objects(
+                        addresses, node=node, trace_failure=True
+                    )
+                return await self._backend.async_read_objects(addresses, node=node)
         return await self._backend.async_read_objects(addresses, node=node)
 
     async def async_write_object(

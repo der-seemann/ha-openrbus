@@ -6,6 +6,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import contextvars
 import json
 import logging
 from collections import deque
@@ -59,9 +60,30 @@ from openrbus.value_codec import decode_value
 from .bridge import GenericRead
 from .const import BACKEND_NATIVE, BACKEND_THIN_RPC
 from .proxy_provisioning import check_proxy_compatibility
-from .setup_observability import RecoveryFenceMetrics, SetupResponseMetrics
+from .setup_observability import (
+    READ_OPERATION_ORIGINS,
+    RecoveryFenceMetrics,
+    SetupResponseMetrics,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def read_operation_origin(origin: str):
+    """Attach one fixed, payload-free caller category to backend diagnostics."""
+
+    selected = (
+        origin
+        if isinstance(origin, str) and origin in READ_OPERATION_ORIGINS
+        else "unspecified"
+    )
+    token = _READ_OPERATION_ORIGIN.set(selected)
+    try:
+        yield
+    finally:
+        _READ_OPERATION_ORIGIN.reset(token)
+
 
 _DEFAULT_REQUEST_SERVICE = "openrbus_gatt_rpc_request"
 _DEFAULT_POLL_SERVICE = "openrbus_gatt_rpc_poll"
@@ -81,6 +103,9 @@ _DISCONNECT_ACTION_SUFFIX = "openrbus_disconnect"
 MAX_FRAME_TRACE_ENTRIES = 128
 MAX_FRAME_TRACE_BYTES = 24 * 1024
 MAX_READ_OPERATION_TRACE_ENTRIES = 32
+_READ_OPERATION_ORIGIN: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "openrbus_read_operation_origin", default="unspecified"
+)
 _TRACE_KINDS = frozenset({"request", "response", "event"})
 _TRACE_OPS = frozenset(
     {
@@ -669,11 +694,12 @@ async def _read_thin_access_level(backend: Any, node: int) -> int | None:
     address = ObjectAddress(0x4002, 0x00)
     for attempt in range(2):
         try:
-            result = await backend.async_read_object(
-                address,
-                node=node,
-                timeout=min(backend.timeout, 3.0),
-            )
+            with read_operation_origin("access_discovery"):
+                result = await backend.async_read_object(
+                    address,
+                    node=node,
+                    timeout=min(backend.timeout, 3.0),
+                )
         except asyncio.CancelledError:
             raise
         except TransportError as error:
@@ -2657,6 +2683,7 @@ class ThinRpcBackend:
             "outcome": outcome
             if outcome in {"success", "partial_error", "error"}
             else "error",
+            "origin": _READ_OPERATION_ORIGIN.get(),
         }
         if type(epoch) is int and 0 <= epoch <= 4_294_967_295:
             record["epoch"] = epoch
@@ -2724,7 +2751,7 @@ class ThinRpcBackend:
         fence_metrics = getattr(self, "_recovery_fence_metrics", None)
         session_epoch = getattr(getattr(self, "session", None), "epoch", None)
         if fence_metrics is not None:
-            fence_metrics.begin_attempt(session_epoch)
+            fence_metrics.begin_attempt(session_epoch, _READ_OPERATION_ORIGIN.get())
         dispatch_acknowledged = False
         guard_outcome: str | None = None
         try:

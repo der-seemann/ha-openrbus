@@ -434,7 +434,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     address, node=call.data["node"]
                 )
             else:
-                result = await target.async_read_object(address, node=call.data["node"])
+                result = await target.async_read_object(
+                    address,
+                    node=call.data["node"],
+                    read_origin="manual_read_service",
+                )
             return {
                 "node": result.node,
                 "object": str(result.address),
@@ -473,7 +477,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 raise HomeAssistantError("objects must use hhhh:ss notation") from error
             if not 1 <= len(addresses) <= 16:
                 raise HomeAssistantError("read_group accepts 1..16 objects")
-            results = await target.async_read_objects(addresses, node=call.data["node"])
+            results = await target.async_read_objects(
+                addresses,
+                node=call.data["node"],
+                read_origin="manual_read_service_batch",
+            )
             results = [
                 (
                     {

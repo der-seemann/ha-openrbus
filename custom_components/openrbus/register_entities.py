@@ -2147,7 +2147,9 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
         if not plan.verified:
             raise HomeAssistantError("OpenRBus write was not read-back verified")
         readback = await self._parent.async_read_object(
-            self._register.address, node=self._identity.node
+            self._register.address,
+            node=self._identity.node,
+            read_origin="control_readback",
         )
         self.coordinator.async_set_updated_data(
             {

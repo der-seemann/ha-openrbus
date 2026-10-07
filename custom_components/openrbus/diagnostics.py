@@ -10,6 +10,7 @@ from homeassistant.core import HomeAssistant
 from .const import CONF_BACKEND, CONF_DIAGNOSTICS_ENABLED, DOMAIN
 from .setup_observability import OUTCOMES as _SETUP_OUTCOMES
 from .setup_observability import PHASES as _SETUP_PHASES
+from .setup_observability import READ_OPERATION_ORIGINS as _READ_OPERATION_ORIGINS
 
 _POLL_GROUPS = ("fast", "standard", "slow")
 _ERROR_CLASSES = ("abort", "item", "batch", "decode", "correlation", "session")
@@ -311,6 +312,9 @@ def _safe_recovery_fence(snapshot: object) -> dict[str, Any]:
             value = attempt.get(key)
             if value is None or (type(value) is int and 0 <= value <= _COUNTER_MAX):
                 safe_attempt[key] = value
+        origin = attempt.get("origin")
+        if isinstance(origin, str) and origin in _READ_OPERATION_ORIGINS:
+            safe_attempt["origin"] = origin
         outcome = attempt.get("outcome")
         if outcome is None or (
             isinstance(outcome, str)
@@ -442,6 +446,9 @@ def _safe_read_operation_trace(snapshot: object) -> list[dict[str, Any]]:
             record["kind"] = item["kind"]
         if item.get("outcome") in {"success", "partial_error", "error"}:
             record["outcome"] = item["outcome"]
+        origin = item.get("origin")
+        if isinstance(origin, str) and origin in _READ_OPERATION_ORIGINS:
+            record["origin"] = origin
         epoch = item.get("epoch")
         if type(epoch) is int and 0 <= epoch <= 4_294_967_295:
             record["epoch"] = epoch
