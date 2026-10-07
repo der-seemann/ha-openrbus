@@ -921,11 +921,26 @@ async def test_coordinator_dispatches_native_and_thin_without_fallback(
 
 
 @pytest.mark.asyncio
-async def test_coordinator_stops_pollers_before_releasing_backend(monkeypatch) -> None:
+async def test_coordinator_stops_zone_monitor_and_pollers_before_backend(
+    monkeypatch,
+) -> None:
     events: list[str] = []
+    monitor_started = asyncio.Event()
+    monitor_cancelled = asyncio.Event()
+
+    async def zone_monitor() -> None:
+        events.append("zone_monitor_started")
+        monitor_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("zone_monitor_cancelled")
+            monitor_cancelled.set()
+            raise
 
     class _OrderedBackend(_Backend):
         async def async_stop(self) -> None:
+            assert monitor_cancelled.is_set()
             events.append("backend_stop")
             await super().async_stop()
 
@@ -940,6 +955,8 @@ async def test_coordinator_stops_pollers_before_releasing_backend(monkeypatch) -
     )
     coordinator = OpenRBusCoordinator(_hass(), _entry(BACKEND_NATIVE))
     coordinator._openrbus_polling_coordinators = {"fast": _Poller()}
+    coordinator._zone_profile_monitor_task = asyncio.create_task(zone_monitor())
+    await monitor_started.wait()
 
     async def finish_parent_shutdown(_coordinator) -> None:
         events.append("parent_shutdown")
@@ -951,7 +968,13 @@ async def test_coordinator_stops_pollers_before_releasing_backend(monkeypatch) -
 
     await coordinator.async_shutdown()
 
-    assert events == ["poller_shutdown", "backend_stop", "parent_shutdown"]
+    assert events == [
+        "zone_monitor_started",
+        "zone_monitor_cancelled",
+        "poller_shutdown",
+        "backend_stop",
+        "parent_shutdown",
+    ]
     assert coordinator._shutting_down is True
 
 

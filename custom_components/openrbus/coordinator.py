@@ -952,10 +952,24 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         backend = self._backend
         self._shutting_down = True
         await self.async_cancel_initial_startup()
-        zone_task = self._zone_discovery_task
-        if zone_task is not None and not zone_task.done():
-            zone_task.cancel()
-            await asyncio.gather(zone_task, return_exceptions=True)
+        current_task = asyncio.current_task()
+        zone_tasks = tuple(
+            dict.fromkeys(
+                task
+                for task in (
+                    self._zone_discovery_task,
+                    self._zone_profile_monitor_task,
+                )
+                if task is not None and task is not current_task
+            )
+        )
+        for zone_task in zone_tasks:
+            if not zone_task.done():
+                zone_task.cancel()
+        if zone_tasks:
+            await asyncio.gather(*zone_tasks, return_exceptions=True)
+        self._zone_discovery_task = None
+        self._zone_profile_monitor_task = None
         # These coordinators own the periodic register reads. Stop their
         # schedules before stopping the shared backend so an already-running
         # poll can finish its current transaction and observe _shutting_down
