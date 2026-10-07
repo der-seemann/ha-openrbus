@@ -101,6 +101,20 @@ def test_exact_catalog_map_has_parent_selectors_and_unresolved_exclusions() -> N
     assert 0x340D in ZONE_UNRESOLVED_OBJECT_SOURCES
 
 
+def test_normalized_label_arrays_keep_their_audited_zone_dimensions() -> None:
+    for index in (0x5404, 0x542E, 0x542F, 0x5430, 0x346C):
+        assert zone_subindex(_row(index, 2)) == 2
+        # Array headers describe the array and never identify a zone slot.
+        assert zone_subindex(_row(index, 0)) is None
+
+    # CP020 items are function selectors on the parent device, not child
+    # zone entities. CP080 and CP140 have unresolved activity dimensions.
+    assert zone_subindex(_row(0x3404, 2)) is None
+    assert zone_association(_row(0x3404, 2)) is ZoneAssociation.FUNCTION_SELECTOR
+    assert zone_subindex(_row(0x340C, 1)) is None
+    assert zone_subindex(_row(0x3412, 1)) is None
+
+
 def test_custom_heating_circuit_name_is_shown_with_its_number() -> None:
     register = _row(0x340F, 3, name="Name Aktivität HK")
     profile = ZoneProfile(7, 3, 2, friendly_name="Wohnzimmer")

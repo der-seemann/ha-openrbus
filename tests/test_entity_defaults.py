@@ -182,6 +182,180 @@ def test_manual_override_adds_nonrecommended_sensor_to_poll_set(
     assert polling["standard"].addresses == ((3, row.address),)
 
 
+def test_registry_enabled_nonrecommended_read_sensor_is_polled(monkeypatch) -> None:
+    """A user's HA registry enable is an explicit read-only poll opt-in."""
+    row = _register("5501:01", levels=("Installer",))
+    identity = SimpleNamespace(node=3)
+    config_entry = SimpleNamespace(
+        entry_id="entry",
+        data={},
+        options={},
+        async_on_unload=lambda _callback: None,
+    )
+    parent = SimpleNamespace(
+        config_entry=config_entry,
+        inventories=(SimpleNamespace(identity=identity, capabilities={}),),
+        devices=(),
+        language="en",
+        effective_access_levels={3: 3},
+        configured_access_level=3,
+        entity_overrides={},
+        zone_profiles={},
+        zone_overrides={},
+        poll_intervals={"fast": 1, "standard": 10, "slow": 60},
+    )
+
+    class FakePollingCoordinator:
+        def __init__(self, _hass, _parent, _group, addresses, _interval, **_kwargs):
+            self.addresses = addresses
+
+        async def async_shutdown(self):
+            pass
+
+    monkeypatch.setattr(register_entities, "entity_unique_id", lambda *_args: "uid")
+    monkeypatch.setattr(
+        register_entities, "recommended_addresses", lambda _identity: frozenset()
+    )
+    monkeypatch.setattr(
+        register_entities,
+        "rows_for_parent",
+        lambda *_args, **_kwargs: ((identity, row, "standard", True),),
+    )
+    monkeypatch.setattr(
+        register_entities, "_poll_selection_filter_counts", lambda *_args: {}
+    )
+    monkeypatch.setattr(register_entities, "_poll_activation_counts", lambda *_args: {})
+    monkeypatch.setattr(register_entities, "bitfield_structure", lambda _row: None)
+    monkeypatch.setattr(register_entities, "control_kind", lambda *_args: None)
+    monkeypatch.setattr(register_entities, "catalog_visible", lambda *_args: True)
+    monkeypatch.setattr(
+        register_entities,
+        "_enabled_registry_entities",
+        lambda *_args: {"uid": (SimpleNamespace(domain="sensor"),)},
+    )
+    monkeypatch.setattr(
+        register_entities, "OpenRBusPollingCoordinator", FakePollingCoordinator
+    )
+    monkeypatch.setattr(
+        register_entities,
+        "schedule_first_refresh_in_background",
+        lambda *_args, **_kwargs: None,
+    )
+
+    polling = register_entities.ensure_polling_coordinators(
+        SimpleNamespace(data={}), parent
+    )
+
+    assert polling["standard"].addresses == ((3, row.address),)
+    assert parent._openrbus_poll_selection_diagnostics["not_recommended"] == 0
+
+
+def test_enabled_registry_snapshot_excludes_disabled_entries(monkeypatch) -> None:
+    enabled = SimpleNamespace(
+        platform=DOMAIN,
+        config_entry_id="entry",
+        unique_id="uid",
+        entity_id="sensor.row",
+        disabled_by=None,
+    )
+    user_disabled = SimpleNamespace(
+        platform=DOMAIN,
+        config_entry_id="entry",
+        unique_id="user-disabled",
+        entity_id="sensor.user_disabled",
+        disabled_by="user",
+    )
+    integration_disabled = SimpleNamespace(
+        platform=DOMAIN,
+        config_entry_id="entry",
+        unique_id="integration-disabled",
+        entity_id="sensor.integration_disabled",
+        disabled_by="integration",
+    )
+    monkeypatch.setattr(
+        register_entities.er,
+        "async_get",
+        lambda _hass: SimpleNamespace(
+            entities={
+                "sensor.row": enabled,
+                "sensor.user_disabled": user_disabled,
+                "sensor.integration_disabled": integration_disabled,
+            }
+        ),
+    )
+    parent = SimpleNamespace(config_entry=SimpleNamespace(entry_id="entry"))
+
+    assert register_entities._enabled_registry_entities(SimpleNamespace(), parent) == {
+        "uid": (enabled,)
+    }
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected"),
+    [
+        ("disabled", False),
+        ("user_disabled", False),
+        ("read_ineligible", False),
+        ("category_disabled", False),
+        ("user_override_disabled", False),
+        ("zone_disabled", False),
+        ("typed_control", False),
+        ("unobserved_write", False),
+    ],
+)
+def test_registry_sensor_opt_in_respects_read_only_safety_gates(
+    monkeypatch, scenario, expected
+) -> None:
+    row = _register("5501:01", levels=("Installer",))
+    identity = SimpleNamespace(node=3)
+    parent = SimpleNamespace(
+        effective_access_levels={3: 3},
+        entity_overrides=(
+            {"uid": False} if scenario == "user_override_disabled" else {}
+        ),
+        config_entry=SimpleNamespace(
+            data={},
+            options=(
+                {CONF_GROUP_OVERRIDES: {"device:3:category:unclassified": False}}
+                if scenario == "category_disabled"
+                else {}
+            ),
+        ),
+        zone_profiles={},
+        zone_overrides={},
+        language="en",
+        inventories=(SimpleNamespace(identity=identity, capabilities={}),),
+    )
+    if scenario == "typed_control":
+        row.control_kind = "number"
+    if scenario == "unobserved_write":
+        row.writable = True
+        row.write_declared = True
+        row.safety = "source_supported"
+    registry_rows = (
+        {"uid": (SimpleNamespace(domain="sensor"),)}
+        if scenario not in {"disabled", "user_disabled"}
+        else {}
+    )
+    monkeypatch.setattr(register_entities, "entity_unique_id", lambda *_args: "uid")
+    monkeypatch.setattr(register_entities, "catalog_visible", lambda *_args: True)
+    if scenario == "zone_disabled":
+        monkeypatch.setattr(register_entities, "zone_row_enabled", lambda *_args: False)
+    if scenario == "read_ineligible":
+        monkeypatch.setattr(register_entities, "catalog_visible", lambda *_args: False)
+    if scenario == "typed_control":
+        monkeypatch.setattr(register_entities, "control_kind", lambda *_args: "number")
+    else:
+        monkeypatch.setattr(register_entities, "control_kind", lambda *_args: None)
+
+    assert (
+        register_entities._manual_readonly_registry_poll_opt_in(
+            parent, identity, row, registry_rows
+        )
+        is expected
+    )
+
+
 def test_inferred_source_rw_rows_default_off_until_capability_is_discovered(
     monkeypatch,
 ) -> None:

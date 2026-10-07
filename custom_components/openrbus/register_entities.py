@@ -800,6 +800,52 @@ def _poll_row_selected(
     return False
 
 
+def _manual_readonly_registry_poll_opt_in(
+    parent: OpenRBusCoordinator,
+    identity: DeviceIdentity,
+    register: RegisterCatalogEntry,
+    enabled_registry_entities: Mapping[str, tuple[Any, ...]] | None,
+) -> bool:
+    """Allow explicit HA registry enables for safe, non-control read entities.
+
+    This is a narrow opt-in for rows outside Core's default recommendations.
+    It never authorizes inferred writes, typed controls, or rows that fail the
+    current effective read-access check. Earlier selection stages still apply
+    registry disable, category, and zone policy before this helper is called.
+    """
+
+    if (
+        not enabled_registry_entities
+        or not register.readable
+        or not zone_row_enabled(parent, identity, register)
+        or _unobserved_source_rw_row(parent, identity, register)
+        or control_kind(register, getattr(parent, "language", "de")) is not None
+    ):
+        return False
+    effective = getattr(parent, "effective_access_levels", {}).get(identity.node)
+    if effective is None or not catalog_visible(register, effective):
+        return False
+
+    base_uid = entity_unique_id(parent, identity, register)
+    for unique_id, entities in enabled_registry_entities.items():
+        if unique_id != base_uid and not (
+            unique_id.startswith(f"{base_uid}:bit:")
+            and any(
+                _registry_entity_domain(entity) == "binary_sensor"
+                for entity in entities
+            )
+        ):
+            continue
+        if _selection_override(parent, identity, register, unique_id) is False:
+            continue
+        if any(
+            _registry_entity_domain(entity) in {"sensor", "binary_sensor"}
+            for entity in entities
+        ):
+            return True
+    return False
+
+
 def _registry_entity_domain(entity: Any) -> str:
     """Resolve the entity domain from a registry row without guessing a platform."""
 
@@ -1178,6 +1224,12 @@ def ensure_polling_coordinators(
                 register.address not in recommended
                 and not safe_default
                 and not entity_enabled_by_default(parent, identity, register)
+                and not _manual_readonly_registry_poll_opt_in(
+                    parent,
+                    identity,
+                    register,
+                    enabled_registry_entities,
+                )
             ):
                 selection_counts["not_recommended"] += 1
                 continue

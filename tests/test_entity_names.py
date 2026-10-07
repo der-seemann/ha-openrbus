@@ -76,6 +76,18 @@ def test_reviewed_german_names_use_exact_parameter_codes() -> None:
 @pytest.mark.parametrize(
     ("code", "index", "expected"),
     [
+        ("CM030", 0x5404, "Heizkreis-Raumtemperatur"),
+        ("CM210", 0x542E, "Außentemperatur des Heizkreises"),
+        (
+            "CM220",
+            0x542F,
+            "Kurzzeitmittel der Außentemperatur des Heizkreises",
+        ),
+        (
+            "CM230",
+            0x5430,
+            "Langzeitmittel der Außentemperatur des Heizkreises",
+        ),
         ("CP000", 0x3401, "Maximaler Vorlauftemperatur-Sollwertbereich"),
         ("CP010", 0x3402, "Vorlauftemperatur-Sollwert ohne Außensensor"),
         ("CP020", 0x3404, "Funktion des Heizkreises"),
@@ -86,6 +98,11 @@ def test_reviewed_german_names_use_exact_parameter_codes() -> None:
         ("CP070", 0x340B, "Raumsollwert des Heizkreises im Nachtbetrieb"),
         ("CP080", 0x340C, "Raumsollwert der Heizkreisaktivität"),
         ("CP130", 0x340E, "Außentemperaturfühler für den Heizkreis"),
+        (
+            "CP140",
+            0x3412,
+            "Raumsollwert der Heizkreisaktivität im Kühlbetrieb",
+        ),
         ("CP200", 0x3413, "Raumtemperatur-Sollwert im Heizkreis-Kühlbetrieb"),
         ("CP210", 0x3414, "Komfort-Startwert des Heizkreises"),
         ("CP220", 0x3415, "Nacht-Startwert des Heizkreises"),
@@ -111,6 +128,7 @@ def test_reviewed_german_names_use_exact_parameter_codes() -> None:
         ("CP700", 0x3467, "Offset des Trinkwarmwasserfühlers"),
         ("CP730", 0x346A, "Heizkreis-Aufheizgeschwindigkeit"),
         ("CP740", 0x346B, "Heizkreis-Abkühlgeschwindigkeit"),
+        ("CP750", 0x346C, "Maximale Vorheizzeit des Heizkreises"),
         ("CP780", 0x3471, "Regelungsstrategie des Heizkreises"),
         ("CP800", 0x3473, "Heizmodus des gewerblichen Trinkwarmwasserspeichers"),
         ("CP850", 0x347D, "Hydraulischer Abgleich im Heizkreis möglich"),
@@ -147,7 +165,6 @@ def test_scalar_parameter_code_requires_exact_core_address_code_join() -> None:
 @pytest.mark.parametrize(
     ("code", "index", "source_short", "expected"),
     [
-        ("CP750", 0x346C, "Max HK-Vorheizzeit", "Max Heizkreis-Vorheizzeit"),
         ("CP430", 0x342D, "TWW Sp.lad. Opt.", "Trinkwarmwasser Sp.lad. Opt."),
         ("HP002", 0x2302, "Max. Vorlauftemp. WP", "Max. Vorlauftemp. Wärmepumpe"),
     ],
@@ -157,6 +174,29 @@ def test_whitelisted_source_abbreviations_expand_by_exact_code(
 ) -> None:
     register = _register(code, index, 0, "ignored fallback")
     register.name_de = source_short
+    assert register_display_name(register, "de") == expected
+
+
+@pytest.mark.parametrize(
+    ("code", "index", "subindex", "expected"),
+    [
+        ("CM030", 0x5404, 2, "Heizkreis-Raumtemperatur"),
+        ("CM210", 0x542E, 2, "Außentemperatur des Heizkreises"),
+        ("CM220", 0x542F, 2, "Kurzzeitmittel der Außentemperatur des Heizkreises"),
+        ("CM230", 0x5430, 2, "Langzeitmittel der Außentemperatur des Heizkreises"),
+        ("CP750", 0x346C, 2, "Maximale Vorheizzeit des Heizkreises"),
+        (
+            "CP140",
+            0x3412,
+            1,
+            "Raumsollwert der Heizkreisaktivität im Kühlbetrieb",
+        ),
+    ],
+)
+def test_normalized_labels_cover_array_items_without_assigning_unproven_slots(
+    code, index, subindex, expected
+) -> None:
+    register = _register(code, index, subindex, "opaque short label")
     assert register_display_name(register, "de") == expected
 
 
