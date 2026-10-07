@@ -236,8 +236,8 @@ def test_unobserved_source_write_declaration_is_independent_of_control_projectio
 
     # The canonical array head does not prove that concrete subindex 04 exists.
     assert not register_entities.entity_enabled_by_default(parent, identity, row)
-    # A stale enabled registry projection must not bypass the poll-selection
-    # guard for this absent inferred write.
+    # Without a registry snapshot, an absent inferred write remains outside
+    # the poll set until the user explicitly selects it.
     assert not register_entities._poll_row_selected(parent, identity, row)
 
     runtime_node.capabilities[ObjectAddress.parse("3700:04")] = object()

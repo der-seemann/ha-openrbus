@@ -15,6 +15,7 @@ from custom_components.openrbus.config_flow import OpenRBusOptionsFlowHandler
 from custom_components.openrbus.const import (
     CONF_DIAGNOSTICS_ENABLED,
     CONF_GROUP_OVERRIDES,
+    CONF_NODE_OVERRIDES,
     DOMAIN,
 )
 from custom_components.openrbus.coordinator import OpenRBusPollingCoordinator
@@ -281,12 +282,95 @@ def test_options_picker_keeps_readable_control_candidate_visible_when_write_bloc
     assert flow._entity_default_selection() == ["read-control"]
 
 
+@pytest.mark.parametrize(
+    ("entity_overrides", "options"),
+    (
+        ({"read-control": False}, {}),
+        ({}, {CONF_GROUP_OVERRIDES: {"group": False}}),
+        ({}, {CONF_NODE_OVERRIDES: {"3": False}}),
+    ),
+)
+def test_explicit_picker_or_scope_disable_overrides_manual_registry_enable(
+    monkeypatch, entity_overrides, options
+) -> None:
+    identity = SimpleNamespace(node=3)
+    row = _catalog_row("read-control", "5501:01")
+    row.write_declared = True
+    parent = SimpleNamespace(
+        config_entry=SimpleNamespace(entry_id="entry", data={}, options=options),
+        inventories=(SimpleNamespace(identity=identity, capabilities={}),),
+        entity_overrides=entity_overrides,
+        zone_profiles={},
+        zone_overrides={},
+        language="en",
+    )
+    enabled_sensor = _registry_entity("sensor", "read-control", disabled_by=None)
+    monkeypatch.setattr(
+        register_entities, "entity_unique_id", lambda *_: "read-control"
+    )
+    monkeypatch.setattr(
+        register_entities, "recommended_addresses", lambda *_: frozenset()
+    )
+    monkeypatch.setattr(register_entities, "entity_group_key", lambda *_: "group")
+    monkeypatch.setattr(register_entities, "entity_category_key", lambda *_: "category")
+    monkeypatch.setattr(
+        register_entities, "entity_category_override_keys", lambda *_: ("category",)
+    )
+    monkeypatch.setattr(register_entities, "zone_row_enabled", lambda *_: True)
+
+    assert not register_entities._poll_row_selected(
+        parent,
+        identity,
+        row,
+        {"read-control": (enabled_sensor,)},
+    )
+
+
+def test_manually_enabled_binary_bit_projection_selects_its_parent_read(
+    monkeypatch,
+) -> None:
+    identity = SimpleNamespace(node=3)
+    row = _catalog_row("bitfield-row", "5501:01")
+    row.write_declared = True
+    parent = SimpleNamespace(
+        config_entry=SimpleNamespace(entry_id="entry", data={}, options={}),
+        inventories=(SimpleNamespace(identity=identity, capabilities={}),),
+        entity_overrides={},
+        zone_profiles={},
+        zone_overrides={},
+        language="en",
+    )
+    enabled_bit = _registry_entity(
+        "binary_sensor", "bitfield-row:bit:active", disabled_by=None
+    )
+    monkeypatch.setattr(
+        register_entities, "entity_unique_id", lambda *_: "bitfield-row"
+    )
+    monkeypatch.setattr(
+        register_entities, "recommended_addresses", lambda *_: frozenset()
+    )
+    monkeypatch.setattr(register_entities, "entity_group_key", lambda *_: "group")
+    monkeypatch.setattr(register_entities, "entity_category_key", lambda *_: "category")
+    monkeypatch.setattr(
+        register_entities, "entity_category_override_keys", lambda *_: ("category",)
+    )
+    monkeypatch.setattr(register_entities, "zone_row_enabled", lambda *_: True)
+
+    assert register_entities._poll_row_selected(
+        parent,
+        identity,
+        row,
+        {"bitfield-row:bit:active": (enabled_bit,)},
+    )
+
+
 @pytest.mark.asyncio
 async def test_enabled_readonly_sensor_polls_while_experimental_write_stays_denied(
     monkeypatch,
 ) -> None:
     address = ObjectAddress.parse("5501:01")
     row = _catalog_row("read-control", "5501:01")
+    row.write_declared = True
     reads = []
     writes = AsyncMock()
 
@@ -294,17 +378,33 @@ async def test_enabled_readonly_sensor_polls_while_experimental_write_stays_deni
         reads.append((node, tuple(addresses)))
         return tuple(GenericRead(node, item, b"\x01", 1) for item in addresses)
 
+    identity = SimpleNamespace(node=3)
+    runtime_node = SimpleNamespace(identity=identity, capabilities={})
     enabled_sensor = _registry_entity("sensor", "read-control", disabled_by=None)
     registry = _EntityRegistry(enabled_sensor)
+    config_entry = SimpleNamespace(
+        entry_id="entry",
+        data={},
+        options={},
+        async_on_unload=lambda _callback: None,
+    )
     parent = SimpleNamespace(
         _shutting_down=False,
         backend_mode="native",
         write_enabled=True,
         experimental_writes=False,
         configured_write_access_level=3,
+        configured_read_access_level=3,
+        configured_access_level=3,
         effective_access_levels={3: 3},
-        config_entry=SimpleNamespace(options={}),
-        inventories=(),
+        config_entry=config_entry,
+        inventories=(runtime_node,),
+        devices=(),
+        entity_overrides={},
+        language="en",
+        zone_profiles={},
+        zone_overrides={},
+        poll_intervals={"fast": 1, "standard": 10, "slow": 60},
         async_read_objects=async_read_objects,
         async_write_object=writes,
     )
@@ -314,37 +414,105 @@ async def test_enabled_readonly_sensor_polls_while_experimental_write_stays_deni
         "stable_object_id",
         lambda *_: "read-control",
     )
-    poller = OpenRBusPollingCoordinator.__new__(OpenRBusPollingCoordinator)
-    poller.parent = parent
-    poller.hass = SimpleNamespace()
-    poller.registers = ((3, address),)
-    poller.register_metadata = {}
-    poller.group = "standard"
-    poller.validity = SimpleNamespace(
-        is_expired=lambda _key: False,
-        is_quarantined=lambda _key, _scope: False,
-        observe=lambda *_a: SimpleNamespace(expired=False),
-        is_valid=lambda *_a: True,
-        quarantine_deterministic_failure=lambda *_a: None,
+    monkeypatch.setattr(
+        register_entities,
+        "rows_for_parent",
+        lambda *_a, **_k: ((identity, row, "standard", True),),
     )
-    poller._diagnostic_poll_count = 0
-    poller._diagnostic_success_items = 0
-    poller._diagnostic_failed_items = 0
-    poller._diagnostic_error_counts = {}
-    poller._diagnostic_subtype_counts = {}
-    poller._diagnostic_item_failures = []
-    poller._diagnostic_available_items = 0
-    poller._diagnostic_total_items = 0
-    poller._diagnostic_availability_delta = 0
-    poller._diagnostic_registry_disabled_count = 0
+    monkeypatch.setattr(
+        register_entities, "_poll_selection_filter_counts", lambda *_: {}
+    )
+    monkeypatch.setattr(register_entities, "_poll_activation_counts", lambda *_: {})
+    monkeypatch.setattr(
+        register_entities, "entity_unique_id", lambda *_: "read-control"
+    )
+    monkeypatch.setattr(
+        register_entities, "recommended_addresses", lambda *_: frozenset()
+    )
+    monkeypatch.setattr(register_entities, "entity_group_key", lambda *_: "group")
+    monkeypatch.setattr(register_entities, "entity_category_key", lambda *_: "category")
+    monkeypatch.setattr(
+        register_entities, "entity_category_override_keys", lambda *_: ("category",)
+    )
+    monkeypatch.setattr(register_entities, "zone_row_enabled", lambda *_: True)
+    monkeypatch.setattr(register_entities, "bitfield_structure", lambda *_: None)
+    monkeypatch.setattr(register_entities, "control_kind", lambda *_: "number")
+    monkeypatch.setattr(register_entities, "catalog_visible", lambda *_: True)
 
-    result = await poller._async_poll_data()
+    class PollingHarness:
+        _object_failure_scope = OpenRBusPollingCoordinator._object_failure_scope
+        _bump = staticmethod(OpenRBusPollingCoordinator._bump)
+
+        def __init__(
+            self,
+            hass,
+            selected_parent,
+            group,
+            registers,
+            _interval,
+            *,
+            register_metadata=None,
+        ):
+            self.hass = hass
+            self.parent = selected_parent
+            self.group = group
+            self.registers = registers
+            self.register_metadata = register_metadata or {}
+            self.validity = SimpleNamespace(
+                is_expired=lambda _key: False,
+                is_quarantined=lambda _key, _scope: False,
+                observe=lambda *_a: SimpleNamespace(expired=False),
+                is_valid=lambda *_a: True,
+                quarantine_deterministic_failure=lambda *_a: None,
+            )
+            self._diagnostic_poll_count = 0
+            self._diagnostic_success_items = 0
+            self._diagnostic_failed_items = 0
+            self._diagnostic_error_counts = {}
+            self._diagnostic_subtype_counts = {}
+            self._diagnostic_item_failures = []
+            self._diagnostic_available_items = 0
+            self._diagnostic_total_items = 0
+            self._diagnostic_availability_delta = 0
+            self._diagnostic_registry_disabled_count = 0
+
+        async def async_shutdown(self):
+            return None
+
+        async def async_poll(self):
+            return await OpenRBusPollingCoordinator._async_poll_data(self)
+
+    monkeypatch.setattr(
+        register_entities,
+        "OpenRBusPollingCoordinator",
+        PollingHarness,
+    )
+    monkeypatch.setattr(
+        register_entities,
+        "schedule_first_refresh_in_background",
+        lambda *_a, **_k: None,
+    )
+    hass = SimpleNamespace(data={})
+    polling = register_entities.ensure_polling_coordinators(hass, parent)
+    poller = polling["standard"]
+
+    result = await poller.async_poll()
 
     assert result[(3, address)].value == 1
     assert reads == [(3, (address,))]
     assert not register_entities.write_access_allowed(parent, row, 3)
 
-    identity = SimpleNamespace(node=3)
+    parent._openrbus_polling_coordinators = {}
+    monkeypatch.setattr(
+        register_entities,
+        "rows_for_parent",
+        lambda *_a, **_k: ((identity, row, "standard", False),),
+    )
+    read_denied_pollers = register_entities.ensure_polling_coordinators(
+        SimpleNamespace(data={}), parent
+    )
+    assert all(not selected.registers for selected in read_denied_pollers.values())
+
     for entity_type, action in (
         (OpenRBusNumber, lambda entity: entity.async_set_native_value(1)),
         (

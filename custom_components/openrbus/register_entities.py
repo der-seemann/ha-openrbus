@@ -411,7 +411,8 @@ def _unobserved_source_rw_row(
     Family and bounded-array metadata makes comparable registers selectable,
     but does not establish that an object exists on this installation. Keep
     those newly writable rows out of the initial poll set until the user
-    selects them or discovery confirms them.
+    selects them or enables a matching read-only HA projection, or discovery
+    confirms them.
     """
 
     # ``writable`` is the active write projection.  It is false when HA's
@@ -757,19 +758,79 @@ def _poll_row_selected(
     parent: OpenRBusCoordinator,
     identity: DeviceIdentity,
     register: RegisterCatalogEntry,
+    enabled_registry_entities: Mapping[str, tuple[Any, ...]] | None = None,
 ) -> bool:
     """Keep absent inferred writes out of polling unless the picker opts in.
 
-    An older sensor or typed projection can remain enabled in HA's registry
-    after the catalog's default changes.  Since the poller intentionally
-    accepts any enabled projection sharing a stable ID, enforce this safety
-    default before rows enter the polling coordinator.  Explicit persisted
-    picker choices still work through ``entity_enabled_by_default``.
+    An absent inferred write stays out of the default poll set. An explicit
+    picker choice or an enabled read-only HA projection is an intentional
+    request to read that exact row. Persisted entity/group/node disables and
+    typed-control write authorization remain authoritative.
     """
 
-    return not _unobserved_source_rw_row(
-        parent, identity, register
-    ) or entity_enabled_by_default(parent, identity, register)
+    if not _unobserved_source_rw_row(parent, identity, register):
+        return True
+    if entity_enabled_by_default(parent, identity, register):
+        return True
+    if not enabled_registry_entities:
+        return False
+
+    base_uid = entity_unique_id(parent, identity, register)
+    for unique_id, entities in enabled_registry_entities.items():
+        if unique_id != base_uid and not (
+            unique_id.startswith(f"{base_uid}:bit:")
+            and any(
+                _registry_entity_domain(entity) == "binary_sensor"
+                for entity in entities
+            )
+        ):
+            continue
+        if _selection_override(parent, identity, register, unique_id) is False:
+            continue
+        for entity in entities:
+            domain = _registry_entity_domain(entity)
+            if domain in {"sensor", "binary_sensor"}:
+                return True
+            if domain in {"number", "select", "switch"} and write_access_allowed(
+                parent,
+                register,
+                getattr(parent, "effective_access_levels", {}).get(identity.node),
+            ):
+                return True
+    return False
+
+
+def _registry_entity_domain(entity: Any) -> str:
+    """Resolve the entity domain from a registry row without guessing a platform."""
+
+    domain = getattr(entity, "domain", None)
+    if domain:
+        return str(domain)
+    return str(getattr(entity, "entity_id", "")).partition(".")[0]
+
+
+def _enabled_registry_entities(
+    hass: HomeAssistant,
+    parent: OpenRBusCoordinator,
+) -> dict[str, tuple[Any, ...]]:
+    """Snapshot enabled OpenRBus projections for one entry's poll selection."""
+
+    try:
+        registry = er.async_get(hass)
+    except (AttributeError, TypeError):
+        return {}
+    entry_id = parent.config_entry.entry_id
+    rows: dict[str, list[Any]] = {}
+    for entity in tuple(registry.entities.values()):
+        unique_id = getattr(entity, "unique_id", None)
+        if (
+            getattr(entity, "platform", None) == DOMAIN
+            and getattr(entity, "config_entry_id", None) == entry_id
+            and isinstance(unique_id, str)
+            and getattr(entity, "disabled_by", None) is None
+        ):
+            rows.setdefault(unique_id, []).append(entity)
+    return {unique_id: tuple(entities) for unique_id, entities in rows.items()}
 
 
 def normalized_entity_overrides(value: object) -> dict[str, bool | None]:
@@ -1073,6 +1134,7 @@ def ensure_polling_coordinators(
         "standard": {},
         "slow": {},
     }
+    enabled_registry_entities = _enabled_registry_entities(hass, parent)
     for identity, register, group, allowed in rows:
         if not allowed:
             selection_counts["read_access_excluded"] += 1
@@ -1080,7 +1142,12 @@ def ensure_polling_coordinators(
         if not zone_row_enabled(parent, identity, register):
             selection_counts["zone_excluded"] += 1
             continue
-        if not _poll_row_selected(parent, identity, register):
+        if not _poll_row_selected(
+            parent,
+            identity,
+            register,
+            enabled_registry_entities,
+        ):
             selection_counts["unobserved_declared_write_not_selected"] += 1
             continue
         effective = parent.effective_access_levels.get(identity.node)
