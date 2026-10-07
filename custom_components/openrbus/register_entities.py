@@ -829,15 +829,10 @@ def async_apply_entity_overrides(
                 or cooling_enabled(parent)
             )
         )
-        effective = parent.effective_access_levels.get(identity.node)
         safe[uid] = bool(
             allowed
             and category_visible
             and zone_row_enabled(parent, identity, register)
-            and (
-                control_kind(register, parent.language) is None
-                or write_access_allowed(parent, register, effective)
-            )
         )
         structure = bitfield_structure(register)
         if structure is not None:
@@ -905,6 +900,12 @@ def async_apply_entity_overrides(
             should_enable = (
                 entity_enabled_by_default(parent, identity, register, unique_id=uid)
                 and safe[uid]
+                and _registry_projection_write_allowed(
+                    entity,
+                    parent,
+                    identity,
+                    register,
+                )
             )
         if not should_enable and not disabled_by:
             # ``disabled_by=None`` is a persisted user enable in HA.  The
@@ -947,6 +948,7 @@ def async_apply_diagnostic_visibility(
     cooling_visible = cooling_enabled(parent)
     permitted: dict[str, bool] = {}
     visibility: dict[str, bool] = {}
+    row_policies: dict[str, tuple[DeviceIdentity, RegisterCatalogEntry, bool]] = {}
     entry_id = parent.config_entry.entry_id
     # These two identity projections have Diagnostic category in HA and are
     # part of the same expert surface even though they are not catalog rows.
@@ -961,7 +963,7 @@ def async_apply_diagnostic_visibility(
             permitted[
                 f"{stable_node_id(parent, identity.node)}:identity:parameter_number"
             ] = True
-    for identity, register, _group, _allowed in rows_for_parent(
+    for identity, register, _group, allowed in rows_for_parent(
         parent,
         include_diagnostics=True,
         include_screed_drying=True,
@@ -975,13 +977,20 @@ def async_apply_diagnostic_visibility(
         if not diagnostic and not screed_drying and not cooling:
             continue
         unique_id = entity_unique_id(parent, identity, register)
-        permitted[unique_id] = control_kind(
-            register, parent.language
-        ) is None or write_access_allowed(
-            parent,
-            register,
-            parent.effective_access_levels.get(identity.node),
-        )
+        read_safe = bool(allowed and zone_row_enabled(parent, identity, register))
+        row_policies[unique_id] = (identity, register, read_safe)
+        permitted[unique_id] = read_safe
+        structure = bitfield_structure(register)
+        if structure is not None:
+            for field in structure.fields:
+                if field.bit_length == 1:
+                    bit_uid = f"{unique_id}:bit:{field.name}"
+                    row_policies[bit_uid] = (
+                        identity,
+                        register,
+                        read_safe,
+                    )
+                    permitted[bit_uid] = read_safe
         # A row can theoretically carry both classifications.  Both opt-ins
         # must then be enabled; a generic heating row never reaches this map.
         visibility[unique_id] = (
@@ -989,6 +998,10 @@ def async_apply_diagnostic_visibility(
             and (not screed_drying or screed_drying_visible)
             and (not cooling or cooling_visible)
         )
+        if structure is not None:
+            for field in structure.fields:
+                if field.bit_length == 1:
+                    visibility[f"{unique_id}:bit:{field.name}"] = visibility[unique_id]
     for entity in tuple(registry.entities.values()):
         if (
             getattr(entity, "platform", None) != DOMAIN
@@ -997,6 +1010,19 @@ def async_apply_diagnostic_visibility(
         ):
             continue
         disabled_by = str(getattr(entity, "disabled_by", "") or "").casefold()
+        row_policy = row_policies.get(entity.unique_id)
+        projection_permitted = permitted[entity.unique_id]
+        if row_policy is not None:
+            identity, register, read_safe = row_policy
+            projection_permitted = bool(
+                read_safe
+                and _registry_projection_write_allowed(
+                    entity,
+                    parent,
+                    identity,
+                    register,
+                )
+            )
         if (
             not visibility.get(entity.unique_id, diagnostics_visible)
             and not disabled_by
@@ -1008,7 +1034,7 @@ def async_apply_diagnostic_visibility(
         elif (
             visibility.get(entity.unique_id, diagnostics_visible)
             and disabled_by == "integration"
-            and permitted[entity.unique_id]
+            and projection_permitted
         ):
             registry.async_update_entity(entity.entity_id, disabled_by=None)
 
@@ -1652,6 +1678,29 @@ def write_access_allowed(
         len(levels) == 1
         and levels[0] is not None
         and levels[0] <= effective_access_level
+    )
+
+
+def _registry_projection_write_allowed(
+    entity: Any,
+    parent: OpenRBusCoordinator,
+    identity: DeviceIdentity,
+    register: RegisterCatalogEntry,
+) -> bool:
+    """Keep write authorization on typed entities, not read-only fallbacks."""
+
+    if control_kind(register, getattr(parent, "language", "de")) is None:
+        return True
+    domain = getattr(entity, "domain", None)
+    if not domain:
+        entity_id = str(getattr(entity, "entity_id", ""))
+        domain = entity_id.partition(".")[0]
+    if domain in {"sensor", "binary_sensor"}:
+        return True
+    return write_access_allowed(
+        parent,
+        register,
+        getattr(parent, "effective_access_levels", {}).get(identity.node),
     )
 
 
