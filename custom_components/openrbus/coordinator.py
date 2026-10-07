@@ -399,6 +399,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         # coordinator reload; the new instance must positively reread selectors.
         self.zone_profiles: dict[tuple[int, int], ZoneProfile] = {}
         self.zone_profile_states: dict[tuple[int, int], ZoneReadState] = {}
+        self._zone_confirmed_active_slots: set[tuple[int, int]] = set()
         self._zone_entities: set[Any] = set()
         self._zone_discovery_task: asyncio.Task[None] | None = None
         self._startup_task: asyncio.Task[None] | None = None
@@ -708,6 +709,10 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         """
 
         profiles = dict(getattr(self, "zone_profiles", {}) or {})
+        active_slots = getattr(self, "_zone_confirmed_active_slots", None)
+        if not isinstance(active_slots, set):
+            active_slots = set()
+            self._zone_confirmed_active_slots = active_slots
         states: dict[tuple[int, int], ZoneReadState] = {}
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _ZONE_DISCOVERY_STARTUP_BUDGET
@@ -732,8 +737,11 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             self._has_zone_function_slots = False
             self.zone_profiles = {}
             self.zone_profile_states = {}
+            active_slots.clear()
             return True
         self._has_zone_function_slots = True
+        candidate_keys = {(node, slot) for _, _, node, slot in candidates}
+        active_slots.intersection_update(candidate_keys)
         for _runtime_node, _identity, node, slot in candidates:
             states[(node, slot)] = ZoneReadState.UNKNOWN
 
@@ -762,6 +770,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 continue
             if function_read.value == 0:
                 states[(node, slot)] = ZoneReadState.CONFIRMED_DISABLED
+                active_slots.discard((node, slot))
                 profile = ZoneProfile(
                     node,
                     slot,
@@ -788,6 +797,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 )
                 continue
             states[(node, slot)] = ZoneReadState.CONFIRMED_ACTIVE
+            active_slots.add((node, slot))
             friendly_name: str | None = None
             short_name: str | None = None
             try:
@@ -970,6 +980,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             await asyncio.gather(*zone_tasks, return_exceptions=True)
         self._zone_discovery_task = None
         self._zone_profile_monitor_task = None
+        self._zone_confirmed_active_slots.clear()
         # These coordinators own the periodic register reads. Stop their
         # schedules before stopping the shared backend so an already-running
         # poll can finish its current transaction and observe _shutting_down

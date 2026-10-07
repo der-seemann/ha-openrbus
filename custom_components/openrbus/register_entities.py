@@ -47,9 +47,12 @@ from .identity import stable_gateway_id, stable_node_id, stable_object_id
 from .optional_register_filters import OPTIONAL_REGISTER_FILTERS
 from .zones import (
     ZONE_FAMILY_SLOT_OBJECTS,
+    ZONE_PARENT_OBJECT_SOURCES,
     ZONE_SLOT_OBJECT_SOURCES,
+    ZONE_UNRESOLVED_OBJECT_SOURCES,
     ZoneAssociation,
     ZoneKind,
+    ZoneReadState,
     entity_zone_label,
     override_key,
     profile_for,
@@ -58,6 +61,7 @@ from .zones import (
     zone_enabled,
     zone_is_active,
     zone_is_confirmed_disabled,
+    zone_read_state,
     zone_subindex,
 )
 
@@ -91,6 +95,45 @@ def runtime_nodes(parent: OpenRBusCoordinator) -> tuple[Any, ...]:
     """Return the current node projection without assuming a node number."""
 
     return tuple(parent.inventories or parent.devices)
+
+
+def _legacy_zone_bound_subindex(register: Any) -> int | None:
+    """Identify rows that the pre-map zone classifier could have tagged.
+
+    This migration guard mirrors the old source classifier only for exact
+    catalog records. It is intentionally not used for current projection.
+    """
+
+    address = getattr(register, "address", None)
+    index = getattr(address, "index", None)
+    subindex = getattr(address, "subindex", None)
+    if not isinstance(index, int) or not isinstance(subindex, int):
+        return None
+    if not (0x3400 <= index <= 0x3477 or 0x5402 <= index <= 0x5444):
+        return None
+    semantic = " ".join(
+        str(getattr(register, field, "") or "")
+        for field in ("internal_code", "name_en", "name_de")
+    ).casefold()
+    internal_code = str(getattr(register, "internal_code", "")).upper()
+    if (
+        "zone" in semantic
+        or internal_code.startswith(("CP", "CM", "CC"))
+        or any(
+            marker in semantic
+            for marker in (
+                "heizkreis",
+                "heating circuit",
+                "hk,",
+                "hk ",
+                " hk",
+                "hk/",
+                "hk-",
+            )
+        )
+    ):
+        return subindex
+    return None
 
 
 def poll_group(register: RegisterCatalogEntry, recommended: frozenset) -> str:
@@ -815,6 +858,22 @@ def async_apply_entity_overrides(
             # positive active/inactive profile arrives.
             if slot is not None and profile_for(parent, identity.node, slot) is None:
                 continue
+            profile = (
+                profile_for(parent, identity.node, slot) if slot is not None else None
+            )
+            previously_active = (profile is not None and profile.active) or (
+                slot is not None
+                and (identity.node, slot)
+                in getattr(parent, "_zone_confirmed_active_slots", set())
+            )
+            retained_active_unknown = (
+                slot is not None
+                and previously_active
+                and zone_read_state(parent, identity.node, slot)
+                is ZoneReadState.UNKNOWN
+            )
+        else:
+            retained_active_unknown = False
         disabled_by = str(getattr(entity, "disabled_by", "") or "").casefold()
         if uid not in safe:
             should_enable = False
@@ -825,6 +884,16 @@ def async_apply_entity_overrides(
                 and safe[uid]
             )
         if not should_enable and not disabled_by:
+            # ``disabled_by=None`` is a persisted user enable in HA.  The
+            # inferred source-RW fallback below only changes the default; it
+            # must not revoke that choice when capabilities are temporarily
+            # absent.  Explicit picker/scope choices and all safety/category
+            # gates still take precedence.
+            if (
+                retained_active_unknown
+                or (uid in reconcile_defaults and safe.get(uid, False))
+            ) and (uid not in overrides and uid not in explicitly_scoped):
+                continue
             registry.async_update_entity(
                 entity.entity_id,
                 disabled_by=er.RegistryEntryDisabler.INTEGRATION,
@@ -1171,6 +1240,21 @@ def cleanup_inactive_zone_entities(
             validated_overrides.update(configured_overrides)
     for runtime_node in runtime_nodes(parent):
         identity = identity_for_runtime(runtime_node)
+        node = identity.node
+        # Retire legacy rows for exact catalog objects whose dimension is
+        # unresolved.  They are intentionally absent from every platform
+        # projection; do not infer ownership from an address range or label.
+        for register in catalog_for_node(identity, CATALOG_REGISTRY):
+            index = getattr(getattr(register, "address", None), "index", None)
+            slot = _legacy_zone_bound_subindex(register)
+            if (
+                index not in ZONE_UNRESOLVED_OBJECT_SOURCES
+                or index in ZONE_PARENT_OBJECT_SOURCES
+                or slot is None
+                or slot <= 0
+            ):
+                continue
+            inactive_unique_ids.add(stable_object_id(parent, node, index, slot))
         for index in ZONE_SLOT_OBJECT_SOURCES:
             allowed_families = ZONE_FAMILY_SLOT_OBJECTS.get(index)
             if allowed_families is not None:
@@ -1183,22 +1267,40 @@ def cleanup_inactive_zone_entities(
             for slot in range(1, 11):
                 override = validated_overrides.get(override_key(identity.node, slot))
                 explicitly_disabled = type(override) is bool and override is False
-                if not (
-                    zone_is_confirmed_disabled(parent, identity.node, slot)
-                    or explicitly_disabled
-                ):
-                    continue
-                inactive_unique_ids.add(
-                    stable_object_id(parent, identity.node, index, slot)
+                confirmed_disabled = zone_is_confirmed_disabled(parent, node, slot)
+                # On the first coordinator projection, an unknown selector
+                # cannot safely expose its old child rows. Retiring those
+                # exact rows preserves their HA tombstones for restoration if
+                # a later read confirms the same stable slot. A profile that
+                # was previously confirmed active is retained across a
+                # transient read failure so the entities remain unavailable
+                # without registry churn.
+                profile = profile_for(parent, node, slot)
+                initial_unknown = (
+                    not zone_is_active(parent, node, slot)
+                    and not (
+                        (profile is not None and profile.active)
+                        or (node, slot)
+                        in getattr(parent, "_zone_confirmed_active_slots", set())
+                    )
+                    and not confirmed_disabled
                 )
+                if not (confirmed_disabled or explicitly_disabled or initial_unknown):
+                    continue
+                inactive_unique_ids.add(stable_object_id(parent, node, index, slot))
     removed = 0
     allowed_domains = {"sensor", "binary_sensor", "number", "select", "switch"}
     for entity in tuple(registry.entities.values()):
+        unique_id = getattr(entity, "unique_id", "")
+        base_unique_id, bit_separator, bit_name = unique_id.partition(":bit:")
+        exact_mapped_row = base_unique_id in inactive_unique_ids and (
+            not bit_separator or (bool(bit_name) and ":" not in bit_name)
+        )
         if (
             getattr(entity, "platform", None) != DOMAIN
             or getattr(entity, "config_entry_id", None) != entry_id
             or getattr(entity, "domain", None) not in allowed_domains
-            or getattr(entity, "unique_id", None) not in inactive_unique_ids
+            or not exact_mapped_row
         ):
             continue
         registry.async_remove(entity.entity_id)

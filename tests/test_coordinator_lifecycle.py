@@ -585,6 +585,7 @@ async def test_selector_refresh_retains_profile_but_marks_read_unknown(
         devices=(node,),
         zone_profiles={(4, 1): ZoneProfile(4, 1, 2)},
         zone_profile_states={(4, 1): ZoneReadState.CONFIRMED_ACTIVE},
+        _zone_confirmed_active_slots={(4, 1)},
         _zone_profile_cache_key=key,
         write_enabled=False,
         experimental_writes=False,
@@ -619,6 +620,7 @@ async def test_successful_zero_read_confirms_disabled_instead_of_unknown(
         devices=(node,),
         zone_profiles={(4, 1): ZoneProfile(4, 1, 2)},
         zone_profile_states={(4, 1): ZoneReadState.CONFIRMED_ACTIVE},
+        _zone_confirmed_active_slots={(4, 1)},
         _zone_profile_cache_key=key,
         write_enabled=False,
         experimental_writes=False,
@@ -628,6 +630,44 @@ async def test_successful_zero_read_confirms_disabled_instead_of_unknown(
     assert await OpenRBusCoordinator._async_discover_zone_profiles(coordinator)
     assert coordinator.zone_profiles[(4, 1)].function == 0
     assert coordinator.zone_profile_states[(4, 1)] is ZoneReadState.CONFIRMED_DISABLED
+    assert (4, 1) not in coordinator._zone_confirmed_active_slots
+    coordinator_module._ZONE_DISCOVERY_CURSOR.pop(key, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("was_active", [False, True])
+async def test_unrecognized_selector_retains_only_in_session_active_history(
+    monkeypatch, was_active: bool
+) -> None:
+    key = ("zone-unrecognized-function-test", str(was_active))
+    coordinator_module._ZONE_DISCOVERY_CURSOR.pop(key, None)
+    node = SimpleNamespace(identity=SimpleNamespace(node=4, model="Node 4"))
+
+    async def _read(address, *, node, **_kwargs):
+        assert address == ObjectAddress(coordinator_module.ZONE_FUNCTION_INDEX, 1)
+        return GenericRead(node, address, b"\xff", 255)
+
+    monkeypatch.setattr(coordinator_module, "catalog_for_node", lambda *_a, **_k: ())
+    monkeypatch.setattr(coordinator_module, "zone_function_slots", lambda _rows: (1,))
+    active_slots = {(4, 1)} if was_active else set()
+    coordinator = SimpleNamespace(
+        inventories=(node,),
+        devices=(node,),
+        zone_profiles={(4, 1): ZoneProfile(4, 1, 2)} if was_active else {},
+        zone_profile_states={(4, 1): ZoneReadState.CONFIRMED_ACTIVE}
+        if was_active
+        else {},
+        _zone_confirmed_active_slots=active_slots,
+        _zone_profile_cache_key=key,
+        write_enabled=False,
+        experimental_writes=False,
+        async_read_object=_read,
+    )
+
+    assert not await OpenRBusCoordinator._async_discover_zone_profiles(coordinator)
+    assert coordinator.zone_profiles[(4, 1)].function == 255
+    assert coordinator.zone_profile_states[(4, 1)] is ZoneReadState.UNKNOWN
+    assert ((4, 1) in coordinator._zone_confirmed_active_slots) is was_active
     coordinator_module._ZONE_DISCOVERY_CURSOR.pop(key, None)
 
 
@@ -954,6 +994,7 @@ async def test_coordinator_stops_zone_monitor_and_pollers_before_backend(
         lambda *a, **k: backend,
     )
     coordinator = OpenRBusCoordinator(_hass(), _entry(BACKEND_NATIVE))
+    coordinator._zone_confirmed_active_slots.add((4, 1))
     coordinator._openrbus_polling_coordinators = {"fast": _Poller()}
     coordinator._zone_profile_monitor_task = asyncio.create_task(zone_monitor())
     await monitor_started.wait()
@@ -976,6 +1017,7 @@ async def test_coordinator_stops_zone_monitor_and_pollers_before_backend(
         "parent_shutdown",
     ]
     assert coordinator._shutting_down is True
+    assert coordinator._zone_confirmed_active_slots == set()
 
 
 @pytest.mark.asyncio
