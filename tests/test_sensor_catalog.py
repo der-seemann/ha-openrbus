@@ -147,6 +147,7 @@ def test_obd_only_writable_declaration_needs_experimental_opt_in() -> None:
     )
     experimental = replace(
         catalog_experimental,
+        writable=True,
         access_level_evidence={
             "write": {"known": True, "complete": True, "levels": ["user"]}
         },
@@ -188,6 +189,7 @@ def test_iae_source_rw_projects_as_regular_control_without_experimental_opt_in()
     )
     experimental = replace(
         experimental_row,
+        writable=True,
         access_level_evidence={
             "write": {"known": True, "complete": True, "levels": ["user"]}
         },
