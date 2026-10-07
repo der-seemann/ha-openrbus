@@ -28,8 +28,8 @@ write_object:
       selector:
         text:
     allow_unsafe:
-      name: Confirm unsafe write
-      description: Required for catalog entries that need explicit write confirmation.
+      name: Confirm experimental write
+      description: Required only for experimental catalog entries; retained under the existing API key for compatibility.
       default: false
       selector:
         boolean:
