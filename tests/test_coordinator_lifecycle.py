@@ -241,6 +241,84 @@ async def test_cleanup_failure_keeps_thin_owner_fenced(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_config_entry_remove_keeps_owner_fenced_when_backend_stop_fails(
+    tmp_path,
+) -> None:
+    """HA removal preserves runtime ownership when physical stop is unproven."""
+    hass = HomeAssistant(str(tmp_path))
+    stop_calls = 0
+    allow_stop = False
+
+    class _Backend:
+        started = True
+        _owns_controller = True
+
+        async def async_stop(self) -> None:
+            nonlocal stop_calls
+            stop_calls += 1
+            if not allow_stop:
+                raise HomeAssistantError("disconnect proof unavailable")
+            self.started = False
+            self._owns_controller = False
+
+    backend = _Backend()
+    coordinator = OpenRBusCoordinator.__new__(OpenRBusCoordinator)
+    coordinator.config_entry = None
+    coordinator._backend = backend
+    coordinator._shutdown_complete = False
+    coordinator._shutting_down = False
+    coordinator._startup_cleanup_failed = False
+    coordinator._startup_task = None
+
+    class _Component:
+        async def async_remove_entry(self, remove_hass, remove_entry) -> None:
+            await integration.async_remove_entry(remove_hass, remove_entry)
+
+    class _Integration:
+        domain = integration.DOMAIN
+        logger = logging.getLogger(integration.DOMAIN)
+
+        async def async_get_component(self):
+            return _Component()
+
+    entry = ConfigEntry(
+        version=1,
+        minor_version=1,
+        domain=integration.DOMAIN,
+        title="bounded stop failure removal",
+        data=MappingProxyType({CONF_BACKEND: BACKEND_NATIVE}),
+        options=MappingProxyType({}),
+        source="user",
+        unique_id="bounded-stop-failure-removal",
+        entry_id="bounded-stop-failure-removal",
+        discovery_keys=MappingProxyType({}),
+        subentries_data=None,
+    )
+    entry.runtime_data = coordinator
+    entry._integration_for_domain = _Integration()
+    coordinator.config_entry = entry
+
+    # This is the real HA ConfigEntry callback boundary. HA catches exceptions
+    # from the integration remove callback; the entry still retains its runtime
+    # data object, and the controller fence remains owned.
+    async with entry.setup_lock:
+        await asyncio.wait_for(entry.async_remove(hass), timeout=1.2)
+
+    assert entry.runtime_data is coordinator
+    assert coordinator._shutting_down
+    assert not coordinator._shutdown_complete
+    assert backend._owns_controller is True
+    assert coordinator._startup_cleanup_failed
+    assert stop_calls == 1
+
+    # A bounded explicit retry keeps the same owner until stop is proven.
+    allow_stop = True
+    await asyncio.wait_for(coordinator.async_cancel_initial_startup(), timeout=0.2)
+    assert backend._owns_controller is False
+    assert stop_calls == 2
+
+
+@pytest.mark.asyncio
 async def test_entry_setup_keeps_coordinator_until_retry_then_forwards_once(
     monkeypatch,
 ) -> None:
