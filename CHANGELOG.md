@@ -13,11 +13,15 @@
 - Preserve safe user-enabled registry rows across default reconciliation and
   same-session zone-selector uncertainty, subject to access, safety, and
   explicit category/zone choices.
-- Retire legacy rows for exact mapped child objects when selector state is
-  initially unknown, and for exact source-audited unresolved objects, using
-  Home Assistant's recoverable registry tombstones. A previously confirmed
-  active slot remains available in the registry through transient same-session
-  uncertainty.
+- Retire legacy rows for exact mapped child objects when CP020 is confirmed
+  disabled, and for exact source-audited unresolved objects, using Home
+  Assistant's recoverable registry tombstones. Persist the exact entity
+  projection for previously confirmed active node/family/slot combinations so
+  those same rows can remain unavailable through selector uncertainty after a
+  restart. Historical identity never authorizes activity, polling, reads, or
+  writes; only a fresh positive CP020 read does. Retire never-confirmed unknown
+  rows and reload once when the exact projected UID set changes, not when only
+  a display label changes.
 - Project only evidence-supported active zones and expose bounded Thin-RPC
   flow-control reasons in diagnostics.
 
@@ -26,9 +30,9 @@
 - Pins the matching OpenRBus Core 0.4.7 release.
 - The audit has 262 exact positive slot-map keys; 22 unresolved zone-object
   mappings remain excluded from projection. The map is not complete for every
-  zone-related object. An initially unknown selector after restart may retire
-  old exact rows into recoverable tombstones before the active state is reread;
-  no prior-session active history is assumed.
+  zone-related object. A previously confirmed projection can remain unavailable
+  while CP020 is unknown; an unknown slot without a trusted prior manifest is
+  not projected. Confirmed CP020 zero retires the mapped child rows.
 - Registry projection and successful reads do not establish physical write
   safety.
 
