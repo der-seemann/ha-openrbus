@@ -45,12 +45,17 @@ from .entity_names import register_display_name, suggested_object_id
 from .identity import stable_gateway_id, stable_node_id, stable_object_id
 from .optional_register_filters import OPTIONAL_REGISTER_FILTERS
 from .zones import (
+    ZoneAssociation,
     ZoneKind,
     entity_zone_label,
     profile_for,
     zone_device_name,
     zone_enabled,
+    zone_association,
+    zone_is_active,
     zone_subindex,
+    ZONE_SLOT_OBJECT_SOURCES,
+    ZONE_FAMILY_SLOT_OBJECTS,
 )
 
 CATALOG_REGISTRY = Registry.load_default()
@@ -281,6 +286,18 @@ def rows_for_parent(
         else:
             registers = catalog_for_node(runtime_node, CATALOG_REGISTRY)
         for register in registers:
+            association = zone_association(register, identity)
+            if association is ZoneAssociation.UNRESOLVED:
+                # Exact source-known zone data without a proven slot dimension
+                # must not become a duplicate parent entity.
+                continue
+            if association is ZoneAssociation.ZONE_SLOT and not zone_is_active(
+                parent, identity.node, register.address.subindex
+            ):
+                # Activity must be known and positive before any platform sees
+                # a zone row. CP020 selectors are classified separately and
+                # remain on the parent for disabled slots to be activated.
+                continue
             if not include_diagnostics and is_diagnostic_register(register):
                 continue
             if not include_screed_drying and is_optional_filter_register(
@@ -307,10 +324,17 @@ def zone_row_enabled(
     identity: DeviceIdentity,
     register: RegisterCatalogEntry,
 ) -> bool:
-    """Return whether a zone row belongs to a selected non-empty zone."""
+    """Return whether an exact zone row has positive activity and selection."""
 
-    slot = zone_subindex(register)
-    return slot is None or zone_enabled(parent, identity.node, slot)
+    association = zone_association(register, identity)
+    if association is ZoneAssociation.UNRESOLVED:
+        return False
+    if association is not ZoneAssociation.ZONE_SLOT:
+        return True
+    slot = register.address.subindex
+    return zone_is_active(parent, identity.node, slot) and zone_enabled(
+        parent, identity.node, slot
+    )
 
 
 def _unobserved_source_rw_row(
@@ -504,7 +528,7 @@ def entity_group_key(
     elif is_optional_filter_register(parent, identity, register, "cooling"):
         base = f"node:{node}:optional:cooling"
     else:
-        slot = zone_subindex(register)
+        slot = zone_subindex(register, identity)
         if slot is not None:
             base = f"node:{node}:zone:{slot}"
         else:
@@ -553,7 +577,12 @@ def entity_category(
     unclassified.
     """
 
-    slot = zone_subindex(register)
+    association = zone_association(register, identity)
+    slot = (
+        register.address.subindex
+        if association is ZoneAssociation.FUNCTION_SELECTOR
+        else zone_subindex(register, identity)
+    )
     if slot is not None:
         from .zones import ZoneKind, profile_for
 
@@ -777,7 +806,7 @@ def async_apply_entity_overrides(
         row = rows_by_uid.get(uid)
         if row is not None:
             identity, register = row
-            slot = zone_subindex(register)
+            slot = zone_subindex(register, identity)
             # A missing CP020 read is unknown, not proof that a previously
             # enabled zone is inactive. Keep its registry choice until a
             # positive active/inactive profile arrives.
@@ -1096,6 +1125,58 @@ def cleanup_legacy_sensor_entities(
             # a later update call.
             if value is not None and value != "":
                 metadata.setdefault(field, value)
+        registry.async_remove(entity.entity_id)
+        removed += 1
+    return removed
+
+
+def cleanup_inactive_zone_entities(
+    hass: HomeAssistant,
+    parent: OpenRBusCoordinator,
+) -> int:
+    """Remove stale mapped child rows, retaining HA's restorable tombstones.
+
+    Home Assistant's EntityRegistry.async_remove persists a DeletedRegistryEntry
+    keyed by domain/platform/unique_id. Its next async_get_or_create restores
+    the old entity_id, name, area, disabled/hidden choices, icon, labels,
+    aliases, options, and registry UUID. Device registry rows are deliberately
+    untouched; stable child identifiers reconnect to the same user-named
+    device when its CP020 function becomes active again.
+    """
+
+    try:
+        registry = er.async_get(hass)
+    except (AttributeError, TypeError):
+        return 0
+    entry_id = parent.config_entry.entry_id
+    inactive_unique_ids: set[str] = set()
+    for runtime_node in runtime_nodes(parent):
+        identity = identity_for_runtime(runtime_node)
+        for index in ZONE_SLOT_OBJECT_SOURCES:
+            allowed_families = ZONE_FAMILY_SLOT_OBJECTS.get(index)
+            if allowed_families is not None:
+                resolution = getattr(identity, "registry_resolution", None)
+                family = getattr(identity, "family", None) or getattr(
+                    resolution, "family", None
+                )
+                if str(family or "").strip().casefold() not in allowed_families:
+                    continue
+            for slot in range(1, 11):
+                if zone_is_active(parent, identity.node, slot):
+                    continue
+                inactive_unique_ids.add(
+                    stable_object_id(parent, identity.node, index, slot)
+                )
+    removed = 0
+    allowed_domains = {"sensor", "binary_sensor", "number", "select", "switch"}
+    for entity in tuple(registry.entities.values()):
+        if (
+            getattr(entity, "platform", None) != DOMAIN
+            or getattr(entity, "config_entry_id", None) != entry_id
+            or getattr(entity, "domain", None) not in allowed_domains
+            or getattr(entity, "unique_id", None) not in inactive_unique_ids
+        ):
+            continue
         registry.async_remove(entity.entity_id)
         removed += 1
     return removed
@@ -1550,7 +1631,7 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
         """Make zone-scoped register names distinguishable in HA's entity list."""
 
         zone_label = entity_zone_label(parent, identity, register)
-        slot = zone_subindex(register)
+        slot = zone_subindex(register, self._identity)
         profile = profile_for(parent, identity.node, slot) if slot is not None else None
         if profile is not None and zone_enabled(parent, identity.node, slot):
             # The active zone is the entity's HA device, so HA already adds
@@ -1595,7 +1676,7 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
 
     @property
     def device_info(self) -> DeviceInfo:
-        slot = zone_subindex(self._register)
+        slot = zone_subindex(self._register, self._identity)
         profile = (
             profile_for(self._parent, self._identity.node, slot)
             if slot is not None
@@ -1735,6 +1816,7 @@ __all__ = [
     "access_level",
     "catalog_visible",
     "cleanup_legacy_sensor_entities",
+    "cleanup_inactive_zone_entities",
     "control_kind",
     "definition_for",
     "ensure_polling_coordinators",

@@ -418,7 +418,7 @@ class OpenRBusRegisterSensor(
 
     @property
     def device_info(self) -> DeviceInfo:
-        slot = zone_subindex(self._register)
+        slot = zone_subindex(self._register, self._identity)
         profile = (
             profile_for(self._parent, self._identity.node, slot)
             if slot is not None

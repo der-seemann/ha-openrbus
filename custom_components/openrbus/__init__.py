@@ -360,10 +360,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # writes and is safe to repeat on every reload.
     from .register_entities import (
         cleanup_legacy_sensor_entities,
+        cleanup_inactive_zone_entities,
         migrate_stable_registry_ids,
     )
 
     migrate_stable_registry_ids(hass, coordinator)
+    cleanup_inactive_zone_entities(hass, coordinator)
     cleanup_legacy_sensor_entities(hass, coordinator)
     if not hass.services.has_service(DOMAIN, "read_object"):
 

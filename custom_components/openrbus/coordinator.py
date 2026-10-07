@@ -75,6 +75,7 @@ from .validity import RegisterValidityTracker
 from .zones import (
     ZONE_FRIENDLY_NAME_INDEX,
     ZONE_FUNCTION_INDEX,
+    ZONE_SHORT_NAME_INDEX,
     ZoneProfile,
     normalized_overrides,
     normalized_selection_overrides,
@@ -93,6 +94,7 @@ _INITIAL_SETUP_CLEANUP_BUDGET = 8.0
 _INITIAL_SETUP_WAIT_SLICE = 15.0
 _ZONE_PROFILE_CACHE: dict[tuple[str, str], dict[tuple[int, int], ZoneProfile]] = {}
 _ZONE_DISCOVERY_CURSOR: dict[tuple[str, str], int] = {}
+_ZONE_PROFILE_REFRESH_INTERVAL = 300
 _REGISTRY = Registry.load_default()
 _ERROR_CLASSES = ("abort", "item", "batch", "decode", "correlation", "session")
 _ABORT_CATEGORIES = frozenset(
@@ -350,15 +352,16 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         self.effective_access_levels: dict[int, int] = {}
         # This is populated by read-only CP020/name reads after discovery.
         # Entries are keyed by protocol identity, never display names.
-        self.zone_profiles = dict(
-            _ZONE_PROFILE_CACHE.get(self._zone_profile_cache_key, {})
-        )
+        # CP020 activity is live device evidence. Never reuse it across a
+        # coordinator reload; the new instance must positively reread selectors.
+        self.zone_profiles: dict[tuple[int, int], ZoneProfile] = {}
         self._zone_entities: set[Any] = set()
         self._zone_discovery_task: asyncio.Task[None] | None = None
         self._startup_task: asyncio.Task[None] | None = None
         self._startup_retryable = False
         self._startup_cleanup_failed = False
         self._startup_lifecycle_unsubscribe = None
+        self._zone_profile_monitor_task: asyncio.Task[None] | None = None
         # Set before child polling coordinators shut down.  An in-flight poll
         # may finish its current request, but must not start another batch
         # after the parent has begun releasing the physical controller.
@@ -475,6 +478,8 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                     self._async_retry_zone_discovery(),
                     name="OpenRBus deferred zone discovery",
                 )
+            else:
+                self._schedule_zone_profile_monitor()
         except BaseException as error:
             # Backend setup can succeed before the remaining discovery and
             # catalog projection steps fail. Stop the partially initialized
@@ -658,7 +663,9 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         which is safer than exposing every static SCB-10 zone array.
         """
 
-        profiles = dict(self.zone_profiles)
+        # Build from this read cycle only. Failed/unread selectors must remove
+        # old positive evidence so they cannot keep child rows eligible.
+        profiles: dict[tuple[int, int], ZoneProfile] = {}
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _ZONE_DISCOVERY_STARTUP_BUDGET
         complete = True
@@ -679,7 +686,9 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             )
 
         if not candidates:
+            self._has_zone_function_slots = False
             return True
+        self._has_zone_function_slots = True
 
         cursor = _ZONE_DISCOVERY_CURSOR.get(self._zone_profile_cache_key, 0)
         cursor %= len(candidates)
@@ -691,8 +700,6 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             index = (cursor + offset) % len(candidates)
             _runtime_node, identity, node, slot = candidates[index]
             processed += 1
-            if (node, slot) in profiles:
-                continue
             try:
                 function_read = await self.async_read_object(
                     ObjectAddress(ZONE_FUNCTION_INDEX, slot),
@@ -721,6 +728,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 self.zone_profiles = dict(profiles)
                 continue
             friendly_name: str | None = None
+            short_name: str | None = None
             try:
                 name_read = await self.async_read_object(
                     ObjectAddress(ZONE_FRIENDLY_NAME_INDEX, slot),
@@ -729,11 +737,32 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                     recover_on_transport_error=False,
                 )
                 if isinstance(name_read.value, str):
-                    friendly_name = name_read.value.strip("\x00 ") or None
+                    friendly_name = name_read.value.strip("\x00").strip() or None
             except (HomeAssistantError, OpenRBusError, TypeError, ValueError):
                 # CP020 already proved that this slot is active. A missing
                 # optional label must not block discovery of other slots.
                 _LOGGER.debug("Zone label unavailable for node %s slot %s", node, slot)
+            if not friendly_name:
+                try:
+                    short_name_read = await self.async_read_object(
+                        ObjectAddress(ZONE_SHORT_NAME_INDEX, slot),
+                        node=node,
+                        timeout=_ZONE_DISCOVERY_READ_TIMEOUT,
+                        recover_on_transport_error=False,
+                    )
+                    if isinstance(short_name_read.value, str):
+                        short_name = short_name_read.value.strip("\x00").strip() or None
+                except (
+                    HomeAssistantError,
+                    OpenRBusError,
+                    TypeError,
+                    ValueError,
+                ):
+                    _LOGGER.debug(
+                        "Short zone label unavailable for node %s slot %s",
+                        node,
+                        slot,
+                    )
             # The device model/family is manufacturer identity evidence.
             # Keep it on each profile so both the Options Flow and HA's
             # zone child device show which bus node owns the slot.
@@ -743,12 +772,16 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 or getattr(identity, "name", None)
             )
             profile = ZoneProfile(
-                node, slot, function_read.value, friendly_name, node_name
+                node,
+                slot,
+                function_read.value,
+                friendly_name,
+                node_name,
+                short_name,
             )
             profiles[(node, slot)] = profile
             self.zone_profiles = dict(profiles)
         self.zone_profiles = profiles
-        _ZONE_PROFILE_CACHE[self._zone_profile_cache_key] = dict(profiles)
         _ZONE_DISCOVERY_CURSOR[self._zone_profile_cache_key] = (
             cursor + processed
         ) % len(candidates)
@@ -775,6 +808,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                     self.hass.config_entries.async_schedule_reload(self._entry_id)
                     return
                 if complete:
+                    self._schedule_zone_profile_monitor()
                     return
                 _LOGGER.debug(
                     "Zone discovery remains incomplete after retry %s/%s",
@@ -786,6 +820,37 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         except Exception:
             _LOGGER.debug("Deferred OpenRBus zone discovery failed", exc_info=True)
 
+    def _schedule_zone_profile_monitor(self) -> None:
+        """Periodically refresh CP020 so child projection follows device state."""
+
+        if (
+            not getattr(self, "_has_zone_function_slots", False)
+            or self._zone_profile_monitor_task is not None
+        ):
+            return
+        self._zone_profile_monitor_task = schedule_background_task(
+            self.hass,
+            self.config_entry,
+            self._async_monitor_zone_profiles(),
+            name="OpenRBus zone selector refresh",
+        )
+
+    async def _async_monitor_zone_profiles(self) -> None:
+        """Reconcile activity changes from fresh, read-only CP020 selector data."""
+
+        while not self._shutting_down:
+            await asyncio.sleep(_ZONE_PROFILE_REFRESH_INTERVAL)
+            if self._shutting_down:
+                return
+            previous = dict(self.zone_profiles)
+            await self._async_discover_zone_profiles()
+            for entity in tuple(self._zone_entities):
+                entity.async_refresh_zone_name()
+            if self._shutting_down:
+                return
+            if _zone_selection_changed(previous, self.zone_profiles):
+                self.hass.config_entries.async_schedule_reload(self._entry_id)
+                return
     @staticmethod
     def _inventory_for(identity: DeviceIdentity) -> DeviceInventory:
         """Project Core discovery evidence into its inventory/catalog model."""

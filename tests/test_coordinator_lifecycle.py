@@ -499,8 +499,67 @@ async def test_zone_discovery_continues_after_an_earlier_node_read_failure(
     monkeypatch,
 ) -> None:
     key = ("zone-discovery-fairness-test", "AA:BB")
-    coordinator_module._ZONE_PROFILE_CACHE.pop(key, None)
     coordinator_module._ZONE_DISCOVERY_CURSOR.pop(key, None)
+    coordinator_module._ZONE_DISCOVERY_CURSOR.pop(key, None)
+
+
+@pytest.mark.asyncio
+async def test_selector_refresh_discards_stale_active_profile_on_read_failure(
+    monkeypatch,
+) -> None:
+    key = ("zone-stale-profile-test", "AA:CC")
+    node = SimpleNamespace(identity=SimpleNamespace(node=4, model="Node 4"))
+
+    async def _read(_address, *, node, **_kwargs):
+        raise HomeAssistantError("CP020 unavailable")
+
+    monkeypatch.setattr(coordinator_module, "catalog_for_node", lambda *_a, **_k: ())
+    monkeypatch.setattr(coordinator_module, "zone_function_slots", lambda _rows: (1,))
+    parent = SimpleNamespace(
+        inventories=(node,),
+        devices=(node,),
+        zone_profiles={(4, 1): ZoneProfile(4, 1, 2)},
+        _zone_profile_cache_key=key,
+        write_enabled=False,
+        experimental_writes=False,
+        async_read_object=_read,
+    )
+
+    assert not await OpenRBusCoordinator._async_discover_zone_profiles(parent)
+    assert parent.zone_profiles == {}
+    coordinator_module._ZONE_DISCOVERY_CURSOR.pop(key, None)
+
+
+@pytest.mark.asyncio
+async def test_selector_refresh_reloads_when_active_slot_becomes_unread(monkeypatch) -> None:
+    key = ("zone-selector-monitor-test", "AA:DD")
+    coordinator_module._ZONE_DISCOVERY_CURSOR.pop(key, None)
+    reloads: list[str] = []
+
+    async def _no_wait(_seconds: float) -> None:
+        return None
+
+    async def _discover(self) -> bool:
+        self.zone_profiles = {}
+        return False
+
+    monkeypatch.setattr(
+        "custom_components.openrbus.coordinator.asyncio.sleep", _no_wait
+    )
+    coordinator = SimpleNamespace(
+        _shutting_down=False,
+        _entry_id="entry",
+        zone_profiles={(4, 1): ZoneProfile(4, 1, 2)},
+        _zone_entities=set(),
+        _async_discover_zone_profiles=lambda: _discover(coordinator),
+        hass=SimpleNamespace(
+            config_entries=SimpleNamespace(async_schedule_reload=reloads.append)
+        ),
+    )
+
+    await OpenRBusCoordinator._async_monitor_zone_profiles(coordinator)
+
+    assert reloads == ["entry"]
     calls: list[tuple[int, int]] = []
     nodes = tuple(
         SimpleNamespace(
@@ -536,10 +595,10 @@ async def test_zone_discovery_continues_after_an_earlier_node_read_failure(
         (1, coordinator_module.ZONE_FUNCTION_INDEX),
         (4, coordinator_module.ZONE_FUNCTION_INDEX),
         (4, coordinator_module.ZONE_FRIENDLY_NAME_INDEX),
+        (4, coordinator_module.ZONE_SHORT_NAME_INDEX),
     ]
     assert parent.zone_profiles[(4, 1)].active
     assert parent.zone_profiles[(4, 1)].node_name == "Node 4"
-    coordinator_module._ZONE_PROFILE_CACHE.pop(key, None)
     coordinator_module._ZONE_DISCOVERY_CURSOR.pop(key, None)
 
 

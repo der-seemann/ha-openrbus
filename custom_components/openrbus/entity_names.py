@@ -487,7 +487,7 @@ def suggested_object_id(
 ) -> str:
     """Build a readable, deterministic Home Assistant object ID suggestion."""
 
-    slot = zone_subindex(register)
+    slot = zone_subindex(register, identity)
     profile = profile_for(parent, identity.node, slot) if slot is not None else None
     language = getattr(parent, "language", "de")
     if profile is not None and zone_enabled(parent, identity.node, slot):
