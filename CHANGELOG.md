@@ -13,6 +13,13 @@
 - Preserve safe user-enabled registry rows across default reconciliation and
   same-session zone-selector uncertainty, subject to access, safety, and
   explicit category/zone choices.
+- Poll explicitly enabled, read-authorized non-recommended sensor and
+  binary-sensor projections while preserving current access, category, zone,
+  and user-disable gates; this path does not enable typed controls or writes.
+- Normalize the German display names for CM030, CM210, CM220, CM230, CP750,
+  and CP140. Keep CP020 selectors on the parent device, never treat an array
+  header as a zone slot, and leave CP080/CP140 activity dimensions unassigned
+  to a heating-circuit slot until their flattening is proven.
 - Retire legacy rows for exact mapped child objects when CP020 is confirmed
   disabled, and for exact source-audited unresolved objects, using Home
   Assistant's recoverable registry tombstones. Persist the exact entity
