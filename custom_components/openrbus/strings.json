@@ -52,7 +52,7 @@
           "diagnostics_enabled": "Enable diagnostic data",
           "flow_action": "Navigation",
           "cooling_enabled": "Enable cooling functions",
-          "experimental_writes": "Expose additional registers without an explicit IsReadOnly declaration as experimental controls. Requires write access to be enabled."
+          "experimental_writes": "Expose OBD-declared writable registers without qualifying RW source evidence as experimental controls. Requires write access to be enabled."
         },
         "data_description": {
           "read_access_level": "Choose the highest register level whose values should be exposed.",
@@ -61,7 +61,7 @@
           "diagnostics_enabled": "Add diagnostic entities with transport and communication status for troubleshooting.",
           "screed_drying_enabled": "Add entities for the screed-drying program when the controller provides them.",
           "cooling_enabled": "Include registers in the reviewed cooling-function map. When disabled, those exact registers are excluded before entity selection and creation.",
-          "experimental_writes": "Expose additional registers without an explicit IsReadOnly declaration as experimental controls. Requires write access to be enabled."
+          "experimental_writes": "Expose OBD-declared writable registers without qualifying RW source evidence as experimental controls. Requires write access to be enabled."
         },
         "description": "Choose independent read and write access policies. A higher read policy does not enable writes."
       },
@@ -149,7 +149,7 @@
           "poll_interval_slow": "Slow polling interval (seconds)",
           "cooling_enabled": "Enable cooling functions",
           "_openrbus_entity_picker": "Configure entity selection",
-          "experimental_writes": "Expose additional registers without an explicit IsReadOnly declaration as experimental controls. Requires write access to be enabled."
+          "experimental_writes": "Expose OBD-declared writable registers without qualifying RW source evidence as experimental controls. Requires write access to be enabled."
         },
         "data_description": {
           "language": "Choose the language used for entity names and descriptions.",
@@ -169,7 +169,7 @@
           "passkey": "PIN used to pair with the gateway over Bluetooth.",
           "cooling_enabled": "Include registers in the reviewed cooling-function map. When disabled, those exact registers are excluded before entity selection and creation.",
           "_openrbus_entity_picker": "Open the three-step selector: Device, Category, then Entities. Existing entity identities and saved choices are retained.",
-          "experimental_writes": "Expose additional registers without an explicit IsReadOnly declaration as experimental controls. Requires write access to be enabled."
+          "experimental_writes": "Expose OBD-declared writable registers without qualifying RW source evidence as experimental controls. Requires write access to be enabled."
         }
       },
       "access_warning": {

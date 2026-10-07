@@ -53,7 +53,7 @@
           "diagnostics_enabled": "Diagnosedaten aktivieren",
           "flow_action": "Navigation",
           "cooling_enabled": "Kühlfunktionen aktivieren",
-          "experimental_writes": "Zusätzliche Register ohne explizite IsReadOnly-Kennzeichnung als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt."
+          "experimental_writes": "Laut OBD schreibbare Register ohne bestätigten RW-Quellennachweis als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt."
         },
         "data_description": {
           "read_access_level": "Schieberegler: 1 Benutzer, 2 Installateur, 3 Fachhandwerker. Die gespeicherte Stufe ist vorausgewählt.",
@@ -62,7 +62,7 @@
           "diagnostics_enabled": "Fügt Diagnose-Entitäten mit Transport- und Kommunikationsstatus zur Fehlersuche hinzu.",
           "screed_drying_enabled": "Fügt Entitäten für das Estrichtrocknungsprogramm hinzu, sofern der Regler diese bereitstellt.",
           "cooling_enabled": "Register aus der geprüften Funktionszuordnung Kühlung anzeigen. Ist die Option aus, werden genau diese Register vor Auswahl und Entitätserzeugung ausgeschlossen.",
-          "experimental_writes": "Zusätzliche Register ohne explizite IsReadOnly-Kennzeichnung als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt."
+          "experimental_writes": "Laut OBD schreibbare Register ohne bestätigten RW-Quellennachweis als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt."
         }
       },
       "access_warning": {
@@ -149,7 +149,7 @@
           "poll_interval_slow": "Langsames Polling (Sekunden)",
           "cooling_enabled": "Kühlfunktionen aktivieren",
           "_openrbus_entity_picker": "Entitätsauswahl konfigurieren",
-          "experimental_writes": "Zusätzliche Register ohne explizite IsReadOnly-Kennzeichnung als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt."
+          "experimental_writes": "Laut OBD schreibbare Register ohne bestätigten RW-Quellennachweis als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt."
         },
         "data_description": {
           "language": "Legt die Sprache für Namen und Beschreibungen der Entitäten fest.",
@@ -169,7 +169,7 @@
           "passkey": "PIN zum Koppeln des Gateways über Bluetooth.",
           "cooling_enabled": "Register aus der geprüften Funktionszuordnung Kühlung anzeigen. Ist die Option aus, werden genau diese Register vor Auswahl und Entitätserzeugung ausgeschlossen.",
           "_openrbus_entity_picker": "Dreistufige Auswahl öffnen: Gerät, Kategorie, Entitäten. Vorhandene Entitätskennungen und gespeicherte Auswahl bleiben erhalten.",
-          "experimental_writes": "Zusätzliche Register ohne explizite IsReadOnly-Kennzeichnung als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt."
+          "experimental_writes": "Laut OBD schreibbare Register ohne bestätigten RW-Quellennachweis als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt."
         },
         "description": "Kein passender Bluetooth-Adapter in Reichweite? [ESP-Proxy einrichten]({esphome_proxy_setup_url})."
       },
