@@ -45,6 +45,7 @@ from openrbus.transport import BleakMessageTransport
 from openrbus.transport.thin_gatt import (
     GattHandles,
     ThinGattCorrelationError,
+    ThinGattFlowControlError,
     ThinGattLink,
     ThinGattMessageTransport,
     ThinGattProfile,
@@ -145,7 +146,18 @@ _REGISTRY = Registry.load_default()
 
 
 _SESSION_SUBTYPES = frozenset(
-    {"not_ready", "link_lost", "timeout", "not_secure", "transport"}
+    {
+        "not_ready",
+        "link_lost",
+        "timeout",
+        "not_secure",
+        "transport",
+        "flow_control_queue_full",
+        "flow_control_frame_too_large",
+        "flow_control_handle_registry_full",
+        "flow_control_payload_too_large",
+        "flow_control_unknown",
+    }
 )
 _BATCH_SUBTYPES = frozenset({"malformed", "abort", "fallback"})
 _ABORT_CATEGORIES = {
@@ -293,6 +305,16 @@ def _read_error_subtype(error: BaseException, error_class: str) -> str | None:
         return None
     if isinstance(error, (RequestTimeoutError, TimeoutError)):
         return "timeout"
+    if isinstance(error, ThinGattFlowControlError):
+        reason = error.reason
+        if reason in {
+            "queue_full",
+            "frame_too_large",
+            "handle_registry_full",
+            "payload_too_large",
+        }:
+            return f"flow_control_{reason}"
+        return "flow_control_unknown"
     if isinstance(error, ThinGattSessionStateError):
         # Core's state exception is a bounded type; its messages currently
         # describe these three fixed states. The message is inspected only to

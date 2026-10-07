@@ -16,6 +16,7 @@ from openrbus.errors import (
 from openrbus.protocol.canip import ObjectAddress
 from openrbus.transport.thin_gatt import (
     ThinGattCorrelationError,
+    ThinGattFlowControlError,
     ThinGattSessionStateError,
 )
 
@@ -286,6 +287,8 @@ def test_read_error_class_is_fixed_and_never_uses_error_text(error, expected) ->
         (ThinGattSessionStateError("private link not securely prepared"), "not_secure"),
         (RequestTimeoutError("private target"), "timeout"),
         (TransportError("private transport text"), "transport"),
+        (ThinGattFlowControlError("queue_full"), "flow_control_queue_full"),
+        (ThinGattFlowControlError("private frame payload"), "flow_control_unknown"),
     ],
 )
 def test_session_error_subtype_is_fixed_and_redacted(error, expected) -> None:
