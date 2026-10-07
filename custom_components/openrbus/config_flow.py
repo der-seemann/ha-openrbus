@@ -1363,9 +1363,9 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             ]
             if getattr(register, "safety", None) == "unverified":
                 write_note = (
-                    "Schreiben nicht validiert (nur lesbar)"
+                    "Physische Schreibvalidierung fehlt"
                     if runtime.language == "de"
-                    else "Write not validated (read-only)"
+                    else "Physical write validation unavailable"
                 )
                 group_label = f"{group_label} — {write_note}"
             node = groups.setdefault(

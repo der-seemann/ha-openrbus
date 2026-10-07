@@ -31,6 +31,7 @@ def test_synthetic_confirmed_register_projects_as_control_only_after_both_gates(
     confirmed = replace(
         row,
         safety="validated",
+        write_classification="regular",
         access_level_evidence={
             "write": {"known": True, "complete": True, "levels": ["User"]}
         },
@@ -129,14 +130,27 @@ def test_cp733_validated_scoped_write_projects_as_select() -> None:
     )
 
 
-def test_unverified_writable_declaration_needs_experimental_opt_in() -> None:
+def test_obd_only_writable_declaration_needs_experimental_opt_in() -> None:
     identity = resolve_device_identity(DeviceIdentity(4, None, None, "SCB-10"))
-    address = ObjectAddress(0x500F, 0)
-    ordinary = next(row for row in catalog_for_node(identity) if row.address == address)
-    experimental = next(
+    address = ObjectAddress(0x1000, 0)
+    ordinary = next(
         row
-        for row in catalog_for_node(identity, experimental_writes=True)
+        for row in catalog_for_node(identity, capabilities=(address,))
         if row.address == address
+    )
+    catalog_experimental = next(
+        row
+        for row in catalog_for_node(
+            identity, capabilities=(address,), experimental_writes=True
+        )
+        if row.address == address
+    )
+    experimental = replace(
+        catalog_experimental,
+        writable=True,
+        access_level_evidence={
+            "write": {"known": True, "complete": True, "levels": ["user"]}
+        },
     )
     parent = type(
         "Parent",
@@ -150,10 +164,54 @@ def test_unverified_writable_declaration_needs_experimental_opt_in() -> None:
     )()
 
     assert ordinary.safety == "unverified"
+    assert ordinary.write_classification == "experimental"
     assert ordinary.writable is False
     assert not should_project_as_control(parent, ordinary, 1)
     parent.experimental_writes = True
     assert experimental.writable is True
+    assert should_project_as_control(parent, experimental, 1)
+
+
+def test_iae_source_rw_projects_as_regular_control_without_experimental_opt_in() -> (
+    None
+):
+    identity = resolve_device_identity(DeviceIdentity(4, None, None, "SCB-10"))
+    rows = {row.address: row for row in catalog_for_node(identity, max_access_level=3)}
+    source_rw = rows[ObjectAddress(0x200E, 0)]
+    experimental_row = next(
+        row
+        for row in catalog_for_node(
+            identity,
+            capabilities=(ObjectAddress(0x1000, 0),),
+            experimental_writes=True,
+        )
+        if row.address == ObjectAddress(0x1000, 0)
+    )
+    experimental = replace(
+        experimental_row,
+        writable=True,
+        access_level_evidence={
+            "write": {"known": True, "complete": True, "levels": ["user"]}
+        },
+    )
+    parent = type(
+        "Parent",
+        (),
+        {
+            "language": "en",
+            "write_enabled": True,
+            "experimental_writes": False,
+            "configured_write_access_level": 1,
+        },
+    )()
+
+    assert source_rw.write_classification == "regular"
+    assert source_rw.safety == "unverified"
+    assert should_project_as_control(parent, source_rw, 1)
+    assert experimental.write_classification == "experimental"
+    assert not should_project_as_control(parent, experimental, 1)
+
+    parent.experimental_writes = True
     assert should_project_as_control(parent, experimental, 1)
 
 

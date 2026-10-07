@@ -1388,9 +1388,18 @@ def write_access_allowed(
         or effective_access_level < parent.configured_write_access_level
     ):
         return False
-    if getattr(register, "safety", "unverified") == "unverified" and not getattr(
+    classification = getattr(register, "write_classification", None)
+    if classification is None:
+        # Compatibility for older Core catalog objects and synthetic fixtures.
+        safety = getattr(register, "safety", "unverified")
+        classification = (
+            "regular" if safety in {"validated", "source_supported"} else "experimental"
+        )
+    if classification == "experimental" and not getattr(
         parent, "experimental_writes", False
     ):
+        return False
+    if classification != "regular" and classification != "experimental":
         return False
     evidence = register.access_level_evidence.get("write", {})
     if (
@@ -1661,6 +1670,14 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
             "unit": register.unit,
             "readable": register.readable,
             "writable": register.writable,
+            "write_classification": getattr(
+                register, "write_classification", "unknown"
+            ),
+            # Experimental opt-in follows the source authorization class;
+            # ``unsafe`` below is retained for compatibility and describes
+            # physical validation only.
+            "experimental_write": getattr(register, "write_classification", "unknown")
+            == "experimental",
             "access_level_evidence": register.access_level_evidence,
             "safety": register.safety,
             "unsafe": register.safety != "validated",
@@ -1689,9 +1706,14 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
             self._register.address,
             value,
             node=self._identity.node,
-            # Only a catalog control that passed Core's validated safety gate
-            # reaches this path. Core remains authoritative for every write.
-            allow_unsafe=self._register.safety != "validated",
+            # The experimental acknowledgement follows source classification;
+            # physical validation status is reported separately.
+            allow_unsafe=getattr(
+                self._register,
+                "write_classification",
+                "experimental" if self._register.safety == "unverified" else "regular",
+            )
+            == "experimental",
             verify=True,
         )
         if not plan.verified:

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.6 — release candidate
+
+### Changed
+
+- Separate regular source-backed RW classification from physical write
+  validation status in the catalog and HA controls.
+- Keep OBD-only writable declarations experimental and require a complete,
+  unambiguous write access level before a control is enabled.
+
 ## 0.4.5 — release candidate
 
 ### Added and changed

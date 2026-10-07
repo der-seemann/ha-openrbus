@@ -48,7 +48,7 @@ operator-managed OTA and rollback guidance.
 
 Access level 1 is the safe default and is intended for read-only operation. Higher levels require the configured gateway credentials and a confirmation warning. Enabling **write access** is separate from selecting a level.
 
-The `openrbus.write_object` service also requires `allow_unsafe: true` for catalog rows whose write safety has not been independently validated. The service verifies the effective device access level, type/range/enumeration constraints, and read-back. A failed verification is reported as an error; the integration never treats a requested value as proof that a write worked.
+The `openrbus.write_object` service accepts `allow_unsafe: true` only as an explicit confirmation for catalog rows classified as experimental. Regular source-backed rows do not require that confirmation merely because their physical write behavior is unverified. The service still verifies the effective device access level, type/range/enumeration constraints, and read-back. A failed verification is reported as an error; the integration never treats a requested value as proof that a write worked. The service field keeps its existing `allow_unsafe` API key for compatibility.
 
 Use the catalog-projected Number, Select, and Switch entities for normal automation. Readable controls remain pollable even when their write path is blocked. Do not enable expert entities unless their register semantics are understood for the connected device.
 
@@ -61,7 +61,7 @@ The integration creates one Home Assistant device per discovered OpenRBus node a
 - Selects expose complete enumerations with translated option labels.
 - Switches are created only for explicitly boolean enumerations.
 
-The basic set is enabled by default. Less common or noisy catalog rows are present in the entity registry but disabled by default. Writable catalog rows whose exact address is absent from the connected device's discovered capabilities also start disabled, even when comparable rows exist on other models. To activate one that applies to your device, open **Configure entity selection** in the Options flow and enable it for that device. This changes entity selection; the existing write enable and access checks still govern whether a control can write. Registers without an explicit read-only declaration require the separate, default-off experimental write option as well. Unique IDs include the config entry, node, and protocol object address, so multiple nodes do not collide. Polling is grouped into fast, standard, and slow intervals; change those intervals in the Options flow rather than editing YAML.
+The basic set is enabled by default. Less common or noisy catalog rows are present in the entity registry but disabled by default. Writable catalog rows whose exact address is absent from the connected device's discovered capabilities also start disabled, even when comparable rows exist on other models. To activate one that applies to your device, open **Configure entity selection** in the Options flow and enable it for that device. This changes entity selection; the existing write enable and access checks still govern whether a control can write. Regular controls require positive IAE writable evidence for the matching family and object, or a bounded matching family-array inference, plus complete access-level evidence. OBD-only `IsReadOnly=False` declarations are experimental and require both write access and the separate, default-off experimental-write option. Explicit read-only, conflicting, unknown, or incomplete evidence is not enabled by that option; absence of a read-only flag alone does not establish write permission. These source classifications are separate from physical write validation, so a regular control may still have unverified physical safety. Unique IDs include the config entry, node, and protocol object address, so multiple nodes do not collide. Polling is grouped into fast, standard, and slow intervals; change those intervals in the Options flow rather than editing YAML.
 
 The integration polls readable rows independently of write permission. Batch responses are correlated by node and object address. Unsupported or partial items use a bounded single-object fallback, so one malformed response does not hide otherwise healthy entities. Reconnects and reloads close the old coordinator before new platform listeners are created.
 
@@ -112,7 +112,7 @@ Remove the OpenRBus config entry from **Settings → Devices & services**, then 
 
 ## Development and release validation
 
-The release candidate is version `0.4.4`. The HA integration and the `openrbus` protocol core are versioned independently but the HA manifest pins the compatible Core release exactly. Run the test suite in a Home Assistant development environment with the pinned dependencies in `requirements-test.txt`:
+The current release candidate is version `0.4.6`. The HA integration and the `openrbus` protocol core are versioned independently, and the HA manifest pins the compatible Core release exactly. Run the test suite in a Home Assistant development environment with the pinned dependencies in `requirements-test.txt`:
 
 ```console
 python -m pip install -r requirements-test.txt
@@ -120,7 +120,7 @@ python -m pytest -q
 python -m compileall -q custom_components
 ```
 
-The repository also runs HACS validation and Home Assistant Hassfest in GitHub Actions. See [CHANGELOG.md](CHANGELOG.md) and [RELEASE_HA_OPENRBUS_0.4.4.md](RELEASE_HA_OPENRBUS_0.4.4.md) for the release scope, quality-scale matrix, privacy review, and remaining external release actions.
+The repository also runs HACS validation and Home Assistant Hassfest in GitHub Actions. See [CHANGELOG.md](CHANGELOG.md) and the version-specific release notes for the release scope, quality-scale matrix, privacy review, and remaining external release actions.
 
 ## License
 
