@@ -2296,6 +2296,29 @@ async def test_stop_waits_for_physical_disconnect_before_releasing_controller() 
 
 
 @pytest.mark.asyncio
+async def test_stop_rejects_normal_cleanup_return_with_owner_still_fenced(
+    monkeypatch,
+) -> None:
+    backend = ThinRpcBackend(_hass(), controller_id="controller")
+    backend._owns_controller = True
+    backend._active_controllers.add(backend.controller_id)
+    backend._controller_owner_generations[backend.controller_id] = (
+        backend._owner_generation
+    )
+
+    async def incomplete_cleanup() -> None:
+        return
+
+    monkeypatch.setattr(backend, "_cleanup_owned_session", incomplete_cleanup)
+
+    with pytest.raises(HomeAssistantError, match="did not release this session"):
+        await backend.async_stop()
+
+    assert backend._owns_controller
+    assert backend.controller_id in backend._active_controllers
+
+
+@pytest.mark.asyncio
 async def test_stop_uses_scoped_proxy_disconnect_if_rpc_disconnect_stalls(
     monkeypatch,
 ) -> None:
@@ -2405,6 +2428,10 @@ async def test_start_failure_retains_controller_until_safe_stop_then_allows_setu
     with pytest.raises(HomeAssistantError, match="startup probe failed"):
         await first.async_start()
 
+    assert first._owns_controller is True
+    assert controller_id in first._active_controllers
+    with pytest.raises(HomeAssistantError, match="physical disconnect timeout"):
+        await first.async_stop()
     assert first._owns_controller is True
     assert controller_id in first._active_controllers
 

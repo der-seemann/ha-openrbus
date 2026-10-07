@@ -63,6 +63,29 @@ async def test_native_backend_owns_local_transport_lifecycle() -> None:
 
 
 @pytest.mark.asyncio
+async def test_native_backend_retains_transport_when_disconnect_is_unproven() -> None:
+    class _StickyTransport(_Transport):
+        async def disconnect(self) -> None:
+            self.disconnects += 1
+
+    transport = _StickyTransport("AA:BB:CC:DD:EE:FF")
+    backend = NativeBluetoothBackend(
+        SimpleNamespace(),
+        address="AA:BB:CC:DD:EE:FF",
+        transport_factory=lambda _address: transport,
+    )
+    await backend.async_start()
+    client = backend.client
+
+    with pytest.raises(HomeAssistantError, match="did not prove the link is down"):
+        await backend.async_stop()
+
+    assert backend.transport is transport
+    assert backend.client is client
+    assert backend.started
+
+
+@pytest.mark.asyncio
 async def test_native_backend_retries_one_fresh_transport_on_correlation_error(
     monkeypatch,
 ) -> None:

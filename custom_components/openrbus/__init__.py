@@ -12,9 +12,9 @@ from typing import Any
 
 import voluptuous as vol
 from annotatedyaml import YAMLException
-from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.util.yaml import Secrets
 
@@ -46,7 +46,11 @@ from .const import (
     CONF_TRANSPORT_MIGRATION,
     DOMAIN,
 )
-from .coordinator import OpenRBusCoordinator, schedule_first_refresh_in_background
+from .coordinator import (
+    _INITIAL_SETUP_CLEANUP_BUDGET,
+    OpenRBusCoordinator,
+    schedule_first_refresh_in_background,
+)
 from .proxy_provisioning import PROXY_SOURCE_VERSION, read_proxy_yaml
 
 PLATFORMS = ["sensor", "binary_sensor", "number", "select", "switch"]
@@ -246,6 +250,30 @@ async def _cancel_task(task: asyncio.Task[object]) -> None:
         pass
 
 
+async def _async_prove_coordinator_shutdown(
+    coordinator: OpenRBusCoordinator,
+) -> None:
+    """Finish bounded cleanup before replacing a stopped coordinator."""
+
+    try:
+        async with asyncio.timeout(_INITIAL_SETUP_CLEANUP_BUDGET * 4):
+            await coordinator.async_shutdown()
+    except asyncio.CancelledError:
+        raise
+    except TimeoutError as error:
+        raise ConfigEntryNotReady(
+            "OpenRBus coordinator cleanup is still pending"
+        ) from error
+    except Exception as error:
+        raise ConfigEntryNotReady(
+            "OpenRBus coordinator cleanup has not proven shutdown"
+        ) from error
+    if not getattr(coordinator, "_shutdown_complete", False):
+        raise ConfigEntryNotReady(
+            "OpenRBus coordinator cleanup has not proven shutdown"
+        )
+
+
 async def _async_validate_transport_migration(
     hass: HomeAssistant, entry: ConfigEntry, configured: Mapping[str, object]
 ) -> None:
@@ -317,12 +345,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     thin_frame_trace: list[dict[str, Any]] = []
     config_snapshot = (dict(entry.data), dict(getattr(entry, "options", {})))
     coordinator = getattr(entry, "runtime_data", None)
+    if isinstance(coordinator, OpenRBusCoordinator) and getattr(
+        coordinator, "_shutting_down", False
+    ):
+        # HA can retain runtime_data after a completed unload or a failed
+        # setup cleanup. Prove the old owner is fully stopped, then build a
+        # fresh coordinator; never revive its shutdown flag or pollers.
+        await _async_prove_coordinator_shutdown(coordinator)
+        coordinator.detach_startup_lifecycle()
+        if getattr(entry, "runtime_data", None) is coordinator:
+            delattr(entry, "runtime_data")
+        coordinator = None
     if isinstance(coordinator, OpenRBusCoordinator) and (
         coordinator._startup_config_snapshot != config_snapshot
     ):
         # An options change must not reuse a session authorized with stale
         # credentials or transport settings. Fence the old attempt first.
-        await coordinator.async_shutdown()
+        await _async_prove_coordinator_shutdown(coordinator)
         coordinator.detach_startup_lifecycle()
         delattr(entry, "runtime_data")
         coordinator = None
@@ -336,15 +375,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         entry.runtime_data = coordinator
     coordinator.ensure_startup_lifecycle(entry)
+    startup_retryable = False
 
     async def cleanup_failed_setup() -> None:
-        # ConfigEntryNotReady is the continuation point: retain its shared
-        # startup task. For fatal errors or external cancellation, tear down
-        # any partial transport before HA finishes processing this attempt.
-        if entry.state in {
-            ConfigEntryState.SETUP_RETRY,
-            ConfigEntryState.UNLOAD_IN_PROGRESS,
-        }:
+        # Preserve the shared task only when this setup attempt explicitly
+        # reported ConfigEntryNotReady; do not infer continuation from the
+        # mutable config-entry state.
+        if startup_retryable:
             return
         try:
             await coordinator.async_shutdown()
@@ -354,7 +391,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             coordinator.detach_startup_lifecycle()
 
     entry.async_on_unload(cleanup_failed_setup)
-    await coordinator.async_wait_for_initial_startup()
+    try:
+        await coordinator.async_wait_for_initial_startup()
+    except ConfigEntryNotReady:
+        startup_retryable = True
+        raise
     # Migrate registry rows before any platform is forwarded.  This is a
     # registry-only projection migration; it performs no transport reads or
     # writes and is safe to repeat on every reload.

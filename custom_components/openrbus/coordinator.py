@@ -406,6 +406,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         self._startup_retryable = False
         self._startup_cleanup_failed = False
         self._startup_lifecycle_unsubscribe = None
+        self._shutdown_complete = False
         self._zone_profile_monitor_task: asyncio.Task[None] | None = None
         # Set before child polling coordinators shut down.  An in-flight poll
         # may finish its current request, but must not start another batch
@@ -959,6 +960,8 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         return inventory
 
     async def async_shutdown(self) -> None:
+        if self._shutdown_complete:
+            return
         backend = self._backend
         self._shutting_down = True
         await self.async_cancel_initial_startup()
@@ -1018,6 +1021,16 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 flags.get("epoch") if isinstance(flags, dict) else None,
             )
             raise
+        link = getattr(backend, "link", None)
+        if (
+            bool(getattr(backend, "_owns_controller", False))
+            or bool(getattr(backend, "started", False))
+            or bool(getattr(backend, "_started", False))
+            or bool(getattr(link, "is_connected", False))
+        ):
+            raise HomeAssistantError(
+                "OpenRBus backend stop returned before its owner or link was released"
+            )
         flags = getattr(backend, "_last_disconnect_snapshot", {})
         _LOGGER.warning(
             "UNLOAD_TRACE event=coordinator_shutdown_complete controller_owned=%s "
@@ -1028,6 +1041,9 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
             flags.get("epoch") if isinstance(flags, dict) else None,
         )
         await super().async_shutdown()
+        # Reuse is safe only after startup, child pollers, and the backend's
+        # physical ownership fence have all completed their shutdown path.
+        self._shutdown_complete = True
 
     async def async_read_object(
         self,
@@ -1244,6 +1260,16 @@ class OpenRBusPollingCoordinator(
         self._diagnostic_availability_delta = 0
         self._poll_in_progress_count = 0
         self._diagnostic_registry_disabled_count = 0
+
+    async def async_shutdown(self) -> None:
+        """Stop scheduled refreshes and join any in-flight register read."""
+
+        await super().async_shutdown()
+        if not getattr(self, "_poll_in_progress_count", 0):
+            return
+        async with asyncio.timeout(_INITIAL_SETUP_CLEANUP_BUDGET):
+            while getattr(self, "_poll_in_progress_count", 0):
+                await asyncio.sleep(0.01)
 
     def diagnostics(self) -> dict[str, Any]:
         """Return bounded, redacted poll statistics for config diagnostics."""

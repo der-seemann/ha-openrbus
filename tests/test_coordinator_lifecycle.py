@@ -393,6 +393,283 @@ async def test_home_assistant_config_entry_add_saves_after_not_ready(
     assert saves == ["saved"]
 
 
+@pytest.mark.asyncio
+async def test_real_config_entry_retry_unload_reload_and_poll_io(
+    tmp_path, monkeypatch
+) -> None:
+    """Exercise setup retry callbacks and replacement through HA's entry API."""
+    from datetime import timedelta
+
+    from custom_components.openrbus.validity import RegisterValidityTracker
+
+    monkeypatch.setattr(ConfigEntry, "async_migrate", AsyncMock(return_value=True))
+    monkeypatch.setattr(coordinator_module.er, "async_get", lambda _hass: None)
+    monkeypatch.setattr(integration, "_thin_runtime", lambda *_args: (None, None))
+    monkeypatch.setattr(
+        integration, "async_load_access_profile", AsyncMock(return_value={})
+    )
+    monkeypatch.setattr(integration, "async_save_access_profile", AsyncMock())
+    monkeypatch.setattr(
+        "custom_components.openrbus.register_entities.migrate_stable_registry_ids",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        "custom_components.openrbus.register_entities.cleanup_inactive_zone_entities",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        "custom_components.openrbus.register_entities.cleanup_legacy_sensor_entities",
+        lambda *_args: None,
+    )
+
+    hass = HomeAssistant(str(tmp_path))
+    hass.config.components.add(integration.DOMAIN)
+    startup_release = asyncio.Event()
+    created = []
+    read_calls: list[tuple[ObjectAddress, ...]] = []
+
+    class _Coordinator:
+        def __init__(self, _hass, entry, **_kwargs) -> None:
+            self.config_entry = entry
+            self._startup_config_snapshot = (dict(entry.data), dict(entry.options))
+            self._shutting_down = False
+            self._shutdown_complete = False
+            self.effective_access_levels = {1: 3}
+            self.backend_mode = BACKEND_NATIVE
+            self._startup_task = None
+            self.startup_waits = 0
+            self.shutdown_calls = 0
+            self._openrbus_polling_coordinators = {}
+            address = ObjectAddress(0x2001, 0x02)
+
+            async def read_objects(addresses, *, node, trace_failure=False):
+                del node, trace_failure
+                read_calls.append(tuple(addresses))
+                return tuple(GenericRead(1, item, b"\x01", 1) for item in addresses)
+
+            self.async_read_objects = read_objects
+            self.poller = OpenRBusPollingCoordinator.__new__(OpenRBusPollingCoordinator)
+            self.poller.parent = self
+            self.poller.hass = _hass
+            self.poller.registers = ((1, address),)
+            self.poller.register_metadata = {}
+            self.poller.group = "standard"
+            self.poller.validity = RegisterValidityTracker(timedelta(days=1))
+            self.poller._diagnostic_poll_count = 0
+            self.poller._diagnostic_success_items = 0
+            self.poller._diagnostic_failed_items = 0
+            self.poller._diagnostic_error_counts = {}
+            self.poller._diagnostic_subtype_counts = {}
+            self.poller._diagnostic_item_failures = []
+            self.poller._diagnostic_available_items = 0
+            self.poller._diagnostic_total_items = 0
+            self.poller._diagnostic_availability_delta = 0
+            self.poller._diagnostic_registry_disabled_count = 0
+            self._openrbus_polling_coordinators = {"standard": self.poller}
+            created.append(self)
+
+        def ensure_startup_lifecycle(self, _entry) -> None:
+            return
+
+        def detach_startup_lifecycle(self) -> None:
+            return
+
+        async def _run_startup(self) -> None:
+            await startup_release.wait()
+            values = await self.poller._async_poll_data()
+            assert values
+
+        async def async_wait_for_initial_startup(self) -> None:
+            self.startup_waits += 1
+            if self._startup_task is None:
+                self._startup_task = asyncio.create_task(self._run_startup())
+            done, _ = await asyncio.wait(
+                {self._startup_task}, timeout=0.1 if startup_release.is_set() else 0
+            )
+            if not done:
+                raise ConfigEntryNotReady("discovery remains active")
+            self._startup_task.result()
+
+        async def async_shutdown(self) -> None:
+            self.shutdown_calls += 1
+            self._shutting_down = True
+            if self._startup_task is not None and not self._startup_task.done():
+                self._startup_task.cancel()
+                await asyncio.gather(self._startup_task, return_exceptions=True)
+            self.effective_access_levels.clear()
+            self._shutdown_complete = True
+
+    monkeypatch.setattr(integration, "OpenRBusCoordinator", _Coordinator)
+
+    class _Component:
+        async def async_setup_entry(self, setup_hass, entry):
+            return await integration.async_setup_entry(setup_hass, entry)
+
+        async def async_unload_entry(self, setup_hass, entry):
+            return await integration.async_unload_entry(setup_hass, entry)
+
+        async def async_remove_entry(self, setup_hass, entry):
+            return await integration.async_remove_entry(setup_hass, entry)
+
+    class _Integration:
+        domain = integration.DOMAIN
+        logger = logging.getLogger(integration.DOMAIN)
+
+        async def async_get_component(self):
+            return _Component()
+
+        async def async_get_platform(self, _platform):
+            return object()
+
+    class _Entries:
+        def __init__(self) -> None:
+            self.data = {}
+
+        def __getitem__(self, entry_id):
+            return self.data[entry_id]
+
+        def __setitem__(self, entry_id, entry):
+            self.data[entry_id] = entry
+
+        def __contains__(self, entry_id):
+            return entry_id in self.data
+
+    manager = object.__new__(ConfigEntries)
+    manager.hass = hass
+    manager._entries = _Entries()
+    manager.flow = SimpleNamespace(async_progress_by_handler=lambda *_a, **_k: ())
+    manager.async_update_issues = lambda: None
+    manager._async_dispatch = lambda *_args: None
+    manager._async_schedule_save = lambda: None
+    manager.async_forward_entry_setups = AsyncMock()
+    manager.async_unload_platforms = AsyncMock(return_value=True)
+    manager.async_entries = lambda _domain: [entry]
+    manager.async_get_entry = lambda entry_id: manager._entries.data.get(entry_id)
+    manager._hass_config = {}
+    hass.config_entries = manager
+
+    entry = ConfigEntry(
+        version=1,
+        minor_version=1,
+        domain=integration.DOMAIN,
+        title="lifecycle test",
+        data=MappingProxyType({CONF_BACKEND: BACKEND_NATIVE, "ble_device": "target"}),
+        options=MappingProxyType({}),
+        source="user",
+        unique_id="lifecycle-test",
+        entry_id="lifecycle-test",
+        discovery_keys=MappingProxyType({}),
+        subentries_data=None,
+    )
+    entry.supports_unload = True
+    entry.supports_remove_device = True
+    entry._integration_for_domain = _Integration()
+
+    def no_refresh(*_args, **_kwargs):
+        return asyncio.create_task(asyncio.sleep(0))
+
+    monkeypatch.setattr(integration, "schedule_first_refresh_in_background", no_refresh)
+    await manager.async_add(entry)
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    initial = entry.runtime_data
+    pending_task = initial._startup_task
+    assert initial.shutdown_calls == 0
+
+    # A changed options snapshot fences the pending owner and starts a new
+    # coordinator; retries with the same snapshot continue that new task.
+    manager.async_update_entry(
+        entry, options=MappingProxyType({"updated_during_retry": True})
+    )
+    async with entry.setup_lock:
+        await entry.async_setup(hass, integration=entry._integration_for_domain)
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    first = entry.runtime_data
+    assert first is not initial
+    assert initial._shutdown_complete
+    assert pending_task.cancelled()
+    assert first.shutdown_calls == 0
+
+    startup_release.set()
+    async with entry.setup_lock:
+        await entry.async_setup(hass, integration=entry._integration_for_domain)
+    assert entry.state is ConfigEntryState.LOADED
+    assert entry.runtime_data is first
+    assert first._startup_task is not pending_task
+    assert first.effective_access_levels == {1: 3}
+    assert read_calls == [(ObjectAddress(0x2001, 0x02),)]
+    assert first.poller._diagnostic_poll_count == 1
+
+    assert await manager.async_reload(entry.entry_id)
+    second = entry.runtime_data
+    assert second is not first
+    assert first._shutdown_complete
+    assert second.effective_access_levels == {1: 3}
+    assert len(read_calls) == 2
+
+    entry.disabled_by = "user"
+    assert await manager.async_reload(entry.entry_id)
+    assert not hasattr(entry, "runtime_data")
+    entry.disabled_by = None
+    assert await manager.async_reload(entry.entry_id)
+    third = entry.runtime_data
+    assert third is not second
+    assert third._shutdown_complete is False
+    assert len(read_calls) == 3
+
+    async with entry.setup_lock:
+        await entry.async_unload(hass, integration=entry._integration_for_domain)
+        await entry.async_remove(hass)
+    assert third.shutdown_calls >= 1
+
+
+@pytest.mark.asyncio
+async def test_setup_retains_runtime_owner_when_bounded_shutdown_is_unproven(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(integration, "_INITIAL_SETUP_CLEANUP_BUDGET", 0.01)
+    monkeypatch.setattr(integration, "_thin_runtime", lambda *_args: (None, None))
+    monkeypatch.setattr(
+        integration, "async_load_access_profile", AsyncMock(return_value={})
+    )
+    monkeypatch.setattr(integration, "async_save_access_profile", AsyncMock())
+    cleanup_cancelled = asyncio.Event()
+    created = []
+
+    class _Coordinator:
+        def __init__(self, *_args, **_kwargs) -> None:
+            created.append(self)
+
+        async def async_shutdown(self) -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cleanup_cancelled.set()
+                raise
+
+        def detach_startup_lifecycle(self) -> None:
+            raise AssertionError("unproven shutdown must retain the owner")
+
+    old = _Coordinator()
+    old._shutting_down = True
+    old._shutdown_complete = False
+    monkeypatch.setattr(integration, "OpenRBusCoordinator", _Coordinator)
+
+    entry = SimpleNamespace(
+        entry_id="cleanup-fence",
+        data={CONF_BACKEND: BACKEND_NATIVE, "ble_device": "target"},
+        options={},
+        runtime_data=old,
+    )
+    hass = SimpleNamespace(data={})
+
+    with pytest.raises(ConfigEntryNotReady, match="cleanup is still pending"):
+        await integration.async_setup_entry(hass, entry)
+
+    assert cleanup_cancelled.is_set()
+    assert entry.runtime_data is old
+    assert created == [old]
+
+
 def test_transport_selection_has_exactly_two_modes() -> None:
     capability = ThinRpcCapability("request", "poll", "diagnostics")
     assert select_backend_mode(BACKEND_NATIVE, capability) == BACKEND_NATIVE
@@ -906,6 +1183,7 @@ class _Backend:
 
     async def async_stop(self) -> None:
         self.stopped = True
+        self.started = False
 
     async def async_discover_devices(self):
         return ("device",)
@@ -1021,11 +1299,54 @@ async def test_coordinator_stops_zone_monitor_and_pollers_before_backend(
 
 
 @pytest.mark.asyncio
+async def test_coordinator_does_not_mark_shutdown_complete_with_live_backend(
+    monkeypatch,
+) -> None:
+    class _BackendThatDidNotStop(_Backend):
+        async def async_stop(self) -> None:
+            self.stopped = True
+
+    backend = _BackendThatDidNotStop()
+    monkeypatch.setattr(
+        "custom_components.openrbus.coordinator.NativeBluetoothBackend",
+        lambda *a, **k: backend,
+    )
+    coordinator = OpenRBusCoordinator(_hass(), _entry(BACKEND_NATIVE))
+    await coordinator.async_start()
+
+    with pytest.raises(HomeAssistantError, match="before its owner or link"):
+        await coordinator.async_shutdown()
+
+    assert coordinator._shutting_down
+    assert not coordinator._shutdown_complete
+    assert backend.started
+
+
+@pytest.mark.asyncio
 async def test_polling_coordinator_does_not_start_reads_after_parent_shutdown() -> None:
     poller = OpenRBusPollingCoordinator.__new__(OpenRBusPollingCoordinator)
     poller.parent = SimpleNamespace(_shutting_down=True)
 
     assert await poller._async_poll_data() == {}
+
+
+@pytest.mark.asyncio
+async def test_polling_coordinator_shutdown_joins_inflight_refresh(monkeypatch) -> None:
+    async def stop_schedule(_poller) -> None:
+        return
+
+    monkeypatch.setattr(
+        coordinator_module.DataUpdateCoordinator, "async_shutdown", stop_schedule
+    )
+    poller = OpenRBusPollingCoordinator.__new__(OpenRBusPollingCoordinator)
+    poller._poll_in_progress_count = 1
+
+    shutdown = asyncio.create_task(poller.async_shutdown())
+    await asyncio.sleep(0)
+    assert not shutdown.done()
+
+    poller._poll_in_progress_count = 0
+    await shutdown
 
 
 @pytest.mark.asyncio
@@ -1103,7 +1424,7 @@ async def test_coordinator_stops_backend_when_startup_discovery_fails(
     with pytest.raises(type(failure)):
         await coordinator.async_start()
 
-    assert backend.started is True
+    assert backend.started is False
     assert backend.stopped is True
     assert coordinator._discovery_attempted is True
     assert coordinator.discovery_error is failure

@@ -921,6 +921,14 @@ class NativeBluetoothBackend:
             if transport is not None:
                 async with asyncio.timeout(_STARTUP_CLEANUP_TIMEOUT):
                     await transport.disconnect()
+                if getattr(transport, "is_connected", None) is not False:
+                    raise HomeAssistantError(
+                        "Native Bluetooth disconnect did not prove the link is down"
+                    )
+            elif self.client is not None or self._started:
+                raise HomeAssistantError(
+                    "Native Bluetooth cannot prove shutdown without its transport"
+                )
             self.transport = None
             self.client = None
             self.authentication = None
@@ -2207,6 +2215,32 @@ class ThinRpcBackend:
         # follows the same order so it cannot retire a session mid-request.
         async with self._read_lock, self._lifecycle_lock:
             await self._cleanup_owned_session()
+            owner_generation = self._controller_owner_generations.get(
+                self.controller_id
+            )
+            active_without_owner = (
+                self.controller_id in self._active_controllers
+                and owner_generation is None
+            )
+            disconnect_snapshot = self._last_disconnect_snapshot
+            physical_disconnect_unproven = bool(disconnect_snapshot) and (
+                disconnect_snapshot.get("link_active") is not False
+                or disconnect_snapshot.get("parent_connected") is not False
+            )
+            if (
+                self._owns_controller
+                or owner_generation == self._owner_generation
+                or active_without_owner
+                or self._started
+                or self.session is not None
+                or self.link is not None
+                or self.transport is not None
+                or self.client is not None
+                or physical_disconnect_unproven
+            ):
+                raise HomeAssistantError(
+                    "Thin-RPC stop did not release this session and controller owner"
+                )
 
     async def _wait_for_physical_disconnect(
         self, *, recovery_fence: RecoveryFenceMetrics | None = None
