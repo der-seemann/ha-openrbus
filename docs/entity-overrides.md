@@ -7,8 +7,8 @@ Membership is conservative. Active CP02x configuration evidence can assign confi
 An explicitly enabled Home Assistant registry row for a non-recommended,
 readable sensor or binary sensor opts that exact read-only projection into
 polling. It does not bypass current read authorization, optional-category or
-zone filters, explicit user disables, or the exclusion for unobserved declared
-writes. Typed controls do not use this manual-registry opt-in path.
+zone filters, or explicit user disables. This read-only opt-in does not enable
+the write API; typed controls do not use this manual-registry opt-in path.
 
 Choices persist at three scopes: entity unique IDs, `device:<node>:category:<category>` keys stored in `group_overrides`, and node keys. Entity choice takes precedence over current category, legacy General category, legacy `node:<node>:zone/object:<...>` group choice, node choice, then the automatic default. Legacy node and group keys remain stored and effective for compatibility.
 

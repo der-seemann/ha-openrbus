@@ -809,8 +809,8 @@ def _manual_readonly_registry_poll_opt_in(
     """Allow explicit HA registry enables for safe, non-control read entities.
 
     This is a narrow opt-in for rows outside Core's default recommendations.
-    It never authorizes inferred writes, typed controls, or rows that fail the
-    current effective read-access check. Earlier selection stages still apply
+    It only authorizes reads through a sensor projection; it never enables a
+    write API or typed-control entity. Earlier selection stages still apply
     registry disable, category, and zone policy before this helper is called.
     """
 
@@ -818,7 +818,6 @@ def _manual_readonly_registry_poll_opt_in(
         not enabled_registry_entities
         or not register.readable
         or not zone_row_enabled(parent, identity, register)
-        or _unobserved_source_rw_row(parent, identity, register)
         or control_kind(register, getattr(parent, "language", "de")) is not None
     ):
         return False

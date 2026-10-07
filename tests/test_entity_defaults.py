@@ -182,9 +182,14 @@ def test_manual_override_adds_nonrecommended_sensor_to_poll_set(
     assert polling["standard"].addresses == ((3, row.address),)
 
 
-def test_registry_enabled_nonrecommended_read_sensor_is_polled(monkeypatch) -> None:
-    """A user's HA registry enable is an explicit read-only poll opt-in."""
+def test_enabled_registry_read_sensor_polls_unobserved_declared_write_readonly(
+    monkeypatch,
+) -> None:
+    """A sensor enable opts an exact read-allowed row into reads, not writes."""
     row = _register("5501:01", levels=("Installer",))
+    row.writable = True
+    row.write_declared = True
+    row.safety = "source_supported"
     identity = SimpleNamespace(node=3)
     config_entry = SimpleNamespace(
         entry_id="entry",
@@ -297,10 +302,13 @@ def test_enabled_registry_snapshot_excludes_disabled_entries(monkeypatch) -> Non
         ("user_disabled", False),
         ("read_ineligible", False),
         ("category_disabled", False),
+        ("group_disabled", False),
+        ("node_disabled", False),
         ("user_override_disabled", False),
         ("zone_disabled", False),
+        ("registry_control_domain", False),
         ("typed_control", False),
-        ("unobserved_write", False),
+        ("unobserved_write", True),
     ],
 )
 def test_registry_sensor_opt_in_respects_read_only_safety_gates(
@@ -316,8 +324,14 @@ def test_registry_sensor_opt_in_respects_read_only_safety_gates(
         config_entry=SimpleNamespace(
             data={},
             options=(
-                {CONF_GROUP_OVERRIDES: {"device:3:category:unclassified": False}}
-                if scenario == "category_disabled"
+                (
+                    {CONF_GROUP_OVERRIDES: {"device:3:category:unclassified": False}}
+                    if scenario == "category_disabled"
+                    else {CONF_GROUP_OVERRIDES: {"node:3:object:5501": False}}
+                    if scenario == "group_disabled"
+                    else {CONF_NODE_OVERRIDES: {"3": False}}
+                )
+                if scenario in {"category_disabled", "group_disabled", "node_disabled"}
                 else {}
             ),
         ),
@@ -332,8 +346,9 @@ def test_registry_sensor_opt_in_respects_read_only_safety_gates(
         row.writable = True
         row.write_declared = True
         row.safety = "source_supported"
+    registry_domain = "number" if scenario == "registry_control_domain" else "sensor"
     registry_rows = (
-        {"uid": (SimpleNamespace(domain="sensor"),)}
+        {"uid": (SimpleNamespace(domain=registry_domain),)}
         if scenario not in {"disabled", "user_disabled"}
         else {}
     )
