@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.7 — release candidate
+## 0.4.7 — 2026-10-09
 
 ### Changed
 
