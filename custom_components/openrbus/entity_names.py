@@ -22,6 +22,10 @@ from .zones import (
 # FriendlyName and object address; see docs/entity-names.md. Keep these keyed
 # by exact codes because abbreviations are context-dependent.
 _REGISTER_NAMES_DE = {
+    "CM030": "Heizkreis-Raumtemperatur",
+    "CM210": "Außentemperatur des Heizkreises",
+    "CM220": "Kurzzeitmittel der Außentemperatur des Heizkreises",
+    "CM230": "Langzeitmittel der Außentemperatur des Heizkreises",
     "CP000": "Maximaler Vorlauftemperatur-Sollwertbereich",
     "CP010": "Vorlauftemperatur-Sollwert ohne Außensensor",
     "CP020": "Funktion des Heizkreises",
@@ -32,6 +36,7 @@ _REGISTER_NAMES_DE = {
     "CP070": "Raumsollwert des Heizkreises im Nachtbetrieb",
     "CP080": "Raumsollwert der Heizkreisaktivität",
     "CP130": "Außentemperaturfühler für den Heizkreis",
+    "CP140": "Raumsollwert der Heizkreisaktivität im Kühlbetrieb",
     "CP200": "Raumtemperatur-Sollwert im Heizkreis-Kühlbetrieb",
     "CP210": "Komfort-Startwert des Heizkreises",
     "CP220": "Nacht-Startwert des Heizkreises",
@@ -57,6 +62,7 @@ _REGISTER_NAMES_DE = {
     "CP700": "Offset des Trinkwarmwasserfühlers",
     "CP730": "Heizkreis-Aufheizgeschwindigkeit",
     "CP740": "Heizkreis-Abkühlgeschwindigkeit",
+    "CP750": "Maximale Vorheizzeit des Heizkreises",
     "CP780": "Regelungsstrategie des Heizkreises",
     "CP800": "Heizmodus des gewerblichen Trinkwarmwasserspeichers",
     "CP850": "Hydraulischer Abgleich im Heizkreis möglich",
@@ -487,7 +493,7 @@ def suggested_object_id(
 ) -> str:
     """Build a readable, deterministic Home Assistant object ID suggestion."""
 
-    slot = zone_subindex(register)
+    slot = zone_subindex(register, identity)
     profile = profile_for(parent, identity.node, slot) if slot is not None else None
     language = getattr(parent, "language", "de")
     if profile is not None and zone_enabled(parent, identity.node, slot):

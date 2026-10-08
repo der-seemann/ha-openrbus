@@ -43,6 +43,20 @@ _DISCONNECT_EXCEPTION_CLASSES = (
     "RuntimeError",
     "other",
 )
+READ_OPERATION_ORIGINS = frozenset(
+    {
+        "bridge_health",
+        "zone_profile",
+        "manual_read_service",
+        "manual_read_service_batch",
+        "poll_batch",
+        "coordinator_single",
+        "control_readback",
+        "access_discovery",
+        "startup_discovery",
+        "unspecified",
+    }
+)
 
 
 class RecoveryFenceMetrics:
@@ -58,7 +72,9 @@ class RecoveryFenceMetrics:
         self._last_timeout_class: str | None = None
         self._disconnect_attempt: dict[str, Any] = {}
 
-    def begin_attempt(self, session_epoch: object = None) -> int:
+    def begin_attempt(
+        self, session_epoch: object = None, origin: object = "unspecified"
+    ) -> int:
         self._attempts = min(_MAX, self._attempts + 1)
         self._dispatch_acknowledged = None
         self._link_active = None
@@ -73,6 +89,11 @@ class RecoveryFenceMetrics:
             ),
             "outcome": None,
             "exception_class": None,
+            "origin": (
+                origin
+                if isinstance(origin, str) and origin in READ_OPERATION_ORIGINS
+                else "unspecified"
+            ),
         }
         return self._attempts
 

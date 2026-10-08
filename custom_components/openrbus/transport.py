@@ -6,6 +6,7 @@ import asyncio
 import base64
 import binascii
 import contextlib
+import contextvars
 import json
 import logging
 from collections import deque
@@ -45,6 +46,7 @@ from openrbus.transport import BleakMessageTransport
 from openrbus.transport.thin_gatt import (
     GattHandles,
     ThinGattCorrelationError,
+    ThinGattFlowControlError,
     ThinGattLink,
     ThinGattMessageTransport,
     ThinGattProfile,
@@ -58,9 +60,30 @@ from openrbus.value_codec import decode_value
 from .bridge import GenericRead
 from .const import BACKEND_NATIVE, BACKEND_THIN_RPC
 from .proxy_provisioning import check_proxy_compatibility
-from .setup_observability import RecoveryFenceMetrics, SetupResponseMetrics
+from .setup_observability import (
+    READ_OPERATION_ORIGINS,
+    RecoveryFenceMetrics,
+    SetupResponseMetrics,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+
+@contextlib.contextmanager
+def read_operation_origin(origin: str):
+    """Attach one fixed, payload-free caller category to backend diagnostics."""
+
+    selected = (
+        origin
+        if isinstance(origin, str) and origin in READ_OPERATION_ORIGINS
+        else "unspecified"
+    )
+    token = _READ_OPERATION_ORIGIN.set(selected)
+    try:
+        yield
+    finally:
+        _READ_OPERATION_ORIGIN.reset(token)
+
 
 _DEFAULT_REQUEST_SERVICE = "openrbus_gatt_rpc_request"
 _DEFAULT_POLL_SERVICE = "openrbus_gatt_rpc_poll"
@@ -73,12 +96,17 @@ _RESPONSE_WRAPPERS = ("response", "service_data", "data", "service_response")
 # cancels the Core operation.  Object reads retain the configured timeout.
 _THIN_SECURE_TIMEOUT = 20.0
 _THIN_DISCONNECT_TIMEOUT = 5.0
+_STARTUP_CLEANUP_TIMEOUT = 8.0
 _THIN_CAPABILITY_DISCOVERY_BUDGET = 5.0
 _PAIR_ACTION_SUFFIX = "openrbus_pair"
 _DISCONNECT_ACTION_SUFFIX = "openrbus_disconnect"
 MAX_FRAME_TRACE_ENTRIES = 128
 MAX_FRAME_TRACE_BYTES = 24 * 1024
 MAX_READ_OPERATION_TRACE_ENTRIES = 32
+MAX_BATCH_RECOVERY_TRACE_ENTRIES = 8
+_READ_OPERATION_ORIGIN: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "openrbus_read_operation_origin", default="unspecified"
+)
 _TRACE_KINDS = frozenset({"request", "response", "event"})
 _TRACE_OPS = frozenset(
     {
@@ -145,7 +173,18 @@ _REGISTRY = Registry.load_default()
 
 
 _SESSION_SUBTYPES = frozenset(
-    {"not_ready", "link_lost", "timeout", "not_secure", "transport"}
+    {
+        "not_ready",
+        "link_lost",
+        "timeout",
+        "not_secure",
+        "transport",
+        "flow_control_queue_full",
+        "flow_control_frame_too_large",
+        "flow_control_handle_registry_full",
+        "flow_control_payload_too_large",
+        "flow_control_unknown",
+    }
 )
 _BATCH_SUBTYPES = frozenset({"malformed", "abort", "fallback"})
 _ABORT_CATEGORIES = {
@@ -293,6 +332,16 @@ def _read_error_subtype(error: BaseException, error_class: str) -> str | None:
         return None
     if isinstance(error, (RequestTimeoutError, TimeoutError)):
         return "timeout"
+    if isinstance(error, ThinGattFlowControlError):
+        reason = error.reason
+        if reason in {
+            "queue_full",
+            "frame_too_large",
+            "handle_registry_full",
+            "payload_too_large",
+        }:
+            return f"flow_control_{reason}"
+        return "flow_control_unknown"
     if isinstance(error, ThinGattSessionStateError):
         # Core's state exception is a bounded type; its messages currently
         # describe these three fixed states. The message is inspected only to
@@ -646,11 +695,12 @@ async def _read_thin_access_level(backend: Any, node: int) -> int | None:
     address = ObjectAddress(0x4002, 0x00)
     for attempt in range(2):
         try:
-            result = await backend.async_read_object(
-                address,
-                node=node,
-                timeout=min(backend.timeout, 3.0),
-            )
+            with read_operation_origin("access_discovery"):
+                result = await backend.async_read_object(
+                    address,
+                    node=node,
+                    timeout=min(backend.timeout, 3.0),
+                )
         except asyncio.CancelledError:
             raise
         except TransportError as error:
@@ -846,12 +896,20 @@ class NativeBluetoothBackend:
                 self.client = client
                 self.authentication = authentication
                 self._started = True
-            except Exception:
-                with contextlib.suppress(Exception):
-                    await transport.disconnect()
-                self.transport = None
-                self.client = None
-                self.authentication = None
+            except BaseException as error:
+                try:
+                    async with asyncio.timeout(_STARTUP_CLEANUP_TIMEOUT):
+                        await transport.disconnect()
+                except BaseException as cleanup_error:  # noqa: BLE001 - preserve startup error
+                    error.add_note(
+                        "Native Bluetooth startup disconnect did not complete: "
+                        f"{type(cleanup_error).__name__}"
+                    )
+                    self.transport = transport
+                else:
+                    self.transport = None
+                    self.client = None
+                    self.authentication = None
                 raise
 
     async def _start_transport_once(
@@ -886,12 +944,22 @@ class NativeBluetoothBackend:
 
     async def async_stop(self) -> None:
         async with self._lock:
-            transport, self.transport = self.transport, None
+            transport = self.transport
+            if transport is not None:
+                async with asyncio.timeout(_STARTUP_CLEANUP_TIMEOUT):
+                    await transport.disconnect()
+                if getattr(transport, "is_connected", None) is not False:
+                    raise HomeAssistantError(
+                        "Native Bluetooth disconnect did not prove the link is down"
+                    )
+            elif self.client is not None or self._started:
+                raise HomeAssistantError(
+                    "Native Bluetooth cannot prove shutdown without its transport"
+                )
+            self.transport = None
             self.client = None
             self.authentication = None
             self._started = False
-            if transport is not None:
-                await transport.disconnect()
 
     async def async_discover_devices(self) -> tuple[DeviceIdentity, ...]:
         await self.async_start()
@@ -1508,10 +1576,18 @@ class HomeAssistantThinGattChannel:
             self._decode_notification(frame)
         return frame
 
-    async def diagnostics(self) -> Mapping[str, Any]:
+    async def diagnostics(self, *, timeout: float | None = None) -> Mapping[str, Any]:
         try:
-            response = await self.client.execute_service(
-                self.capability.diagnostics_service, {}, return_response=True
+            request = self.client.execute_service(
+                self.capability.diagnostics_service,
+                {},
+                return_response=True,
+                timeout=timeout,
+            )
+            response = (
+                await asyncio.wait_for(request, timeout)
+                if timeout is not None
+                else await request
             )
             body = self._response_object(response, "snapshot")
             snapshot = self._decode_json_value(body["snapshot"])
@@ -1778,6 +1854,9 @@ class ThinRpcBackend:
         self._last_read_transport_capture: dict[str, Any] | None = None
         self._batch_failure_trace_captured = False
         self._last_batch_failure_trace: dict[str, Any] | None = None
+        self._batch_recovery_trace: deque[dict[str, Any]] = deque(
+            maxlen=MAX_BATCH_RECOVERY_TRACE_ENTRIES
+        )
         self._started = False
         self._owns_controller = False
         self._owner_generation = self._next_owner_generation
@@ -1901,7 +1980,8 @@ class ThinRpcBackend:
                 elapsed = (asyncio.get_running_loop().time() - setup_started) * 1000
                 self.setup_metrics.record_setup_cancellation(elapsed)
                 try:
-                    await self._cleanup_owned_session()
+                    async with asyncio.timeout(_STARTUP_CLEANUP_TIMEOUT):
+                        await self._cleanup_owned_session()
                 except BaseException as cleanup_error:  # noqa: BLE001 - preserve cancellation while reporting cleanup failure
                     error.add_note(
                         "Thin-RPC startup cleanup did not prove physical disconnect: "
@@ -1910,7 +1990,8 @@ class ThinRpcBackend:
                 raise
             except Exception as error:
                 try:
-                    await self._cleanup_owned_session()
+                    async with asyncio.timeout(_STARTUP_CLEANUP_TIMEOUT):
+                        await self._cleanup_owned_session()
                 except BaseException as cleanup_error:  # noqa: BLE001 - preserve cancellation while reporting cleanup failure
                     error.add_note(
                         "Thin-RPC startup cleanup did not prove physical disconnect: "
@@ -2172,6 +2253,32 @@ class ThinRpcBackend:
         # follows the same order so it cannot retire a session mid-request.
         async with self._read_lock, self._lifecycle_lock:
             await self._cleanup_owned_session()
+            owner_generation = self._controller_owner_generations.get(
+                self.controller_id
+            )
+            active_without_owner = (
+                self.controller_id in self._active_controllers
+                and owner_generation is None
+            )
+            disconnect_snapshot = self._last_disconnect_snapshot
+            physical_disconnect_unproven = bool(disconnect_snapshot) and (
+                disconnect_snapshot.get("link_active") is not False
+                or disconnect_snapshot.get("parent_connected") is not False
+            )
+            if (
+                self._owns_controller
+                or owner_generation == self._owner_generation
+                or active_without_owner
+                or self._started
+                or self.session is not None
+                or self.link is not None
+                or self.transport is not None
+                or self.client is not None
+                or physical_disconnect_unproven
+            ):
+                raise HomeAssistantError(
+                    "Thin-RPC stop did not release this session and controller owner"
+                )
 
     async def _wait_for_physical_disconnect(
         self, *, recovery_fence: RecoveryFenceMetrics | None = None
@@ -2304,7 +2411,8 @@ class ThinRpcBackend:
                 # loses its Thin-GATT response, then repeat discovery once.
                 # Protocol/abort errors are not retried or reinterpreted.
                 try:
-                    await self._recover_after_transport_loss()
+                    with read_operation_origin("startup_discovery"):
+                        await self._recover_after_transport_loss()
                 except asyncio.CancelledError:
                     raise
                 except Exception as recovery_error:  # noqa: BLE001
@@ -2361,7 +2469,8 @@ class ThinRpcBackend:
                     else:
                         capability_recovery_attempted = True
                         try:
-                            await self._recover_after_transport_loss()
+                            with read_operation_origin("startup_discovery"):
+                                await self._recover_after_transport_loss()
                         except asyncio.CancelledError:
                             raise
                         except Exception as recovery_error:  # noqa: BLE001 - keep discovery fail-safe
@@ -2472,8 +2581,8 @@ class ThinRpcBackend:
                 # readiness check. Retry only those object-local failures once
                 # after Core/Thin-RPC re-prepares the secure session; protocol,
                 # decode, and unsupported-object errors remain object-local.
-                failed = tuple(
-                    address
+                recovery_pairs = tuple(
+                    (address, value)
                     for address, value in zip(addresses, values, strict=True)
                     if isinstance(value, HomeAssistantError)
                     and (
@@ -2481,17 +2590,36 @@ class ThinRpcBackend:
                         or "link lost" in str(value).casefold()
                     )
                 )
+                failed = tuple(address for address, _value in recovery_pairs)
                 if failed:
                     # Retry only after a complete session boundary; preserve
                     # successful results from the first pass.
+                    recovery_trace_captured = False
+                    try:
+                        await self._record_batch_recovery_initiation(
+                            tuple(value for _address, value in recovery_pairs)
+                        )
+                        recovery_trace_captured = True
+                    except Exception:  # noqa: BLE001 - diagnostics must not mask reads
+                        _LOGGER.debug(
+                            "Batch recovery initiation diagnostics unavailable"
+                        )
                     try:
                         await self._recover_after_transport_loss()
+                        recovered = await _read_objects_batched(
+                            self.client, failed, node=node
+                        )
                     except Exception as error:
                         record_failure("recovery_dispatch", error)
                         raise
-                    recovered = await _read_objects_batched(
-                        self.client, failed, node=node
-                    )
+                    finally:
+                        if recovery_trace_captured:
+                            try:
+                                await self._finish_batch_recovery_trace()
+                            except Exception:  # noqa: BLE001 - diagnostics must not mask reads
+                                _LOGGER.debug(
+                                    "Batch recovery completion diagnostics unavailable"
+                                )
                     recovered_by_address = dict(zip(failed, recovered, strict=True))
                     values = tuple(
                         recovered_by_address.get(address, value)
@@ -2517,6 +2645,84 @@ class ThinRpcBackend:
                 raise
             finally:
                 self._end_read_operation(operation_id, "batch", outcome)
+
+    async def _record_batch_recovery_initiation(
+        self, failures: Sequence[HomeAssistantError]
+    ) -> None:
+        """Retain bounded, payload-free evidence before batch recovery."""
+        session = getattr(self, "session", None)
+        epoch = getattr(session, "epoch", None)
+        connected = getattr(session, "connected", None)
+        failure_counts: dict[str, int] = {}
+        link_lost_text_match = False
+        for error in failures:
+            error_class = _read_error_class(error)
+            subtype = _read_error_subtype(error, error_class)
+            label = f"{error_class}.{subtype}" if subtype else error_class
+            failure_counts[label] = min(256, failure_counts.get(label, 0) + 1)
+            link_lost_text_match = link_lost_text_match or (
+                "link lost" in str(error).casefold()
+            )
+        record: dict[str, Any] = {
+            "origin": _READ_OPERATION_ORIGIN.get(),
+            "failure_count": min(len(failures), 256),
+            "failure_classes": failure_counts,
+            "link_lost_text_match": link_lost_text_match,
+            "session_present": session is not None,
+            "session_connected": connected if type(connected) is bool else None,
+            "identity_present": getattr(session, "identity", None) is not None,
+            "session_epoch": epoch
+            if type(epoch) is int and 0 <= epoch <= 4_294_967_295
+            else None,
+            "generation": min(
+                2_147_483_647, max(0, getattr(self, "_session_generation", 0))
+            ),
+        }
+        if isinstance(getattr(self, "channel", None), HomeAssistantThinGattChannel):
+            try:
+                proxy = await self.channel.diagnostics(
+                    timeout=getattr(self, "timeout", _THIN_DISCONNECT_TIMEOUT)
+                )
+            except Exception:  # noqa: BLE001 - tracing must not mask recovery
+                proxy = {}
+            record["before"] = _safe_proxy_read_counters(proxy)
+        else:
+            record["before"] = {}
+        frames = getattr(self, "frame_trace", None)
+        if isinstance(frames, (list, tuple)):
+            record["disconnect_event_observed"] = any(
+                item.get("kind") == "event"
+                and (
+                    item.get("op") == "DISCONNECTED"
+                    or (
+                        item.get("op") == "CONNECTION_STATE"
+                        and item.get("state_category") in {"disconnected", "failed"}
+                    )
+                )
+                and item.get("epoch") == epoch
+                for item in frames[-MAX_FRAME_TRACE_ENTRIES:]
+                if isinstance(item, dict)
+            )
+        trace = getattr(self, "_batch_recovery_trace", None)
+        if not isinstance(trace, deque):
+            trace = deque(maxlen=MAX_BATCH_RECOVERY_TRACE_ENTRIES)
+            self._batch_recovery_trace = trace
+        trace.append(record)
+
+    async def _finish_batch_recovery_trace(self) -> None:
+        """Attach post-recovery proxy counters without changing read outcomes."""
+        trace = getattr(self, "_batch_recovery_trace", None)
+        if not trace or not isinstance(
+            getattr(self, "channel", None), HomeAssistantThinGattChannel
+        ):
+            return
+        try:
+            proxy = await self.channel.diagnostics(
+                timeout=getattr(self, "timeout", _THIN_DISCONNECT_TIMEOUT)
+            )
+        except Exception:  # noqa: BLE001 - tracing must not mask recovery
+            proxy = {}
+        trace[-1]["after"] = _safe_proxy_read_counters(proxy)
 
     async def _finish_batch_failure_trace(
         self,
@@ -2588,6 +2794,7 @@ class ThinRpcBackend:
             "outcome": outcome
             if outcome in {"success", "partial_error", "error"}
             else "error",
+            "origin": _READ_OPERATION_ORIGIN.get(),
         }
         if type(epoch) is int and 0 <= epoch <= 4_294_967_295:
             record["epoch"] = epoch
@@ -2655,7 +2862,7 @@ class ThinRpcBackend:
         fence_metrics = getattr(self, "_recovery_fence_metrics", None)
         session_epoch = getattr(getattr(self, "session", None), "epoch", None)
         if fence_metrics is not None:
-            fence_metrics.begin_attempt(session_epoch)
+            fence_metrics.begin_attempt(session_epoch, _READ_OPERATION_ORIGIN.get())
         dispatch_acknowledged = False
         guard_outcome: str | None = None
         try:
@@ -2998,6 +3205,7 @@ class ThinRpcBackend:
             "last_batch_failure_trace": getattr(
                 self, "_last_batch_failure_trace", None
             ),
+            "batch_recovery_trace": tuple(getattr(self, "_batch_recovery_trace", ())),
         }
 
     def _record_batch_event(self, event: str) -> None:

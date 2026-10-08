@@ -11,7 +11,7 @@ with global text replacement.
 Every row below was joined by exact object address and `FriendlyName` in OBD
 1.47. The HA label is a concise normalized rendering of the German source
 meaning, not a copied translation paragraph. The glossary is a manually
-reviewed subset of 43 codes selected for common short forms resolved by the
+reviewed subset of 49 codes selected for common short forms resolved by the
 per-register German medium description. It does not replace every vendor
 short label.
 
@@ -23,10 +23,14 @@ medium description spelling out the corresponding term. The same code sets
 support concise English ID labels (`heating_circuit`, `domestic_hot_water`,
 `heat_pump`). Substrings such as `PWM` do not match `WP`. If a medium
 description only repeats an abbreviation, the automatic expansion is not
-allowed; the 43 direct glossary entries above still take precedence.
+allowed; the 49 direct glossary entries above still take precedence.
 
 | Code | Address | HA German label |
 | --- | --- | --- |
+| CM030 | `5404:00` | Heizkreis-Raumtemperatur |
+| CM210 | `542e:00` | Außentemperatur des Heizkreises |
+| CM220 | `542f:00` | Kurzzeitmittel der Außentemperatur des Heizkreises |
+| CM230 | `5430:00` | Langzeitmittel der Außentemperatur des Heizkreises |
 | CP000 | `3401:00` | Maximaler Vorlauftemperatur-Sollwertbereich |
 | CP010 | `3402:00` | Vorlauftemperatur-Sollwert ohne Außensensor |
 | CP020 | `3404:00` | Funktion des Heizkreises |
@@ -37,6 +41,7 @@ allowed; the 43 direct glossary entries above still take precedence.
 | CP070 | `340b:00` | Raumsollwert des Heizkreises im Nachtbetrieb |
 | CP080 | `340c:00` | Raumsollwert der Heizkreisaktivität |
 | CP130 | `340e:00` | Außentemperaturfühler für den Heizkreis |
+| CP140 | `3412:00` | Raumsollwert der Heizkreisaktivität im Kühlbetrieb |
 | CP200 | `3413:00` | Raumtemperatur-Sollwert im Heizkreis-Kühlbetrieb |
 | CP210 | `3414:00` | Komfort-Startwert des Heizkreises |
 | CP220 | `3415:00` | Nacht-Startwert des Heizkreises |
@@ -62,6 +67,7 @@ allowed; the 43 direct glossary entries above still take precedence.
 | CP700 | `3467:00` | Offset des Trinkwarmwasserfühlers |
 | CP730 | `346a:00` | Heizkreis-Aufheizgeschwindigkeit |
 | CP740 | `346b:00` | Heizkreis-Abkühlgeschwindigkeit |
+| CP750 | `346c:00` | Maximale Vorheizzeit des Heizkreises |
 | CP780 | `3471:00` | Regelungsstrategie des Heizkreises |
 | CP800 | `3473:00` | Heizmodus des gewerblichen Trinkwarmwasserspeichers |
 | CP850 | `347d:00` | Hydraulischer Abgleich im Heizkreis möglich |
@@ -70,6 +76,16 @@ allowed; the 43 direct glossary entries above still take precedence.
 | DP047 | `3630:00` | Maximale Dauer der Trinkwarmwasserbereitung |
 | HP003 | `2303:00` | Minimale Vorlauftemperatur der Wärmepumpe im Kühlbetrieb |
 | HP180 | `23ab:00` | Externer Drucksensor |
+
+The CM030/CM210/CM220/CM230 and CP750 labels are direct normalized glossary
+entries, joined by exact catalog address and code. CM030/CM210/CM220/CM230
+items use the positive source-mapped zone slot dimension. CP140 is readable by
+name but its array dimension is unresolved: neither its item ordinal nor its
+`:00` head is treated as a heating-circuit slot. CP080 has the same unresolved
+slot association. Array headers at `:00` are never emitted as zone slots.
+CP020 function selectors remain parent-device entities, and no inactive zone
+is created by label normalization. Existing user-assigned entity names and
+stable unique IDs are preserved.
 
 ## Suggested entity IDs
 

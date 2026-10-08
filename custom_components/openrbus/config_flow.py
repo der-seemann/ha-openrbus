@@ -78,7 +78,6 @@ from .const import (
 )
 from .register_entities import (
     bitfield_structure,
-    control_kind,
     entity_category,
     entity_category_key,
     entity_category_override_keys,
@@ -87,7 +86,6 @@ from .register_entities import (
     entity_unique_id,
     register_name,
     rows_for_parent,
-    write_access_allowed,
     zone_row_enabled,
 )
 from .transport import (
@@ -1227,11 +1225,6 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                 or not zone_row_enabled(runtime, identity, register)
             ):
                 continue
-            effective = runtime.effective_access_levels.get(identity.node)
-            if control_kind(
-                register, runtime.language
-            ) is not None and not write_access_allowed(runtime, register, effective):
-                continue
             uid = entity_unique_id(runtime, identity, register)
             base_label = f"{identity.node}: {register_name(register, runtime.language)}"
             structure = bitfield_structure(register)
@@ -1267,11 +1260,6 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                 or not zone_row_enabled(runtime, identity, register)
             ):
                 continue
-            effective = runtime.effective_access_levels.get(identity.node)
-            if control_kind(
-                register, runtime.language
-            ) is not None and not write_access_allowed(runtime, register, effective):
-                continue
             base_uid = entity_unique_id(runtime, identity, register)
             structure = bitfield_structure(register)
             bit_fields = (
@@ -1285,8 +1273,6 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                 else (base_uid,)
             )
             default = entity_enabled_by_default(runtime, identity, register)
-            if control_kind(register, runtime.language) is not None:
-                default = default and write_access_allowed(runtime, register, effective)
             selected.extend(uid for uid in uids if stored.get(uid, default))
         return selected
 
@@ -1324,11 +1310,6 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                 or not register.readable
                 or not zone_row_enabled(runtime, identity, register)
             ):
-                continue
-            effective = runtime.effective_access_levels.get(identity.node)
-            if control_kind(
-                register, runtime.language
-            ) is not None and not write_access_allowed(runtime, register, effective):
                 continue
             base_uid = entity_unique_id(runtime, identity, register)
             structure = bitfield_structure(register)

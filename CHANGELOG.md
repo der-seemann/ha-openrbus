@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.4.7 — 2026-10-09
+
+### Changed
+
+- Retain a bounded, payload-free diagnostic trace when a Thin-RPC batch read
+  triggers session recovery, including the failure class, session state, and
+  safe proxy counters before and after recovery.
+- Preserve in-flight initial discovery across Home Assistant's retryable
+  `ConfigEntryNotReady` setup callbacks. Keep fatal setup and shutdown cleanup
+  explicit; replace a stopped coordinator only after cleanup is proven
+  complete. Stop and join register polling before backend teardown, and retain
+  ownership when native or Thin-RPC disconnect cleanup cannot prove the
+  transport is stopped.
+- Preserve safe user-enabled registry rows across default reconciliation and
+  same-session zone-selector uncertainty, subject to access, safety, and
+  explicit category/zone choices.
+- Poll explicitly enabled, read-authorized non-recommended sensor and
+  binary-sensor projections while preserving current access, category, zone,
+  and user-disable gates; this path does not enable typed controls or writes.
+- Normalize the German display names for CM030, CM210, CM220, CM230, CP750,
+  and CP140. Keep CP020 selectors on the parent device, never treat an array
+  header as a zone slot, and leave CP080/CP140 activity dimensions unassigned
+  to a heating-circuit slot until their flattening is proven.
+- Retire legacy rows for exact mapped child objects when CP020 is confirmed
+  disabled, and for exact source-audited unresolved objects, using Home
+  Assistant's recoverable registry tombstones. Persist the exact entity
+  projection for previously confirmed active node/family/slot combinations so
+  those same rows can remain unavailable through selector uncertainty after a
+  restart. Historical identity never authorizes activity, polling, reads, or
+  writes; only a fresh positive CP020 read does. Retire never-confirmed unknown
+  rows and reload once when the exact projected UID set changes, not when only
+  a display label changes.
+- Project only evidence-supported active zones and expose bounded Thin-RPC
+  flow-control reasons in diagnostics.
+- Attribute a bounded read-only recovery attempt to its fixed call category
+  (startup discovery, bridge health, zone discovery, polling, or the explicit
+  read service), so diagnostics can distinguish integration-owned work without
+  retaining object addresses, arguments, values, or caller identities.
+
+### Compatibility and limits
+
+- Pins the matching OpenRBus Core 0.4.7 release.
+- The audit has 262 exact positive slot-map keys; 22 unresolved zone-object
+  mappings remain excluded from projection. The map is not complete for every
+  zone-related object. A previously confirmed projection can remain unavailable
+  while CP020 is unknown; an unknown slot without a trusted prior manifest is
+  not projected. Confirmed CP020 zero retires the mapped child rows.
+- Registry projection and successful reads do not establish physical write
+  safety.
+
 ## 0.4.6 — release candidate
 
 ### Changed

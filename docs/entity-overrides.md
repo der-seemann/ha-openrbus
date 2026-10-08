@@ -4,6 +4,12 @@ The Home Assistant Options Flow presents three steps: **Device → Category → 
 
 Membership is conservative. Active CP02x configuration evidence can assign configured heating functions to Zone and configured domestic-hot-water functions to Trinkwarmwasser. DHW remains its own category; DHW values do not create heating circuits. Disabled, unread, or unknown configuration slots remain inactive by default. Other categories are accepted only from structured category metadata supplied by Core. Register names, model names, neighboring object rows, and static Original-App category labels do not establish runtime category membership. Cooling, screed drying, diagnostics, access, readability, and write safety gates remain independent of picker category.
 
+An explicitly enabled Home Assistant registry row for a non-recommended,
+readable sensor or binary sensor opts that exact read-only projection into
+polling. It does not bypass current read authorization, optional-category or
+zone filters, or explicit user disables. This read-only opt-in does not enable
+the write API; typed controls do not use this manual-registry opt-in path.
+
 Choices persist at three scopes: entity unique IDs, `device:<node>:category:<category>` keys stored in `group_overrides`, and node keys. Entity choice takes precedence over current category, legacy General category, legacy `node:<node>:zone/object:<...>` group choice, node choice, then the automatic default. Legacy node and group keys remain stored and effective for compatibility.
 
 Entity IDs use one deterministic rule across platforms: a SHA-256 prefix of the configured BLE target identifier, CANopen node, and object index/subindex. Conventional MAC addresses retain their existing canonical byte hash; opaque adapter identifiers such as UUIDs are hashed as normalized UTF-8 text. The raw identifier is not exposed in entity IDs. Different gateways therefore receive distinct IDs, while reinstalling the integration against the same target and bus identities recreates the same IDs regardless of Home Assistant's random config-entry ID. Entries without a configured BLE target fail setup rather than silently use an installation-specific service name.

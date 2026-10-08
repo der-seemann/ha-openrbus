@@ -37,7 +37,15 @@ from .register_entities import (
     rows_for_parent,
     should_project_as_control,
 )
-from .zones import profile_for, zone_device_name, zone_enabled, zone_subindex
+from .zones import (
+    profile_for,
+    zone_device_name,
+    zone_enabled,
+    zone_is_active,
+    zone_projection_exists,
+    zone_read_state,
+    zone_subindex,
+)
 
 _CATALOG_REGISTRY = Registry.load_default()
 
@@ -402,6 +410,11 @@ class OpenRBusRegisterSensor(
 
     @property
     def available(self) -> bool:
+        slot = zone_subindex(self._register, self._identity)
+        if slot is not None and not zone_is_active(
+            self._parent, self._identity.node, slot
+        ):
+            return False
         return (
             self._effective_access_level is not None
             and _catalog_visible(self._register, self._effective_access_level)
@@ -418,14 +431,23 @@ class OpenRBusRegisterSensor(
 
     @property
     def device_info(self) -> DeviceInfo:
-        slot = zone_subindex(self._register)
+        slot = zone_subindex(self._register, self._identity)
         profile = (
-            profile_for(self._parent, self._identity.node, slot)
+            profile_for(self._parent, self._identity.node, slot, self._identity)
             if slot is not None
             else None
         )
-        if profile is not None and zone_enabled(
-            self._parent, profile.node, profile.subindex
+        projected_unknown = (
+            profile is not None
+            and zone_projection_exists(
+                self._parent, profile.node, profile.subindex, self._identity
+            )
+            and zone_read_state(self._parent, profile.node, profile.subindex).value
+            == "unknown"
+        )
+        if profile is not None and (
+            zone_enabled(self._parent, profile.node, profile.subindex)
+            or projected_unknown
         ):
             node_identifier = stable_node_id(self._parent, self._identity.node)
             return DeviceInfo(

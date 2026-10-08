@@ -33,6 +33,7 @@ from .const import (
     CONF_GROUP_OVERRIDES,
     CONF_NODE_OVERRIDES,
     CONF_SCREED_DRYING_ENABLED,
+    CONF_ZONE_OVERRIDES,
     DEFAULT_COOLING_ENABLED,
     DOMAIN,
 )
@@ -45,11 +46,24 @@ from .entity_names import register_display_name, suggested_object_id
 from .identity import stable_gateway_id, stable_node_id, stable_object_id
 from .optional_register_filters import OPTIONAL_REGISTER_FILTERS
 from .zones import (
+    ZONE_FAMILY_SLOT_OBJECTS,
+    ZONE_PARENT_OBJECT_SOURCES,
+    ZONE_SLOT_OBJECT_SOURCES,
+    ZONE_UNRESOLVED_OBJECT_SOURCES,
+    ZoneAssociation,
     ZoneKind,
+    ZoneReadState,
     entity_zone_label,
+    override_key,
     profile_for,
+    zone_association,
     zone_device_name,
     zone_enabled,
+    zone_is_active,
+    zone_is_confirmed_disabled,
+    zone_projection_exists,
+    zone_projection_record,
+    zone_read_state,
     zone_subindex,
 )
 
@@ -83,6 +97,45 @@ def runtime_nodes(parent: OpenRBusCoordinator) -> tuple[Any, ...]:
     """Return the current node projection without assuming a node number."""
 
     return tuple(parent.inventories or parent.devices)
+
+
+def _legacy_zone_bound_subindex(register: Any) -> int | None:
+    """Identify rows that the pre-map zone classifier could have tagged.
+
+    This migration guard mirrors the old source classifier only for exact
+    catalog records. It is intentionally not used for current projection.
+    """
+
+    address = getattr(register, "address", None)
+    index = getattr(address, "index", None)
+    subindex = getattr(address, "subindex", None)
+    if not isinstance(index, int) or not isinstance(subindex, int):
+        return None
+    if not (0x3400 <= index <= 0x3477 or 0x5402 <= index <= 0x5444):
+        return None
+    semantic = " ".join(
+        str(getattr(register, field, "") or "")
+        for field in ("internal_code", "name_en", "name_de")
+    ).casefold()
+    internal_code = str(getattr(register, "internal_code", "")).upper()
+    if (
+        "zone" in semantic
+        or internal_code.startswith(("CP", "CM", "CC"))
+        or any(
+            marker in semantic
+            for marker in (
+                "heizkreis",
+                "heating circuit",
+                "hk,",
+                "hk ",
+                " hk",
+                "hk/",
+                "hk-",
+            )
+        )
+    ):
+        return subindex
+    return None
 
 
 def poll_group(register: RegisterCatalogEntry, recommended: frozenset) -> str:
@@ -281,6 +334,34 @@ def rows_for_parent(
         else:
             registers = catalog_for_node(runtime_node, CATALOG_REGISTRY)
         for register in registers:
+            association = zone_association(register, identity)
+            if association is ZoneAssociation.UNRESOLVED:
+                # Exact source-known zone data without a proven slot dimension
+                # must not become a duplicate parent entity.
+                continue
+            zone_active = (
+                zone_is_active(parent, identity.node, register.address.subindex)
+                if association is ZoneAssociation.ZONE_SLOT
+                else True
+            )
+            if association is ZoneAssociation.ZONE_SLOT and not zone_active:
+                if (
+                    zone_read_state(parent, identity.node, register.address.subindex)
+                    is not ZoneReadState.UNKNOWN
+                ):
+                    continue
+                projected_uid = entity_unique_id(parent, identity, register)
+                if not zone_projection_exists(
+                    parent,
+                    identity.node,
+                    register.address.subindex,
+                    identity,
+                    projected_uid,
+                ):
+                    continue
+                # Activity must be known and positive before any platform sees
+                # a new zone row. Historical manifest rows are retained only
+                # to preserve identity while current state is unknown.
             if not include_diagnostics and is_diagnostic_register(register):
                 continue
             if not include_screed_drying and is_optional_filter_register(
@@ -307,10 +388,17 @@ def zone_row_enabled(
     identity: DeviceIdentity,
     register: RegisterCatalogEntry,
 ) -> bool:
-    """Return whether a zone row belongs to a selected non-empty zone."""
+    """Return whether an exact zone row has positive activity and selection."""
 
-    slot = zone_subindex(register)
-    return slot is None or zone_enabled(parent, identity.node, slot)
+    association = zone_association(register, identity)
+    if association is ZoneAssociation.UNRESOLVED:
+        return False
+    if association is not ZoneAssociation.ZONE_SLOT:
+        return True
+    slot = register.address.subindex
+    return zone_is_active(parent, identity.node, slot) and zone_enabled(
+        parent, identity.node, slot
+    )
 
 
 def _unobserved_source_rw_row(
@@ -323,7 +411,8 @@ def _unobserved_source_rw_row(
     Family and bounded-array metadata makes comparable registers selectable,
     but does not establish that an object exists on this installation. Keep
     those newly writable rows out of the initial poll set until the user
-    selects them or discovery confirms them.
+    selects them or enables a matching read-only HA projection, or discovery
+    confirms them.
     """
 
     # ``writable`` is the active write projection.  It is false when HA's
@@ -504,7 +593,7 @@ def entity_group_key(
     elif is_optional_filter_register(parent, identity, register, "cooling"):
         base = f"node:{node}:optional:cooling"
     else:
-        slot = zone_subindex(register)
+        slot = zone_subindex(register, identity)
         if slot is not None:
             base = f"node:{node}:zone:{slot}"
         else:
@@ -553,11 +642,16 @@ def entity_category(
     unclassified.
     """
 
-    slot = zone_subindex(register)
+    association = zone_association(register, identity)
+    slot = (
+        register.address.subindex
+        if association is ZoneAssociation.FUNCTION_SELECTOR
+        else zone_subindex(register, identity)
+    )
     if slot is not None:
         from .zones import ZoneKind, profile_for
 
-        profile = profile_for(parent, identity.node, slot)
+        profile = profile_for(parent, identity.node, slot, identity)
         if profile is not None and profile.kind is ZoneKind.HEATING:
             return "zone"
         if profile is not None and profile.kind is ZoneKind.DHW:
@@ -664,19 +758,124 @@ def _poll_row_selected(
     parent: OpenRBusCoordinator,
     identity: DeviceIdentity,
     register: RegisterCatalogEntry,
+    enabled_registry_entities: Mapping[str, tuple[Any, ...]] | None = None,
 ) -> bool:
     """Keep absent inferred writes out of polling unless the picker opts in.
 
-    An older sensor or typed projection can remain enabled in HA's registry
-    after the catalog's default changes.  Since the poller intentionally
-    accepts any enabled projection sharing a stable ID, enforce this safety
-    default before rows enter the polling coordinator.  Explicit persisted
-    picker choices still work through ``entity_enabled_by_default``.
+    An absent inferred write stays out of the default poll set. An explicit
+    picker choice or an enabled read-only HA projection is an intentional
+    request to read that exact row. Persisted entity/group/node disables and
+    typed-control write authorization remain authoritative.
     """
 
-    return not _unobserved_source_rw_row(
-        parent, identity, register
-    ) or entity_enabled_by_default(parent, identity, register)
+    if not _unobserved_source_rw_row(parent, identity, register):
+        return True
+    if entity_enabled_by_default(parent, identity, register):
+        return True
+    if not enabled_registry_entities:
+        return False
+
+    base_uid = entity_unique_id(parent, identity, register)
+    for unique_id, entities in enabled_registry_entities.items():
+        if unique_id != base_uid and not (
+            unique_id.startswith(f"{base_uid}:bit:")
+            and any(
+                _registry_entity_domain(entity) == "binary_sensor"
+                for entity in entities
+            )
+        ):
+            continue
+        if _selection_override(parent, identity, register, unique_id) is False:
+            continue
+        for entity in entities:
+            domain = _registry_entity_domain(entity)
+            if domain in {"sensor", "binary_sensor"}:
+                return True
+            if domain in {"number", "select", "switch"} and write_access_allowed(
+                parent,
+                register,
+                getattr(parent, "effective_access_levels", {}).get(identity.node),
+            ):
+                return True
+    return False
+
+
+def _manual_readonly_registry_poll_opt_in(
+    parent: OpenRBusCoordinator,
+    identity: DeviceIdentity,
+    register: RegisterCatalogEntry,
+    enabled_registry_entities: Mapping[str, tuple[Any, ...]] | None,
+) -> bool:
+    """Allow explicit HA registry enables for safe, non-control read entities.
+
+    This is a narrow opt-in for rows outside Core's default recommendations.
+    It only authorizes reads through a sensor projection; it never enables a
+    write API or typed-control entity. Earlier selection stages still apply
+    registry disable, category, and zone policy before this helper is called.
+    """
+
+    if (
+        not enabled_registry_entities
+        or not register.readable
+        or not zone_row_enabled(parent, identity, register)
+        or control_kind(register, getattr(parent, "language", "de")) is not None
+    ):
+        return False
+    effective = getattr(parent, "effective_access_levels", {}).get(identity.node)
+    if effective is None or not catalog_visible(register, effective):
+        return False
+
+    base_uid = entity_unique_id(parent, identity, register)
+    for unique_id, entities in enabled_registry_entities.items():
+        if unique_id != base_uid and not (
+            unique_id.startswith(f"{base_uid}:bit:")
+            and any(
+                _registry_entity_domain(entity) == "binary_sensor"
+                for entity in entities
+            )
+        ):
+            continue
+        if _selection_override(parent, identity, register, unique_id) is False:
+            continue
+        if any(
+            _registry_entity_domain(entity) in {"sensor", "binary_sensor"}
+            for entity in entities
+        ):
+            return True
+    return False
+
+
+def _registry_entity_domain(entity: Any) -> str:
+    """Resolve the entity domain from a registry row without guessing a platform."""
+
+    domain = getattr(entity, "domain", None)
+    if domain:
+        return str(domain)
+    return str(getattr(entity, "entity_id", "")).partition(".")[0]
+
+
+def _enabled_registry_entities(
+    hass: HomeAssistant,
+    parent: OpenRBusCoordinator,
+) -> dict[str, tuple[Any, ...]]:
+    """Snapshot enabled OpenRBus projections for one entry's poll selection."""
+
+    try:
+        registry = er.async_get(hass)
+    except (AttributeError, TypeError):
+        return {}
+    entry_id = parent.config_entry.entry_id
+    rows: dict[str, list[Any]] = {}
+    for entity in tuple(registry.entities.values()):
+        unique_id = getattr(entity, "unique_id", None)
+        if (
+            getattr(entity, "platform", None) == DOMAIN
+            and getattr(entity, "config_entry_id", None) == entry_id
+            and isinstance(unique_id, str)
+            and getattr(entity, "disabled_by", None) is None
+        ):
+            rows.setdefault(unique_id, []).append(entity)
+    return {unique_id: tuple(entities) for unique_id, entities in rows.items()}
 
 
 def normalized_entity_overrides(value: object) -> dict[str, bool | None]:
@@ -736,15 +935,10 @@ def async_apply_entity_overrides(
                 or cooling_enabled(parent)
             )
         )
-        effective = parent.effective_access_levels.get(identity.node)
         safe[uid] = bool(
             allowed
             and category_visible
             and zone_row_enabled(parent, identity, register)
-            and (
-                control_kind(register, parent.language) is None
-                or write_access_allowed(parent, register, effective)
-            )
         )
         structure = bitfield_structure(register)
         if structure is not None:
@@ -777,12 +971,33 @@ def async_apply_entity_overrides(
         row = rows_by_uid.get(uid)
         if row is not None:
             identity, register = row
-            slot = zone_subindex(register)
+            slot = zone_subindex(register, identity)
             # A missing CP020 read is unknown, not proof that a previously
             # enabled zone is inactive. Keep its registry choice until a
             # positive active/inactive profile arrives.
-            if slot is not None and profile_for(parent, identity.node, slot) is None:
+            if (
+                slot is not None
+                and profile_for(parent, identity.node, slot, identity) is None
+            ):
                 continue
+            profile = (
+                profile_for(parent, identity.node, slot, identity)
+                if slot is not None
+                else None
+            )
+            previously_active = (profile is not None and profile.active) or (
+                slot is not None
+                and (identity.node, slot)
+                in getattr(parent, "_zone_confirmed_active_slots", set())
+            )
+            retained_active_unknown = (
+                slot is not None
+                and previously_active
+                and zone_read_state(parent, identity.node, slot)
+                is ZoneReadState.UNKNOWN
+            )
+        else:
+            retained_active_unknown = False
         disabled_by = str(getattr(entity, "disabled_by", "") or "").casefold()
         if uid not in safe:
             should_enable = False
@@ -791,8 +1006,24 @@ def async_apply_entity_overrides(
             should_enable = (
                 entity_enabled_by_default(parent, identity, register, unique_id=uid)
                 and safe[uid]
+                and _registry_projection_write_allowed(
+                    entity,
+                    parent,
+                    identity,
+                    register,
+                )
             )
         if not should_enable and not disabled_by:
+            # ``disabled_by=None`` is a persisted user enable in HA.  The
+            # inferred source-RW fallback below only changes the default; it
+            # must not revoke that choice when capabilities are temporarily
+            # absent.  Explicit picker/scope choices and all safety/category
+            # gates still take precedence.
+            if (
+                retained_active_unknown
+                or (uid in reconcile_defaults and safe.get(uid, False))
+            ) and (uid not in overrides and uid not in explicitly_scoped):
+                continue
             registry.async_update_entity(
                 entity.entity_id,
                 disabled_by=er.RegistryEntryDisabler.INTEGRATION,
@@ -823,6 +1054,7 @@ def async_apply_diagnostic_visibility(
     cooling_visible = cooling_enabled(parent)
     permitted: dict[str, bool] = {}
     visibility: dict[str, bool] = {}
+    row_policies: dict[str, tuple[DeviceIdentity, RegisterCatalogEntry, bool]] = {}
     entry_id = parent.config_entry.entry_id
     # These two identity projections have Diagnostic category in HA and are
     # part of the same expert surface even though they are not catalog rows.
@@ -837,7 +1069,7 @@ def async_apply_diagnostic_visibility(
             permitted[
                 f"{stable_node_id(parent, identity.node)}:identity:parameter_number"
             ] = True
-    for identity, register, _group, _allowed in rows_for_parent(
+    for identity, register, _group, allowed in rows_for_parent(
         parent,
         include_diagnostics=True,
         include_screed_drying=True,
@@ -851,13 +1083,20 @@ def async_apply_diagnostic_visibility(
         if not diagnostic and not screed_drying and not cooling:
             continue
         unique_id = entity_unique_id(parent, identity, register)
-        permitted[unique_id] = control_kind(
-            register, parent.language
-        ) is None or write_access_allowed(
-            parent,
-            register,
-            parent.effective_access_levels.get(identity.node),
-        )
+        read_safe = bool(allowed and zone_row_enabled(parent, identity, register))
+        row_policies[unique_id] = (identity, register, read_safe)
+        permitted[unique_id] = read_safe
+        structure = bitfield_structure(register)
+        if structure is not None:
+            for field in structure.fields:
+                if field.bit_length == 1:
+                    bit_uid = f"{unique_id}:bit:{field.name}"
+                    row_policies[bit_uid] = (
+                        identity,
+                        register,
+                        read_safe,
+                    )
+                    permitted[bit_uid] = read_safe
         # A row can theoretically carry both classifications.  Both opt-ins
         # must then be enabled; a generic heating row never reaches this map.
         visibility[unique_id] = (
@@ -865,6 +1104,10 @@ def async_apply_diagnostic_visibility(
             and (not screed_drying or screed_drying_visible)
             and (not cooling or cooling_visible)
         )
+        if structure is not None:
+            for field in structure.fields:
+                if field.bit_length == 1:
+                    visibility[f"{unique_id}:bit:{field.name}"] = visibility[unique_id]
     for entity in tuple(registry.entities.values()):
         if (
             getattr(entity, "platform", None) != DOMAIN
@@ -873,6 +1116,19 @@ def async_apply_diagnostic_visibility(
         ):
             continue
         disabled_by = str(getattr(entity, "disabled_by", "") or "").casefold()
+        row_policy = row_policies.get(entity.unique_id)
+        projection_permitted = permitted[entity.unique_id]
+        if row_policy is not None:
+            identity, register, read_safe = row_policy
+            projection_permitted = bool(
+                read_safe
+                and _registry_projection_write_allowed(
+                    entity,
+                    parent,
+                    identity,
+                    register,
+                )
+            )
         if (
             not visibility.get(entity.unique_id, diagnostics_visible)
             and not disabled_by
@@ -884,7 +1140,7 @@ def async_apply_diagnostic_visibility(
         elif (
             visibility.get(entity.unique_id, diagnostics_visible)
             and disabled_by == "integration"
-            and permitted[entity.unique_id]
+            and projection_permitted
         ):
             registry.async_update_entity(entity.entity_id, disabled_by=None)
 
@@ -923,6 +1179,7 @@ def ensure_polling_coordinators(
         "standard": {},
         "slow": {},
     }
+    enabled_registry_entities = _enabled_registry_entities(hass, parent)
     for identity, register, group, allowed in rows:
         if not allowed:
             selection_counts["read_access_excluded"] += 1
@@ -930,7 +1187,12 @@ def ensure_polling_coordinators(
         if not zone_row_enabled(parent, identity, register):
             selection_counts["zone_excluded"] += 1
             continue
-        if not _poll_row_selected(parent, identity, register):
+        if not _poll_row_selected(
+            parent,
+            identity,
+            register,
+            enabled_registry_entities,
+        ):
             selection_counts["unobserved_declared_write_not_selected"] += 1
             continue
         effective = parent.effective_access_levels.get(identity.node)
@@ -961,6 +1223,12 @@ def ensure_polling_coordinators(
                 register.address not in recommended
                 and not safe_default
                 and not entity_enabled_by_default(parent, identity, register)
+                and not _manual_readonly_registry_poll_opt_in(
+                    parent,
+                    identity,
+                    register,
+                    enabled_registry_entities,
+                )
             ):
                 selection_counts["not_recommended"] += 1
                 continue
@@ -1096,6 +1364,118 @@ def cleanup_legacy_sensor_entities(
             # a later update call.
             if value is not None and value != "":
                 metadata.setdefault(field, value)
+        registry.async_remove(entity.entity_id)
+        removed += 1
+    return removed
+
+
+def cleanup_inactive_zone_entities(
+    hass: HomeAssistant,
+    parent: OpenRBusCoordinator,
+) -> int:
+    """Remove stale mapped child rows, retaining HA's restorable tombstones.
+
+    Home Assistant's EntityRegistry.async_remove persists a DeletedRegistryEntry
+    keyed by domain/platform/unique_id. Its next async_get_or_create restores
+    the old entity_id, name, area, disabled/hidden choices, icon, labels,
+    aliases, options, and registry UUID. Device registry rows are deliberately
+    untouched; stable child identifiers reconnect to the same user-named
+    device when its CP020 function becomes active again.
+    """
+
+    try:
+        registry = er.async_get(hass)
+    except (AttributeError, TypeError):
+        return 0
+    entry_id = parent.config_entry.entry_id
+    inactive_unique_ids: set[str] = set()
+    config_entry = parent.config_entry
+    override_source_present = False
+    validated_overrides: dict[str, object] = {}
+    for source in (
+        getattr(config_entry, "data", {}) or {},
+        getattr(config_entry, "options", {}) or {},
+    ):
+        if CONF_ZONE_OVERRIDES in source:
+            override_source_present = True
+            values = source.get(CONF_ZONE_OVERRIDES)
+            if isinstance(values, Mapping):
+                validated_overrides.update(values)
+    if not override_source_present:
+        configured_overrides = getattr(parent, "zone_overrides", {})
+        if isinstance(configured_overrides, Mapping):
+            validated_overrides.update(configured_overrides)
+    for runtime_node in runtime_nodes(parent):
+        identity = identity_for_runtime(runtime_node)
+        node = identity.node
+        # Retire legacy rows for exact catalog objects whose dimension is
+        # unresolved.  They are intentionally absent from every platform
+        # projection; do not infer ownership from an address range or label.
+        for register in catalog_for_node(identity, CATALOG_REGISTRY):
+            index = getattr(getattr(register, "address", None), "index", None)
+            slot = _legacy_zone_bound_subindex(register)
+            if (
+                index not in ZONE_UNRESOLVED_OBJECT_SOURCES
+                or index in ZONE_PARENT_OBJECT_SOURCES
+                or slot is None
+                or slot <= 0
+            ):
+                continue
+            inactive_unique_ids.add(stable_object_id(parent, node, index, slot))
+        for index in ZONE_SLOT_OBJECT_SOURCES:
+            allowed_families = ZONE_FAMILY_SLOT_OBJECTS.get(index)
+            if allowed_families is not None:
+                resolution = getattr(identity, "registry_resolution", None)
+                family = getattr(identity, "family", None) or getattr(
+                    resolution, "family", None
+                )
+                if str(family or "").strip().casefold() not in allowed_families:
+                    continue
+            for slot in range(1, 11):
+                override = validated_overrides.get(override_key(identity.node, slot))
+                explicitly_disabled = type(override) is bool and override is False
+                confirmed_disabled = zone_is_confirmed_disabled(parent, node, slot)
+                # Only a persisted exact projection manifest can retain rows
+                # through UNKNOWN. A registry ghost or a cached activity label
+                # is not enough to keep a never-projected slot alive.
+                record = zone_projection_record(parent, node, slot, identity)
+                unique_id = stable_object_id(parent, node, index, slot)
+                manifested = bool(record and unique_id in record.get("uids", ()))
+                session_confirmed = (node, slot) in getattr(
+                    parent, "_zone_confirmed_active_slots", set()
+                )
+                unknown_without_history = (
+                    zone_read_state(parent, node, slot) is ZoneReadState.UNKNOWN
+                    and not record
+                    and not session_confirmed
+                )
+                if (
+                    confirmed_disabled
+                    or explicitly_disabled
+                    or unknown_without_history
+                    or (
+                        not zone_is_active(parent, node, slot)
+                        and record is not None
+                        and not manifested
+                    )
+                ):
+                    inactive_unique_ids.add(unique_id)
+                    continue
+    removed = 0
+    allowed_domains = {"sensor", "binary_sensor", "number", "select", "switch"}
+    for entity in tuple(registry.entities.values()):
+        unique_id = getattr(entity, "unique_id", "")
+        base_unique_id, bit_separator, bit_name = unique_id.partition(":bit:")
+        exact_mapped_row = base_unique_id in inactive_unique_ids and (
+            not bit_separator or (bool(bit_name) and ":" not in bit_name)
+        )
+        if (
+            getattr(entity, "platform", None) != DOMAIN
+            or getattr(entity, "config_entry_id", None) != entry_id
+            or getattr(entity, "domain", None) not in allowed_domains
+            or not exact_mapped_row
+        ):
+            continue
         registry.async_remove(entity.entity_id)
         removed += 1
     return removed
@@ -1419,6 +1799,29 @@ def write_access_allowed(
     )
 
 
+def _registry_projection_write_allowed(
+    entity: Any,
+    parent: OpenRBusCoordinator,
+    identity: DeviceIdentity,
+    register: RegisterCatalogEntry,
+) -> bool:
+    """Keep write authorization on typed entities, not read-only fallbacks."""
+
+    if control_kind(register, getattr(parent, "language", "de")) is None:
+        return True
+    domain = getattr(entity, "domain", None)
+    if not domain:
+        entity_id = str(getattr(entity, "entity_id", ""))
+        domain = entity_id.partition(".")[0]
+    if domain in {"sensor", "binary_sensor"}:
+        return True
+    return write_access_allowed(
+        parent,
+        register,
+        getattr(parent, "effective_access_levels", {}).get(identity.node),
+    )
+
+
 def should_project_as_control(
     parent: OpenRBusCoordinator,
     register: RegisterCatalogEntry,
@@ -1550,8 +1953,12 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
         """Make zone-scoped register names distinguishable in HA's entity list."""
 
         zone_label = entity_zone_label(parent, identity, register)
-        slot = zone_subindex(register)
-        profile = profile_for(parent, identity.node, slot) if slot is not None else None
+        slot = zone_subindex(register, identity)
+        profile = (
+            profile_for(parent, identity.node, slot, identity)
+            if slot is not None
+            else None
+        )
         if profile is not None and zone_enabled(parent, identity.node, slot):
             # The active zone is the entity's HA device, so HA already adds
             # its localized circuit label to the visible full entity name.
@@ -1585,6 +1992,11 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
 
     @property
     def available(self) -> bool:
+        slot = zone_subindex(self._register, self._identity)
+        if slot is not None and not zone_is_active(
+            self._parent, self._identity.node, slot
+        ):
+            return False
         return (
             self._effective_access_level is not None
             and catalog_visible(self._register, self._effective_access_level)
@@ -1595,14 +2007,23 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
 
     @property
     def device_info(self) -> DeviceInfo:
-        slot = zone_subindex(self._register)
+        slot = zone_subindex(self._register, self._identity)
         profile = (
-            profile_for(self._parent, self._identity.node, slot)
+            profile_for(self._parent, self._identity.node, slot, self._identity)
             if slot is not None
             else None
         )
-        if profile is not None and zone_enabled(
-            self._parent, profile.node, profile.subindex
+        projected_unknown = (
+            profile is not None
+            and zone_projection_exists(
+                self._parent, profile.node, profile.subindex, self._identity
+            )
+            and zone_read_state(self._parent, profile.node, profile.subindex)
+            is ZoneReadState.UNKNOWN
+        )
+        if profile is not None and (
+            zone_enabled(self._parent, profile.node, profile.subindex)
+            or projected_unknown
         ):
             node_identifier = stable_node_id(self._parent, self._identity.node)
             return DeviceInfo(
@@ -1696,6 +2117,13 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
     async def _async_write(self, value: Any) -> None:
         """Write through Core and publish only the confirmed read-back value."""
 
+        slot = zone_subindex(self._register, self._identity)
+        if slot is not None and not zone_is_active(
+            self._parent, self._identity.node, slot
+        ):
+            raise HomeAssistantError(
+                "OpenRBus zone function state is not confirmed active"
+            )
         if not write_access_allowed(
             self._parent, self._register, self._effective_access_level
         ):
@@ -1719,7 +2147,9 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
         if not plan.verified:
             raise HomeAssistantError("OpenRBus write was not read-back verified")
         readback = await self._parent.async_read_object(
-            self._register.address, node=self._identity.node
+            self._register.address,
+            node=self._identity.node,
+            read_origin="control_readback",
         )
         self.coordinator.async_set_updated_data(
             {
@@ -1734,6 +2164,7 @@ __all__ = [
     "OpenRBusRegisterEntity",
     "access_level",
     "catalog_visible",
+    "cleanup_inactive_zone_entities",
     "cleanup_legacy_sensor_entities",
     "control_kind",
     "definition_for",

@@ -1,6 +1,8 @@
 from types import SimpleNamespace
 
 import pytest
+from homeassistant.exceptions import HomeAssistantError
+from openrbus.discovery import DeviceIdentity
 from openrbus.protocol.canip import ObjectAddress
 
 from custom_components.openrbus import register_entities
@@ -13,12 +15,13 @@ from custom_components.openrbus.const import (
     CONF_SCREED_DRYING_ENABLED,
     DOMAIN,
 )
+from custom_components.openrbus.identity import stable_object_id
 from custom_components.openrbus.number import OpenRBusNumber
 from custom_components.openrbus.register_entities import OpenRBusRegisterEntity
 from custom_components.openrbus.select import OpenRBusSelect
 from custom_components.openrbus.sensor import _entity_enabled_by_default
 from custom_components.openrbus.switch import OpenRBusSwitch
-from custom_components.openrbus.zones import ZoneProfile
+from custom_components.openrbus.zones import ZoneProfile, ZoneReadState
 
 
 def _register(
@@ -179,11 +182,200 @@ def test_manual_override_adds_nonrecommended_sensor_to_poll_set(
     assert polling["standard"].addresses == ((3, row.address),)
 
 
+def test_enabled_registry_read_sensor_polls_unobserved_declared_write_readonly(
+    monkeypatch,
+) -> None:
+    """A sensor enable opts an exact read-allowed row into reads, not writes."""
+    row = _register("5501:01", levels=("Installer",))
+    row.writable = True
+    row.write_declared = True
+    row.safety = "source_supported"
+    identity = SimpleNamespace(node=3)
+    config_entry = SimpleNamespace(
+        entry_id="entry",
+        data={},
+        options={},
+        async_on_unload=lambda _callback: None,
+    )
+    parent = SimpleNamespace(
+        config_entry=config_entry,
+        inventories=(SimpleNamespace(identity=identity, capabilities={}),),
+        devices=(),
+        language="en",
+        effective_access_levels={3: 3},
+        configured_access_level=3,
+        entity_overrides={},
+        zone_profiles={},
+        zone_overrides={},
+        poll_intervals={"fast": 1, "standard": 10, "slow": 60},
+    )
+
+    class FakePollingCoordinator:
+        def __init__(self, _hass, _parent, _group, addresses, _interval, **_kwargs):
+            self.addresses = addresses
+
+        async def async_shutdown(self):
+            pass
+
+    monkeypatch.setattr(register_entities, "entity_unique_id", lambda *_args: "uid")
+    monkeypatch.setattr(
+        register_entities, "recommended_addresses", lambda _identity: frozenset()
+    )
+    monkeypatch.setattr(
+        register_entities,
+        "rows_for_parent",
+        lambda *_args, **_kwargs: ((identity, row, "standard", True),),
+    )
+    monkeypatch.setattr(
+        register_entities, "_poll_selection_filter_counts", lambda *_args: {}
+    )
+    monkeypatch.setattr(register_entities, "_poll_activation_counts", lambda *_args: {})
+    monkeypatch.setattr(register_entities, "bitfield_structure", lambda _row: None)
+    monkeypatch.setattr(register_entities, "control_kind", lambda *_args: None)
+    monkeypatch.setattr(register_entities, "catalog_visible", lambda *_args: True)
+    monkeypatch.setattr(
+        register_entities,
+        "_enabled_registry_entities",
+        lambda *_args: {"uid": (SimpleNamespace(domain="sensor"),)},
+    )
+    monkeypatch.setattr(
+        register_entities, "OpenRBusPollingCoordinator", FakePollingCoordinator
+    )
+    monkeypatch.setattr(
+        register_entities,
+        "schedule_first_refresh_in_background",
+        lambda *_args, **_kwargs: None,
+    )
+
+    polling = register_entities.ensure_polling_coordinators(
+        SimpleNamespace(data={}), parent
+    )
+
+    assert polling["standard"].addresses == ((3, row.address),)
+    assert parent._openrbus_poll_selection_diagnostics["not_recommended"] == 0
+
+
+def test_enabled_registry_snapshot_excludes_disabled_entries(monkeypatch) -> None:
+    enabled = SimpleNamespace(
+        platform=DOMAIN,
+        config_entry_id="entry",
+        unique_id="uid",
+        entity_id="sensor.row",
+        disabled_by=None,
+    )
+    user_disabled = SimpleNamespace(
+        platform=DOMAIN,
+        config_entry_id="entry",
+        unique_id="user-disabled",
+        entity_id="sensor.user_disabled",
+        disabled_by="user",
+    )
+    integration_disabled = SimpleNamespace(
+        platform=DOMAIN,
+        config_entry_id="entry",
+        unique_id="integration-disabled",
+        entity_id="sensor.integration_disabled",
+        disabled_by="integration",
+    )
+    monkeypatch.setattr(
+        register_entities.er,
+        "async_get",
+        lambda _hass: SimpleNamespace(
+            entities={
+                "sensor.row": enabled,
+                "sensor.user_disabled": user_disabled,
+                "sensor.integration_disabled": integration_disabled,
+            }
+        ),
+    )
+    parent = SimpleNamespace(config_entry=SimpleNamespace(entry_id="entry"))
+
+    assert register_entities._enabled_registry_entities(SimpleNamespace(), parent) == {
+        "uid": (enabled,)
+    }
+
+
+@pytest.mark.parametrize(
+    ("scenario", "expected"),
+    [
+        ("disabled", False),
+        ("user_disabled", False),
+        ("read_ineligible", False),
+        ("category_disabled", False),
+        ("group_disabled", False),
+        ("node_disabled", False),
+        ("user_override_disabled", False),
+        ("zone_disabled", False),
+        ("registry_control_domain", False),
+        ("typed_control", False),
+        ("unobserved_write", True),
+    ],
+)
+def test_registry_sensor_opt_in_respects_read_only_safety_gates(
+    monkeypatch, scenario, expected
+) -> None:
+    row = _register("5501:01", levels=("Installer",))
+    identity = SimpleNamespace(node=3)
+    parent = SimpleNamespace(
+        effective_access_levels={3: 3},
+        entity_overrides=(
+            {"uid": False} if scenario == "user_override_disabled" else {}
+        ),
+        config_entry=SimpleNamespace(
+            data={},
+            options=(
+                (
+                    {CONF_GROUP_OVERRIDES: {"device:3:category:unclassified": False}}
+                    if scenario == "category_disabled"
+                    else {CONF_GROUP_OVERRIDES: {"node:3:object:5501": False}}
+                    if scenario == "group_disabled"
+                    else {CONF_NODE_OVERRIDES: {"3": False}}
+                )
+                if scenario in {"category_disabled", "group_disabled", "node_disabled"}
+                else {}
+            ),
+        ),
+        zone_profiles={},
+        zone_overrides={},
+        language="en",
+        inventories=(SimpleNamespace(identity=identity, capabilities={}),),
+    )
+    if scenario == "typed_control":
+        row.control_kind = "number"
+    if scenario == "unobserved_write":
+        row.writable = True
+        row.write_declared = True
+        row.safety = "source_supported"
+    registry_domain = "number" if scenario == "registry_control_domain" else "sensor"
+    registry_rows = (
+        {"uid": (SimpleNamespace(domain=registry_domain),)}
+        if scenario not in {"disabled", "user_disabled"}
+        else {}
+    )
+    monkeypatch.setattr(register_entities, "entity_unique_id", lambda *_args: "uid")
+    monkeypatch.setattr(register_entities, "catalog_visible", lambda *_args: True)
+    if scenario == "zone_disabled":
+        monkeypatch.setattr(register_entities, "zone_row_enabled", lambda *_args: False)
+    if scenario == "read_ineligible":
+        monkeypatch.setattr(register_entities, "catalog_visible", lambda *_args: False)
+    if scenario == "typed_control":
+        monkeypatch.setattr(register_entities, "control_kind", lambda *_args: "number")
+    else:
+        monkeypatch.setattr(register_entities, "control_kind", lambda *_args: None)
+
+    assert (
+        register_entities._manual_readonly_registry_poll_opt_in(
+            parent, identity, row, registry_rows
+        )
+        is expected
+    )
+
+
 def test_inferred_source_rw_rows_default_off_until_capability_is_discovered(
     monkeypatch,
 ) -> None:
-    address = ObjectAddress.parse("346a:04")
-    row = _register("346a:04", levels=("User",))
+    address = ObjectAddress.parse("3700:04")
+    row = _register("3700:04", levels=("User",))
     row.writable = True
     row.write_declared = True
     row.safety = "source_supported"
@@ -210,7 +402,7 @@ def test_unobserved_source_write_declaration_is_independent_of_control_projectio
     monkeypatch, read_level: int, write_enabled: bool
 ) -> None:
     """Poll defaults use source facts through all HA access projections."""
-    row = _register("346a:04", levels=("User",))
+    row = _register("3700:04", levels=("User",))
     # The HA write option determines sensor vs control projection; it does not
     # change the source declaration that controls absent-slot poll defaults.
     row.writable = write_enabled
@@ -219,7 +411,7 @@ def test_unobserved_source_write_declaration_is_independent_of_control_projectio
     identity = SimpleNamespace(node=3)
     runtime_node = SimpleNamespace(
         identity=identity,
-        capabilities={ObjectAddress.parse("346a:00"): object()},
+        capabilities={ObjectAddress.parse("3700:00"): object()},
     )
     parent = SimpleNamespace(
         inventories=(runtime_node,),
@@ -233,17 +425,17 @@ def test_unobserved_source_write_declaration_is_independent_of_control_projectio
 
     # The canonical array head does not prove that concrete subindex 04 exists.
     assert not register_entities.entity_enabled_by_default(parent, identity, row)
-    # A stale enabled registry projection must not bypass the poll-selection
-    # guard for this absent inferred write.
+    # Without a registry snapshot, an absent inferred write remains outside
+    # the poll set until the user explicitly selects it.
     assert not register_entities._poll_row_selected(parent, identity, row)
 
-    runtime_node.capabilities[ObjectAddress.parse("346a:04")] = object()
+    runtime_node.capabilities[ObjectAddress.parse("3700:04")] = object()
     assert register_entities.entity_enabled_by_default(parent, identity, row)
     assert register_entities._poll_row_selected(parent, identity, row)
 
 
 def test_readonly_array_rows_keep_normal_basic_read_default(monkeypatch) -> None:
-    row = _register("346a:04", levels=("User",))
+    row = _register("3700:04", levels=("User",))
     row.writable = False
     row.write_declared = False
     row.safety = "read_only"
@@ -262,7 +454,7 @@ def test_readonly_array_rows_keep_normal_basic_read_default(monkeypatch) -> None
 
 
 def test_manual_override_can_select_an_inferred_source_rw_row(monkeypatch) -> None:
-    row = _register("346a:04", levels=("User",))
+    row = _register("3700:04", levels=("User",))
     row.writable = True
     row.write_declared = True
     row.safety = "source_supported"
@@ -283,7 +475,7 @@ def test_existing_inferred_rw_rows_reconcile_defaults_and_preserve_user_choices(
 ) -> None:
     identity = SimpleNamespace(node=3)
     runtime_node = SimpleNamespace(identity=identity, capabilities={})
-    row = _register("346a:04", levels=("User",))
+    row = _register("3700:04", levels=("User",))
     row.writable = True
     row.write_declared = True
     row.safety = "source_supported"
@@ -341,7 +533,9 @@ def test_existing_inferred_rw_rows_reconcile_defaults_and_preserve_user_choices(
     )
 
     register_entities.async_apply_entity_overrides(object(), parent)
-    assert auto_enabled.disabled_by == "integration"
+    # A manually enabled registry row is user intent, even when the runtime
+    # capability snapshot temporarily omits the inferred write address.
+    assert auto_enabled.disabled_by is None
     assert user_disabled.disabled_by == "user"
 
     parent.entity_overrides["catalog-row"] = True
@@ -349,6 +543,83 @@ def test_existing_inferred_rw_rows_reconcile_defaults_and_preserve_user_choices(
     register_entities.async_apply_entity_overrides(object(), parent)
     assert auto_enabled.disabled_by is None
     assert user_disabled.disabled_by == "user"
+
+    # An explicit picker disable and reset-to-default may still apply the
+    # catalog's integration-disabled fallback.
+    parent.entity_overrides["catalog-row"] = False
+    register_entities.async_apply_entity_overrides(object(), parent)
+    assert auto_enabled.disabled_by == "integration"
+    parent.entity_overrides["catalog-row"] = None
+    auto_enabled.disabled_by = None
+    register_entities.async_apply_entity_overrides(object(), parent)
+    assert auto_enabled.disabled_by == "integration"
+
+
+@pytest.mark.asyncio
+async def test_user_enabled_zone_row_survives_retained_profile_read_failure(
+    monkeypatch,
+) -> None:
+    identity = SimpleNamespace(node=5, family="SCB-10")
+    runtime_node = SimpleNamespace(identity=identity, capabilities={})
+    row = _register("3410:01", levels=("User",))
+    enabled = SimpleNamespace(
+        platform=DOMAIN,
+        config_entry_id="entry",
+        unique_id="zone-row",
+        entity_id="sensor.zone_row",
+        disabled_by=None,
+    )
+
+    class Registry:
+        def __init__(self):
+            self.entities = {enabled.entity_id: enabled}
+
+        def async_update_entity(self, entity_id, **changes):
+            self.entities[entity_id].disabled_by = changes["disabled_by"]
+
+    registry = Registry()
+    monkeypatch.setattr(register_entities.er, "async_get", lambda _hass: registry)
+    monkeypatch.setattr(
+        register_entities,
+        "rows_for_parent",
+        lambda *_args, **_kwargs: ((identity, row, "standard", True),),
+    )
+    monkeypatch.setattr(
+        register_entities, "entity_unique_id", lambda *_args: "zone-row"
+    )
+    monkeypatch.setattr(register_entities, "entity_group_key", lambda *_args: "group")
+    monkeypatch.setattr(
+        register_entities, "entity_category_key", lambda *_args: "category"
+    )
+    monkeypatch.setattr(register_entities, "control_kind", lambda *_args: None)
+    parent = SimpleNamespace(
+        config_entry=SimpleNamespace(entry_id="entry", data={}, options={}),
+        inventories=(runtime_node,),
+        devices=(),
+        entity_overrides={},
+        effective_access_levels={},
+        language="en",
+        configured_access_level=1,
+        zone_profiles={(5, 1): ZoneProfile(5, 1, 250)},
+        zone_profile_states={(5, 1): ZoneReadState.UNKNOWN},
+        _zone_confirmed_active_slots={(5, 1)},
+        zone_overrides={},
+        write_enabled=True,
+    )
+
+    register_entities.async_apply_entity_overrides(object(), parent)
+
+    assert enabled.disabled_by is None
+    assert not register_entities.zone_row_enabled(parent, identity, row)
+    entity = OpenRBusRegisterEntity.__new__(OpenRBusRegisterEntity)
+    entity._register = row
+    entity._identity = identity
+    entity._parent = parent
+    entity._effective_access_level = 1
+    entity.coordinator = SimpleNamespace(is_value_available=lambda *_args: True)
+    assert not entity.available
+    with pytest.raises(HomeAssistantError, match="not confirmed active"):
+        await entity._async_write(21)
 
 
 def test_entity_selection_precedence_is_entity_then_group_then_node(
@@ -392,21 +663,21 @@ def test_entity_selection_precedence_is_entity_then_group_then_node(
 def test_categories_follow_cp020_heating_dhw_and_disabled_profiles() -> None:
     identity = SimpleNamespace(node=3)
     row = SimpleNamespace(
-        address=ObjectAddress(0x3404, 0),
+        address=ObjectAddress(0x3404, 1),
         internal_code="CP020",
         name_en="Zone function",
         name_de="Zonenfunktion",
     )
     parent = SimpleNamespace(
-        zone_profiles={(3, 0): ZoneProfile(3, 0, 2)},
+        zone_profiles={(3, 1): ZoneProfile(3, 1, 2)},
         zone_overrides={},
     )
     assert register_entities.entity_category(parent, identity, row) == "zone"
-    parent.zone_profiles[(3, 0)] = ZoneProfile(3, 0, 6)
+    parent.zone_profiles[(3, 1)] = ZoneProfile(3, 1, 6)
     assert register_entities.entity_category(parent, identity, row) == "dhw"
-    parent.zone_profiles[(3, 0)] = ZoneProfile(3, 0, 0)
-    assert not register_entities.zone_row_enabled(parent, identity, row)
-    parent.zone_profiles[(3, 0)] = ZoneProfile(3, 0, None)
+    parent.zone_profiles[(3, 1)] = ZoneProfile(3, 1, 0)
+    assert register_entities.zone_row_enabled(parent, identity, row)
+    parent.zone_profiles[(3, 1)] = ZoneProfile(3, 1, None)
     assert register_entities.entity_category(parent, identity, row) == "unclassified"
     row.category = "Heat pump"
     assert register_entities.entity_category(parent, identity, row) == "heat_pump"
@@ -461,7 +732,7 @@ def test_cooling_rows_are_hidden_until_parent_option_is_enabled(monkeypatch) -> 
             "name_de": "Heizbetrieb",
             # Same CANopen object index: filtering one cooling datapoint must
             # not remove unrelated datapoints from a mixed object.
-            "address": ObjectAddress.parse("3482:02"),
+            "address": ObjectAddress.parse("3500:02"),
         }
     )
     unnamed = SimpleNamespace(
@@ -495,10 +766,12 @@ def test_cooling_rows_are_hidden_until_parent_option_is_enabled(monkeypatch) -> 
 
 def test_poll_selection_counts_report_aggregate_filter_reason(monkeypatch) -> None:
     cooling = _register("513c:00", levels=("User",))
-    normal = _register("3482:02", levels=("User",))
+    normal = _register("3500:02", levels=("User",))
     identity = SimpleNamespace(node=5)
     parent = SimpleNamespace(
-        config_entry=SimpleNamespace(data={}, options={}),
+        config_entry=SimpleNamespace(
+            data={"ble_device": "00:11:22:33:44:55"}, options={}
+        ),
         inventories=(SimpleNamespace(identity=identity),),
         devices=(),
         language="en",
@@ -529,6 +802,378 @@ def test_poll_selection_counts_report_aggregate_filter_reason(monkeypatch) -> No
         "cooling_filtered": 1,
         "rows_after_optional_filters": 1,
     }
+
+
+def test_shared_row_projection_gates_zone_activity_before_platforms_and_picker(
+    monkeypatch,
+) -> None:
+    identity = SimpleNamespace(node=5)
+    rows = tuple(
+        _register(address, levels=("User",))
+        for address in (
+            "340f:01",  # confirmed slot label, active below
+            "3410:02",  # confirmed slot label, explicitly inactive below
+            "3410:03",  # historical profile, but CP020 read is unknown
+            "3404:02",  # CP021 function selector always remains on parent
+            "340c:01",  # unresolved flattened activity dimension
+            "3500:00",  # ordinary non-zone parent entity
+            "3057:00",  # source-confirmed scalar parent control
+        )
+    )
+    parent = SimpleNamespace(
+        inventories=(SimpleNamespace(identity=identity),),
+        devices=(),
+        effective_access_levels={5: 1},
+        configured_access_level=1,
+        configured_read_access_level=1,
+        config_entry=SimpleNamespace(
+            data={"ble_device": "00:11:22:33:44:55"}, options={}
+        ),
+        zone_profiles={
+            (5, 1): ZoneProfile(5, 1, 2),
+            (5, 2): ZoneProfile(5, 2, 0),
+            (5, 3): ZoneProfile(5, 3, 2),
+        },
+        zone_profile_states={
+            (5, 1): ZoneReadState.CONFIRMED_ACTIVE,
+            (5, 2): ZoneReadState.CONFIRMED_DISABLED,
+            (5, 3): ZoneReadState.UNKNOWN,
+        },
+    )
+    monkeypatch.setattr(
+        register_entities, "catalog_for_node", lambda *_args, **_kwargs: rows
+    )
+
+    projected = [row[1].address for row in register_entities.rows_for_parent(parent)]
+    assert projected == [
+        rows[0].address,
+        rows[3].address,
+        rows[5].address,
+        rows[6].address,
+    ]
+
+    disabled_uid = stable_object_id(parent, 5, 0x3410, 3)
+    parent.zone_projection_history = {
+        "5:scb-10": {
+            3: {"uids": [disabled_uid], "family": "scb-10", "node": 5, "slot": 3}
+        }
+    }
+    parent.zone_profile_states[(5, 3)] = ZoneReadState.CONFIRMED_DISABLED
+    parent._zone_projection_store_blocked = True
+    projected_after_fresh_zero = [
+        row[1].address for row in register_entities.rows_for_parent(parent)
+    ]
+    assert rows[2].address not in projected_after_fresh_zero
+
+
+def test_inactive_zone_registry_cleanup_is_exact_and_entry_scoped(monkeypatch) -> None:
+    identity = DeviceIdentity(
+        node=5,
+        device_code=0,
+        parameter_number=0,
+        name="Test node",
+        family="SCB-10",
+    )
+    parent = SimpleNamespace(
+        config_entry=SimpleNamespace(
+            entry_id="entry-one",
+            data={
+                "ble_device": "00:11:22:33:44:55",
+                "zone_overrides": {"5:4": False, "5:5": "false"},
+            },
+            options={},
+        ),
+        inventories=(
+            SimpleNamespace(identity=identity),
+            SimpleNamespace(
+                identity=DeviceIdentity(
+                    node=6,
+                    device_code=0,
+                    parameter_number=0,
+                    name="Unsupported EHC slot node",
+                    family="EHC-16",
+                )
+            ),
+        ),
+        zone_profiles={
+            (5, 1): ZoneProfile(5, 1, 2),
+            (5, 2): ZoneProfile(5, 2, 0),
+            (5, 3): ZoneProfile(5, 3, 2),
+            (5, 5): ZoneProfile(5, 5, 250),
+            (6, 2): ZoneProfile(6, 2, 250),
+        },
+        zone_profile_states={
+            (5, 1): ZoneReadState.CONFIRMED_ACTIVE,
+            (5, 2): ZoneReadState.CONFIRMED_DISABLED,
+            (5, 3): ZoneReadState.UNKNOWN,
+            (5, 5): ZoneReadState.UNKNOWN,
+            (6, 2): ZoneReadState.UNKNOWN,
+        },
+        _zone_confirmed_active_slots={(5, 3), (5, 5)},
+        zone_overrides={"5:4": False, "5:5": "false"},
+    )
+    inactive_uid = stable_object_id(parent, 5, 0x3410, 2)
+    active_uid = stable_object_id(parent, 5, 0x340F, 1)
+    unresolved_uid = stable_object_id(parent, 5, 0x340D, 2)
+    unresolved_active_slot_uid = stable_object_id(parent, 5, 0x340C, 1)
+    unresolved_inactive_slot_uid = stable_object_id(parent, 5, 0x340C, 2)
+    unresolved_cooling_uid = stable_object_id(parent, 5, 0x3412, 2)
+    unresolved_cp080_hk30_uid = stable_object_id(parent, 5, 0x340C, 0x1E)
+    unresolved_catalog_slot_uid = stable_object_id(parent, 5, 0x3412, 0x1E)
+    unresolved_unproven_slot_uid = stable_object_id(parent, 5, 0x3412, 0x1F)
+    global_uid = stable_object_id(parent, 5, 0x540E, 2)
+    unknown_uid = stable_object_id(parent, 5, 0x3410, 3)
+    override_disabled_uid = stable_object_id(parent, 5, 0x3410, 4)
+    malformed_override_uid = stable_object_id(parent, 5, 0x3410, 5)
+    initial_unknown_uid = stable_object_id(parent, 5, 0x3410, 6)
+    selector_uid = stable_object_id(parent, 5, 0x3404, 2)
+    non_zone_uid = stable_object_id(parent, 5, 0x3810, 2)
+    unresolved_header_uid = stable_object_id(parent, 5, 0x541A, 0)
+    parent_global_uid = stable_object_id(parent, 5, 0x5422, 2)
+    outside_legacy_range_uid = stable_object_id(parent, 5, 0x5733, 2)
+    unsupported_ehc_uid = stable_object_id(parent, 6, 0x3408, 2)
+    entries = {
+        "sensor.inactive": SimpleNamespace(
+            entity_id="sensor.inactive",
+            unique_id=inactive_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="sensor",
+            name="My custom entity name",
+            area_id="zone-area",
+            disabled_by="user",
+        ),
+        "sensor.active": SimpleNamespace(
+            entity_id="sensor.active",
+            unique_id=active_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="sensor",
+        ),
+        "sensor.unresolved": SimpleNamespace(
+            entity_id="sensor.unresolved",
+            unique_id=unresolved_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="sensor",
+        ),
+        "number.unresolved_active_slot": SimpleNamespace(
+            entity_id="number.unresolved_active_slot",
+            unique_id=unresolved_active_slot_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="number",
+        ),
+        "number.unresolved_inactive_slot": SimpleNamespace(
+            entity_id="number.unresolved_inactive_slot",
+            unique_id=unresolved_inactive_slot_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="number",
+        ),
+        "number.unresolved_cooling": SimpleNamespace(
+            entity_id="number.unresolved_cooling",
+            unique_id=unresolved_cooling_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="number",
+        ),
+        "number.unresolved_catalog_slot": SimpleNamespace(
+            entity_id="number.unresolved_catalog_slot",
+            unique_id=unresolved_catalog_slot_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="number",
+        ),
+        "number.unresolved_cp080_hk30": SimpleNamespace(
+            entity_id="number.unresolved_cp080_hk30",
+            unique_id=unresolved_cp080_hk30_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="number",
+        ),
+        "number.unresolved_unproven_slot": SimpleNamespace(
+            entity_id="number.unresolved_unproven_slot",
+            unique_id=unresolved_unproven_slot_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="number",
+        ),
+        "sensor.global": SimpleNamespace(
+            entity_id="sensor.global",
+            unique_id=global_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="sensor",
+        ),
+        "sensor.unknown": SimpleNamespace(
+            entity_id="sensor.unknown",
+            unique_id=unknown_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="sensor",
+            name="Unknown remains recoverable",
+            area_id="unknown-area",
+            disabled_by="user",
+        ),
+        "sensor.override_disabled": SimpleNamespace(
+            entity_id="sensor.override_disabled",
+            unique_id=override_disabled_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="sensor",
+        ),
+        "sensor.malformed_override": SimpleNamespace(
+            entity_id="sensor.malformed_override",
+            unique_id=malformed_override_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="sensor",
+        ),
+        "sensor.initial_unknown": SimpleNamespace(
+            entity_id="sensor.initial_unknown",
+            unique_id=initial_unknown_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="sensor",
+        ),
+        "number.unsupported_ehc_slot": SimpleNamespace(
+            entity_id="number.unsupported_ehc_slot",
+            unique_id=unsupported_ehc_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="number",
+        ),
+        "select.selector": SimpleNamespace(
+            entity_id="select.selector",
+            unique_id=selector_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="select",
+        ),
+        "sensor.non_zone": SimpleNamespace(
+            entity_id="sensor.non_zone",
+            unique_id=non_zone_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="sensor",
+        ),
+        "sensor.unresolved_header": SimpleNamespace(
+            entity_id="sensor.unresolved_header",
+            unique_id=unresolved_header_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="sensor",
+        ),
+        "sensor.noncanonical_uid": SimpleNamespace(
+            entity_id="sensor.noncanonical_uid",
+            unique_id=f"{inactive_uid}:suffix",
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="sensor",
+        ),
+        "sensor.parent_global": SimpleNamespace(
+            entity_id="sensor.parent_global",
+            unique_id=parent_global_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="sensor",
+        ),
+        "sensor.outside_legacy_range": SimpleNamespace(
+            entity_id="sensor.outside_legacy_range",
+            unique_id=outside_legacy_range_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="sensor",
+        ),
+        "sensor.foreign_platform": SimpleNamespace(
+            entity_id="sensor.foreign_platform",
+            unique_id=inactive_uid,
+            platform="other",
+            config_entry_id="entry-one",
+            domain="sensor",
+        ),
+        "button.foreign_domain": SimpleNamespace(
+            entity_id="button.foreign_domain",
+            unique_id=inactive_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-one",
+            domain="button",
+        ),
+        "sensor.other_entry": SimpleNamespace(
+            entity_id="sensor.other_entry",
+            unique_id=inactive_uid,
+            platform=DOMAIN,
+            config_entry_id="entry-two",
+            domain="sensor",
+        ),
+    }
+
+    class Registry:
+        def __init__(self):
+            self.entities = entries
+            self.removed = []
+
+        def async_remove(self, entity_id):
+            self.removed.append(entity_id)
+
+    registry = Registry()
+    monkeypatch.setattr(register_entities.er, "async_get", lambda _hass: registry)
+
+    assert register_entities.cleanup_inactive_zone_entities(object(), parent) == 10
+    assert sorted(registry.removed) == sorted(
+        [
+            "sensor.inactive",
+            "sensor.unresolved",
+            "sensor.override_disabled",
+            "sensor.initial_unknown",
+            "number.unresolved_catalog_slot",
+            "number.unresolved_cp080_hk30",
+            "number.unresolved_active_slot",
+            "number.unresolved_inactive_slot",
+            "number.unresolved_cooling",
+            "number.unsupported_ehc_slot",
+        ]
+    )
+    # HA's async_remove persists a deleted-entity tombstone; this helper does
+    # not mutate user metadata or remove device-registry rows.
+    assert entries["sensor.inactive"].name == "My custom entity name"
+    assert entries["sensor.inactive"].area_id == "zone-area"
+    assert entries["sensor.inactive"].disabled_by == "user"
+    assert entries["sensor.unknown"].entity_id == "sensor.unknown"
+    assert entries["sensor.unknown"].name == "Unknown remains recoverable"
+    assert entries["sensor.unknown"].area_id == "unknown-area"
+    assert entries["sensor.unknown"].disabled_by == "user"
+    assert entries["select.selector"].entity_id == "select.selector"
+    assert entries["sensor.global"].entity_id == "sensor.global"
+    assert entries["sensor.non_zone"].entity_id == "sensor.non_zone"
+    assert entries["sensor.unresolved_header"].entity_id == "sensor.unresolved_header"
+    assert entries["sensor.noncanonical_uid"].entity_id == "sensor.noncanonical_uid"
+    assert (
+        entries["number.unresolved_unproven_slot"].entity_id
+        == "number.unresolved_unproven_slot"
+    )
+    assert entries["sensor.parent_global"].entity_id == "sensor.parent_global"
+    assert (
+        entries["sensor.outside_legacy_range"].entity_id
+        == "sensor.outside_legacy_range"
+    )
+    assert entries["sensor.foreign_platform"].entity_id == "sensor.foreign_platform"
+    assert entries["button.foreign_domain"].entity_id == "button.foreign_domain"
+
+
+def test_zone_entity_is_unavailable_during_unknown_selector_state() -> None:
+    entity = OpenRBusRegisterEntity.__new__(OpenRBusRegisterEntity)
+    entity._register = _register("346a:01", levels=("User",))
+    entity._identity = SimpleNamespace(node=4, family="Ehc-16")
+    entity._parent = SimpleNamespace(
+        zone_profiles={(4, 1): ZoneProfile(4, 1, 2)},
+        zone_profile_states={(4, 1): ZoneReadState.UNKNOWN},
+    )
+    entity._effective_access_level = 1
+    entity.coordinator = SimpleNamespace(is_value_available=lambda *_args: True)
+
+    assert not entity.available
 
 
 def test_diagnostic_visibility_toggles_only_integration_owned_registry_rows(
@@ -628,11 +1273,11 @@ def test_reviewed_filter_map_covers_examples_across_device_families(
     mk3_consumption = _register("513c:00", levels=("User",))
     mk3_production = _register("5140:00", levels=("User",))
     ehc_setpoint = _register("4321:00", levels=("User",))
-    zone_cooling = _register("341a:00", levels=("User",))
+    zone_cooling = _register("341a:01", levels=("User",))
     buffer_cooling = _register("3504:00", levels=("User",))
-    explicit_screed = _register("3483:00", levels=("User",))
-    screed_config = _register("344d:00", levels=("User",))
-    unrelated_heating = _register("3482:02", levels=("User",))
+    explicit_screed = _register("3483:01", levels=("User",))
+    screed_config = _register("344d:01", levels=("User",))
+    unrelated_heating = _register("3500:02", levels=("User",))
     runtime_node = SimpleNamespace(identity=identity, capabilities={})
     parent = SimpleNamespace(
         inventories=(runtime_node,),
@@ -641,6 +1286,7 @@ def test_reviewed_filter_map_covers_examples_across_device_families(
         configured_access_level=1,
         configured_read_access_level=1,
         config_entry=SimpleNamespace(data={}, options={}),
+        zone_profiles={(5, 1): ZoneProfile(5, 1, 2)},
     )
     monkeypatch.setattr(
         register_entities,
@@ -658,7 +1304,14 @@ def test_reviewed_filter_map_covers_examples_across_device_families(
     )
 
     filtered = register_entities.rows_for_parent(parent)
-    assert [row[1].address for row in filtered] == [unrelated_heating.address]
+    # Active zone-scoped rows are projected independently of the optional
+    # cooling/screed visibility flags.
+    assert [row[1].address for row in filtered] == [
+        zone_cooling.address,
+        explicit_screed.address,
+        screed_config.address,
+        unrelated_heating.address,
+    ]
 
     picker_rows = register_entities.rows_for_parent(
         parent, include_cooling=True, include_screed_drying=True
@@ -764,15 +1417,15 @@ def test_screed_visibility_preserves_user_disable(monkeypatch) -> None:
         register_entities, "entity_unique_id", lambda *_args: screed.unique_id
     )
 
-    # Disabled means no platform projection and no polling address. The
-    # entity registry row from an earlier opt-in is handled separately below.
+    # Unresolved exact zone objects are excluded before platform construction;
+    # they are not reprojected as parent entities by this visibility helper.
     assert register_entities.rows_for_parent(parent) == ()
     register_entities.async_apply_diagnostic_visibility(object(), parent)
-    assert screed.disabled_by == "integration"
+    assert screed.disabled_by is None
     assert user_disabled.disabled_by == "user"
 
     parent.config_entry.options[CONF_SCREED_DRYING_ENABLED] = True
-    assert len(register_entities.rows_for_parent(parent)) == 1
+    assert register_entities.rows_for_parent(parent) == ()
     register_entities.async_apply_diagnostic_visibility(object(), parent)
     assert screed.disabled_by is None
     assert user_disabled.disabled_by == "user"
@@ -915,7 +1568,9 @@ def test_unknown_zone_profile_preserves_registry_and_user_choices(monkeypatch) -
         lambda *_a, **_k: ((SimpleNamespace(node=4), row, "standard", True),),
     )
     monkeypatch.setattr(register_entities, "entity_unique_id", lambda *_a: "zone-row")
-    monkeypatch.setattr(register_entities, "zone_subindex", lambda _register: 1)
+    monkeypatch.setattr(
+        register_entities, "zone_subindex", lambda _register, _identity=None: 1
+    )
     monkeypatch.setattr(register_entities, "zone_row_enabled", lambda *_a: False)
     monkeypatch.setattr(register_entities, "profile_for", lambda *_a: None)
 

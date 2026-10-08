@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import deque
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -63,6 +64,7 @@ from custom_components.openrbus.transport import (
     _validate_scan_frame,
     async_scan_thin_rpc_devices,
     detect_thin_rpc_capability,
+    read_operation_origin,
     resolve_thin_rpc_capability,
     select_backend_mode,
     thin_rpc_controller_choices,
@@ -216,6 +218,10 @@ async def test_thin_batch_reprepares_after_session_error_without_link_text(
     backend._read_lock = asyncio.Lock()
     backend.client = object()
     backend.session = SimpleNamespace(connected=True)
+    backend.channel = None
+    backend.frame_trace = []
+    backend._session_generation = 3
+    backend._batch_recovery_trace = deque(maxlen=8)
     address = ObjectAddress(0x500F, 0x00)
     recovered = GenericRead(5, address, b"\x00", 0)
     values = 0
@@ -250,6 +256,70 @@ async def test_thin_batch_reprepares_after_session_error_without_link_text(
     assert result == (recovered,)
     assert values == 2
     assert recoveries == 1
+    assert list(backend._batch_recovery_trace) == [
+        {
+            "origin": "unspecified",
+            "failure_count": 1,
+            "failure_classes": {"session.transport": 1},
+            "link_lost_text_match": False,
+            "session_present": True,
+            "session_connected": True,
+            "identity_present": False,
+            "session_epoch": None,
+            "generation": 3,
+            "before": {},
+            "disconnect_event_observed": False,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_batch_recovery_trace_ring_is_bounded_and_address_free() -> None:
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    backend._batch_recovery_trace = deque(maxlen=8)
+    backend.session = SimpleNamespace(connected=False, identity=None, epoch=7)
+    backend.channel = None
+    backend._session_generation = 2
+    error = HomeAssistantError("private address/value must not be retained")
+    error._openrbus_error_class = "session"
+    for _ in range(12):
+        await backend._record_batch_recovery_initiation((error,))
+
+    assert len(backend._batch_recovery_trace) == 8
+    assert all(
+        row["failure_classes"] == {"session.transport": 1}
+        for row in backend._batch_recovery_trace
+    )
+    assert "private address" not in repr(backend._batch_recovery_trace)
+    assert all(
+        "address" not in row and "raw" not in row
+        for row in backend._batch_recovery_trace
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_recovery_trace_requires_explicit_disconnect_state() -> None:
+    backend = ThinRpcBackend.__new__(ThinRpcBackend)
+    backend._batch_recovery_trace = deque(maxlen=8)
+    backend.session = SimpleNamespace(connected=False, identity=None, epoch=7)
+    backend.channel = None
+    backend._session_generation = 2
+    backend.frame_trace = [{"kind": "event", "op": "CONNECTION_STATE", "epoch": 7}]
+    error = HomeAssistantError("transport fault")
+    error._openrbus_error_class = "session"
+    await backend._record_batch_recovery_initiation((error,))
+    assert backend._batch_recovery_trace[-1]["disconnect_event_observed"] is False
+
+    backend.frame_trace.append(
+        {
+            "kind": "event",
+            "op": "CONNECTION_STATE",
+            "state_category": "disconnected",
+            "epoch": 7,
+        }
+    )
+    await backend._record_batch_recovery_initiation((error,))
+    assert backend._batch_recovery_trace[-1]["disconnect_event_observed"] is True
 
 
 @pytest.mark.asyncio
@@ -330,7 +400,8 @@ async def test_transport_recovery_waits_and_drains_before_reprepare() -> None:
     backend._drain_stale_frames = drain_stale_frames
     backend._ensure_session_ready = ensure_session_ready
 
-    await backend._recover_after_transport_loss()
+    with read_operation_origin("bridge_health"):
+        await backend._recover_after_transport_loss()
 
     assert events == [
         "disconnect",
@@ -347,6 +418,7 @@ async def test_transport_recovery_waits_and_drains_before_reprepare() -> None:
         "session_epoch": 1,
         "outcome": "service_completed",
         "exception_class": None,
+        "origin": "bridge_health",
     }
     assert fence["link_active"] is False
     assert fence["parent_connected"] is False
@@ -691,6 +763,7 @@ async def test_transport_recovery_records_disconnect_exception_class() -> None:
         "session_epoch": 23,
         "outcome": "service_exception",
         "exception_class": "HomeAssistantError",
+        "origin": "unspecified",
     }
     assert "private detail" not in repr(attempt)
 
@@ -869,7 +942,13 @@ async def test_single_read_capture_tags_frames_and_brackets_proxy_counters() -> 
     assert result.raw_value == b"\x00"
     assert [frame["read_operation_id"] for frame in trace] == [1, 1]
     assert backend._read_operation_trace == [
-        {"operation_id": 1, "kind": "single", "outcome": "success", "epoch": 8}
+        {
+            "operation_id": 1,
+            "kind": "single",
+            "outcome": "success",
+            "origin": "unspecified",
+            "epoch": 8,
+        }
     ]
     capture = backend._last_read_transport_capture
     assert capture["before"]["rpc_requests"] == 4
@@ -2296,6 +2375,29 @@ async def test_stop_waits_for_physical_disconnect_before_releasing_controller() 
 
 
 @pytest.mark.asyncio
+async def test_stop_rejects_normal_cleanup_return_with_owner_still_fenced(
+    monkeypatch,
+) -> None:
+    backend = ThinRpcBackend(_hass(), controller_id="controller")
+    backend._owns_controller = True
+    backend._active_controllers.add(backend.controller_id)
+    backend._controller_owner_generations[backend.controller_id] = (
+        backend._owner_generation
+    )
+
+    async def incomplete_cleanup() -> None:
+        return
+
+    monkeypatch.setattr(backend, "_cleanup_owned_session", incomplete_cleanup)
+
+    with pytest.raises(HomeAssistantError, match="did not release this session"):
+        await backend.async_stop()
+
+    assert backend._owns_controller
+    assert backend.controller_id in backend._active_controllers
+
+
+@pytest.mark.asyncio
 async def test_stop_uses_scoped_proxy_disconnect_if_rpc_disconnect_stalls(
     monkeypatch,
 ) -> None:
@@ -2405,6 +2507,10 @@ async def test_start_failure_retains_controller_until_safe_stop_then_allows_setu
     with pytest.raises(HomeAssistantError, match="startup probe failed"):
         await first.async_start()
 
+    assert first._owns_controller is True
+    assert controller_id in first._active_controllers
+    with pytest.raises(HomeAssistantError, match="physical disconnect timeout"):
+        await first.async_stop()
     assert first._owns_controller is True
     assert controller_id in first._active_controllers
 

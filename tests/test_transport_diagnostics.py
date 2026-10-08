@@ -16,6 +16,7 @@ from openrbus.errors import (
 from openrbus.protocol.canip import ObjectAddress
 from openrbus.transport.thin_gatt import (
     ThinGattCorrelationError,
+    ThinGattFlowControlError,
     ThinGattSessionStateError,
 )
 
@@ -26,6 +27,7 @@ from custom_components.openrbus.coordinator import (
 )
 from custom_components.openrbus.diagnostics import (
     _safe_batch_failure_trace,
+    _safe_batch_recovery_trace,
     _safe_poll_selection_snapshot,
     _safe_poll_snapshot,
     _safe_read_operation_trace,
@@ -125,9 +127,15 @@ def test_read_transport_diagnostics_retain_only_safe_join_fields() -> None:
                 "kind": "single",
                 "outcome": "success",
                 "epoch": 12,
+                "origin": "bridge_health",
                 "address": "private object",
             },
-            {"operation_id": -1, "address": "private object"},
+            {
+                "operation_id": -1,
+                "origin": "manual_read_service",
+                "address": "private object",
+            },
+            {"operation_id": 8, "kind": "single", "origin": "private origin"},
         ]
     )
     capture = _safe_read_transport_capture(
@@ -175,7 +183,14 @@ def test_read_transport_diagnostics_retain_only_safe_join_fields() -> None:
         }
     )
     assert operations == [
-        {"operation_id": 7, "kind": "single", "outcome": "success", "epoch": 12}
+        {
+            "operation_id": 7,
+            "kind": "single",
+            "outcome": "success",
+            "origin": "bridge_health",
+            "epoch": 12,
+        },
+        {"operation_id": 8, "kind": "single"},
     ]
     assert capture["operation_id"] == 7
     assert capture["before"]["epoch"] == 12
@@ -226,6 +241,54 @@ def test_safe_batch_failure_trace_is_payload_free_and_bounded() -> None:
         )
         == {}
     )
+
+
+def test_safe_batch_recovery_trace_filters_private_fields_and_unknown_classes() -> None:
+    safe = _safe_batch_recovery_trace(
+        [
+            {
+                "origin": "poll_batch",
+                "failure_count": 2,
+                "failure_classes": {"session.timeout": 1, "session.transport": 1},
+                "link_lost_text_match": True,
+                "session_present": True,
+                "session_connected": False,
+                "identity_present": False,
+                "session_epoch": 7,
+                "generation": 9,
+                "disconnect_event_observed": True,
+                "before": {
+                    "epoch": 7,
+                    "notification_callbacks": 11,
+                    "payload": "secret",
+                },
+                "after": {"epoch": 8, "notification_callbacks": 12},
+                "address": "private",
+                "message": "credential-like detail",
+            },
+            {
+                "origin": "poll_batch",
+                "failure_count": 1,
+                "failure_classes": {"session.private": 1},
+            },
+        ]
+    )
+    assert safe == [
+        {
+            "origin": "poll_batch",
+            "failure_count": 2,
+            "failure_classes": {"session.timeout": 1, "session.transport": 1},
+            "link_lost_text_match": True,
+            "session_present": True,
+            "identity_present": False,
+            "session_connected": False,
+            "disconnect_event_observed": True,
+            "session_epoch": 7,
+            "generation": 9,
+            "before": {"epoch": 7, "notification_callbacks": 11},
+            "after": {"epoch": 8, "notification_callbacks": 12},
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -286,6 +349,8 @@ def test_read_error_class_is_fixed_and_never_uses_error_text(error, expected) ->
         (ThinGattSessionStateError("private link not securely prepared"), "not_secure"),
         (RequestTimeoutError("private target"), "timeout"),
         (TransportError("private transport text"), "transport"),
+        (ThinGattFlowControlError("queue_full"), "flow_control_queue_full"),
+        (ThinGattFlowControlError("private frame payload"), "flow_control_unknown"),
     ],
 )
 def test_session_error_subtype_is_fixed_and_redacted(error, expected) -> None:
@@ -523,9 +588,32 @@ def test_recovery_fence_metrics_are_bounded_and_privacy_safe() -> None:
             "session_epoch": None,
             "outcome": None,
             "exception_class": None,
+            "origin": "unspecified",
         },
     }
     assert _safe_recovery_fence({**snapshot, "identity": "private"}) == snapshot
+
+    metrics.begin_attempt(17, "bridge_health")
+    assert metrics.diagnostics()["disconnect_attempt"]["origin"] == "bridge_health"
+    metrics.begin_attempt(18, "startup_discovery")
+    assert (
+        _safe_recovery_fence(metrics.diagnostics())["disconnect_attempt"]["origin"]
+        == "startup_discovery"
+    )
+    assert (
+        _safe_recovery_fence(
+            {
+                "disconnect_attempt": {
+                    "attempt_id": 2,
+                    "session_epoch": 17,
+                    "outcome": "missing_identity",
+                    "origin": "bridge_health",
+                    "address": "private object",
+                }
+            }
+        )["disconnect_attempt"]["origin"]
+        == "bridge_health"
+    )
 
     unsafe = _safe_recovery_fence(
         {
@@ -600,6 +688,7 @@ async def test_entry_diagnostics_add_only_redacted_transport_metrics() -> None:
                         "session_epoch": 17,
                         "outcome": "service_exception",
                         "exception_class": "TimeoutError",
+                        "origin": "private caller string",
                         "exception_message": "private detail",
                     },
                     "private": "must not escape",

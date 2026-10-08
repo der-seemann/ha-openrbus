@@ -10,6 +10,7 @@ from homeassistant.core import HomeAssistant
 from .const import CONF_BACKEND, CONF_DIAGNOSTICS_ENABLED, DOMAIN
 from .setup_observability import OUTCOMES as _SETUP_OUTCOMES
 from .setup_observability import PHASES as _SETUP_PHASES
+from .setup_observability import READ_OPERATION_ORIGINS as _READ_OPERATION_ORIGINS
 
 _POLL_GROUPS = ("fast", "standard", "slow")
 _ERROR_CLASSES = ("abort", "item", "batch", "decode", "correlation", "session")
@@ -311,6 +312,9 @@ def _safe_recovery_fence(snapshot: object) -> dict[str, Any]:
             value = attempt.get(key)
             if value is None or (type(value) is int and 0 <= value <= _COUNTER_MAX):
                 safe_attempt[key] = value
+        origin = attempt.get("origin")
+        if isinstance(origin, str) and origin in _READ_OPERATION_ORIGINS:
+            safe_attempt["origin"] = origin
         outcome = attempt.get("outcome")
         if outcome is None or (
             isinstance(outcome, str)
@@ -442,6 +446,9 @@ def _safe_read_operation_trace(snapshot: object) -> list[dict[str, Any]]:
             record["kind"] = item["kind"]
         if item.get("outcome") in {"success", "partial_error", "error"}:
             record["outcome"] = item["outcome"]
+        origin = item.get("origin")
+        if isinstance(origin, str) and origin in _READ_OPERATION_ORIGINS:
+            record["origin"] = origin
         epoch = item.get("epoch")
         if type(epoch) is int and 0 <= epoch <= 4_294_967_295:
             record["epoch"] = epoch
@@ -634,6 +641,69 @@ def _safe_batch_failure_trace(snapshot: object) -> dict[str, Any]:
     return safe
 
 
+def _safe_batch_recovery_trace(snapshot: object) -> list[dict[str, Any]]:
+    """Project bounded initiation evidence for batch-triggered session recovery."""
+    if not isinstance(snapshot, (tuple, list)):
+        return []
+    failure_classes = {
+        "session.not_ready",
+        "session.link_lost",
+        "session.timeout",
+        "session.not_secure",
+        "session.transport",
+        "session.flow_control_queue_full",
+        "session.flow_control_frame_too_large",
+        "session.flow_control_handle_registry_full",
+        "session.flow_control_payload_too_large",
+        "session.flow_control_unknown",
+        "correlation",
+        "item",
+    }
+    safe: list[dict[str, Any]] = []
+    for item in snapshot[-8:]:
+        if not isinstance(item, dict):
+            continue
+        origin = item.get("origin")
+        if not isinstance(origin, str) or origin not in _READ_OPERATION_ORIGINS:
+            continue
+        counts = item.get("failure_classes")
+        if not isinstance(counts, dict):
+            continue
+        safe_counts = {
+            name: min(_COUNTER_MAX, value)
+            for name, value in counts.items()
+            if name in failure_classes
+            and type(value) is int
+            and 0 <= value <= _COUNTER_MAX
+        }
+        count = item.get("failure_count")
+        if type(count) is not int or not 1 <= count <= 256 or not safe_counts:
+            continue
+        record: dict[str, Any] = {
+            "origin": origin,
+            "failure_count": count,
+            "failure_classes": safe_counts,
+            "link_lost_text_match": item.get("link_lost_text_match") is True,
+            "session_present": item.get("session_present") is True,
+            "identity_present": item.get("identity_present") is True,
+        }
+        for key in (
+            "session_connected",
+            "disconnect_event_observed",
+        ):
+            value = item.get(key)
+            if type(value) is bool:
+                record[key] = value
+        for key in ("session_epoch", "generation"):
+            value = item.get(key)
+            if type(value) is int and 0 <= value <= _COUNTER_MAX:
+                record[key] = value
+        for phase in ("before", "after"):
+            record[phase] = _safe_proxy_read_counters(item.get(phase))
+        safe.append(record)
+    return safe
+
+
 async def async_get_config_entry_diagnostics(
     hass: HomeAssistant, entry: ConfigEntry
 ) -> dict[str, Any]:
@@ -704,6 +774,11 @@ async def async_get_config_entry_diagnostics(
     )
     batch_failure_trace = _safe_batch_failure_trace(
         backend_snapshot.get("last_batch_failure_trace")
+        if isinstance(backend_snapshot, dict)
+        else None
+    )
+    batch_recovery_trace = _safe_batch_recovery_trace(
+        backend_snapshot.get("batch_recovery_trace")
         if isinstance(backend_snapshot, dict)
         else None
     )
@@ -783,6 +858,7 @@ async def async_get_config_entry_diagnostics(
             "read_operation_trace": read_operation_trace,
             "read_transport_capture": read_transport_capture,
             "batch_failure_trace": batch_failure_trace,
+            "batch_recovery_trace": batch_recovery_trace,
             "poll_groups": poll_diagnostics,
             "poll_selection": _safe_poll_selection_snapshot(
                 getattr(coordinator, "_openrbus_poll_selection_diagnostics", None)

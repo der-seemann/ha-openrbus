@@ -5,11 +5,16 @@ from types import SimpleNamespace
 from openrbus.protocol.canip import ObjectAddress
 
 from custom_components.openrbus.zones import (
+    ZONE_OBJECT_CANDIDATE_SOURCES,
+    ZONE_SLOT_OBJECT_SOURCES,
+    ZONE_UNRESOLVED_OBJECT_SOURCES,
+    ZoneAssociation,
     ZoneKind,
     ZoneProfile,
     entity_zone_label,
     normalized_overrides,
     override_key,
+    zone_association,
     zone_device_name,
     zone_enabled,
     zone_function_label,
@@ -47,7 +52,8 @@ def test_zone_function_slot_range_comes_from_catalog_array_bound() -> None:
 
 
 def test_zone_array_subindex_and_display_name_are_stable_separate_concerns() -> None:
-    assert zone_subindex(_row(0x5405, 0)) == 0
+    assert zone_subindex(_row(0x5405, 0)) is None
+    assert zone_subindex(_row(0x340F, 5)) == 5
     assert zone_subindex(_row(0x2001, 2, name="Device type")) is None
     profile = ZoneProfile(4, 0, 2, "Wohnbereich")
     assert profile.label == "Wohnbereich"
@@ -55,7 +61,7 @@ def test_zone_array_subindex_and_display_name_are_stable_separate_concerns() -> 
 
 
 def test_heating_circuit_registers_receive_their_visible_circuit_number() -> None:
-    register = _row(0x340D, 3, name="Name Aktivität HK")
+    register = _row(0x340F, 3, name="Name Aktivität HK")
     parent = SimpleNamespace(zone_profiles={}, zone_overrides={}, language="de")
     identity = SimpleNamespace(node=7)
 
@@ -63,8 +69,54 @@ def test_heating_circuit_registers_receive_their_visible_circuit_number() -> Non
     assert entity_zone_label(parent, identity, register) == "Heizkreis 3"
 
 
+def test_exact_catalog_map_has_parent_selectors_and_unresolved_exclusions() -> None:
+    assert len(ZONE_SLOT_OBJECT_SOURCES) == 262
+    assert len(ZONE_OBJECT_CANDIDATE_SOURCES) == 272
+    # Exact address membership wins; row labels never broaden association.
+    assert zone_subindex(_row(0x3410, 2, name="not a zone")) == 2
+    # Membership is exact by object address; a catalog-backed slot stays
+    # zone-scoped even when the row's display label is unrelated.
+    assert zone_subindex(_row(0x3654, 2, name="not a zone")) == 2
+    assert zone_subindex(_row(0x36FF, 2, name="Zone-like but unmapped")) is None
+    assert zone_subindex(_row(0x5443, 2, name="Zone current status")) is None
+    assert zone_association(_row(0x3404, 2)) is ZoneAssociation.FUNCTION_SELECTOR
+    assert zone_association(_row(0x3404, 0)) is ZoneAssociation.UNRESOLVED
+    assert zone_association(_row(0x340C, 2)) is ZoneAssociation.UNRESOLVED
+    assert zone_association(_row(0x346A, 2)) is ZoneAssociation.ZONE_SLOT
+    assert zone_association(_row(0x340D, 2)) is ZoneAssociation.UNRESOLVED
+    assert (
+        zone_association(_row(0x3406, 2), SimpleNamespace(family="Ehc-16"))
+        is ZoneAssociation.ZONE_SLOT
+    )
+    assert zone_association(_row(0x3406, 2)) is ZoneAssociation.UNRESOLVED
+    assert (
+        zone_association(_row(0x3406, 2), SimpleNamespace(family="unknown"))
+        is ZoneAssociation.UNRESOLVED
+    )
+    assert zone_association(_row(0x540E, 2)) is ZoneAssociation.PARENT
+    assert zone_association(_row(0x5422, 2)) is ZoneAssociation.PARENT
+    assert zone_association(_row(0x5423, 2)) is ZoneAssociation.PARENT
+    assert zone_association(_row(0x5432, 2)) is ZoneAssociation.PARENT
+    assert 0x340C in ZONE_UNRESOLVED_OBJECT_SOURCES
+    assert 0x340D in ZONE_UNRESOLVED_OBJECT_SOURCES
+
+
+def test_normalized_label_arrays_keep_their_audited_zone_dimensions() -> None:
+    for index in (0x5404, 0x542E, 0x542F, 0x5430, 0x346C):
+        assert zone_subindex(_row(index, 2)) == 2
+        # Array headers describe the array and never identify a zone slot.
+        assert zone_subindex(_row(index, 0)) is None
+
+    # CP020 items are function selectors on the parent device, not child
+    # zone entities. CP080 and CP140 have unresolved activity dimensions.
+    assert zone_subindex(_row(0x3404, 2)) is None
+    assert zone_association(_row(0x3404, 2)) is ZoneAssociation.FUNCTION_SELECTOR
+    assert zone_subindex(_row(0x340C, 1)) is None
+    assert zone_subindex(_row(0x3412, 1)) is None
+
+
 def test_custom_heating_circuit_name_is_shown_with_its_number() -> None:
-    register = _row(0x340D, 3, name="Name Aktivität HK")
+    register = _row(0x340F, 3, name="Name Aktivität HK")
     profile = ZoneProfile(7, 3, 2, friendly_name="Wohnzimmer")
     parent = SimpleNamespace(
         zone_profiles={(7, 3): profile}, zone_overrides={}, language="de"
@@ -75,13 +127,22 @@ def test_custom_heating_circuit_name_is_shown_with_its_number() -> None:
     )
 
 
+def test_long_zone_name_precedes_short_hardware_name_and_short_is_fallback() -> None:
+    assert ZoneProfile(7, 3, 2, "Wohnbereich", short_name="HK3").label == (
+        "Wohnbereich"
+    )
+    profile = ZoneProfile(7, 3, 2, short_name="HK3")
+    assert profile.label == "HK3"
+    assert zone_device_name(profile, "de").endswith("— HK3")
+
+
 def test_device_disabled_slots_cannot_be_reenabled_by_stale_override() -> None:
     parent = SimpleNamespace(
-        zone_profiles={(4, 0): ZoneProfile(4, 0, 0)}, zone_overrides={}
+        zone_profiles={(4, 1): ZoneProfile(4, 1, 0)}, zone_overrides={}
     )
-    assert not zone_enabled(parent, 4, 0)
-    parent.zone_overrides = {"4:0": True}
-    assert not zone_enabled(parent, 4, 0)
+    assert not zone_enabled(parent, 4, 1)
+    parent.zone_overrides = {"4:1": True}
+    assert not zone_enabled(parent, 4, 1)
 
 
 def test_zone_label_includes_node_slot_and_manufacturer_function_in_selected_language() -> (
@@ -110,7 +171,7 @@ def test_custom_zone_label_is_applied_without_affecting_identity() -> None:
         zone_overrides={},
         language="de",
     )
-    assert entity_zone_label(parent, SimpleNamespace(node=4), _row(0x5405, 1)) == (
+    assert entity_zone_label(parent, SimpleNamespace(node=4), _row(0x340F, 1)) == (
         "Heizkreis 1 — Obergeschoss"
     )
 

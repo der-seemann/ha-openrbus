@@ -14,7 +14,7 @@ import voluptuous as vol
 from annotatedyaml import YAMLException
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, ServiceCall, SupportsResponse
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.util.yaml import Secrets
 
@@ -46,8 +46,13 @@ from .const import (
     CONF_TRANSPORT_MIGRATION,
     DOMAIN,
 )
-from .coordinator import OpenRBusCoordinator, schedule_first_refresh_in_background
+from .coordinator import (
+    _INITIAL_SETUP_CLEANUP_BUDGET,
+    OpenRBusCoordinator,
+    schedule_first_refresh_in_background,
+)
 from .proxy_provisioning import PROXY_SOURCE_VERSION, read_proxy_yaml
+from .zone_projection_storage import async_load_zone_projection
 
 PLATFORMS = ["sensor", "binary_sensor", "number", "select", "switch"]
 _LOGGER = logging.getLogger(__name__)
@@ -246,6 +251,30 @@ async def _cancel_task(task: asyncio.Task[object]) -> None:
         pass
 
 
+async def _async_prove_coordinator_shutdown(
+    coordinator: OpenRBusCoordinator,
+) -> None:
+    """Finish bounded cleanup before replacing a stopped coordinator."""
+
+    try:
+        async with asyncio.timeout(_INITIAL_SETUP_CLEANUP_BUDGET * 4):
+            await coordinator.async_shutdown()
+    except asyncio.CancelledError:
+        raise
+    except TimeoutError as error:
+        raise ConfigEntryNotReady(
+            "OpenRBus coordinator cleanup is still pending"
+        ) from error
+    except Exception as error:
+        raise ConfigEntryNotReady(
+            "OpenRBus coordinator cleanup has not proven shutdown"
+        ) from error
+    if not getattr(coordinator, "_shutdown_complete", False):
+        raise ConfigEntryNotReady(
+            "OpenRBus coordinator cleanup has not proven shutdown"
+        )
+
+
 async def _async_validate_transport_migration(
     hass: HomeAssistant, entry: ConfigEntry, configured: Mapping[str, object]
 ) -> None:
@@ -302,6 +331,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await async_load_access_profile(hass, configured.get(CONF_BLE_DEVICE))
     )
     await async_save_access_profile(hass, configured)
+    try:
+        zone_projection = await async_load_zone_projection(
+            hass, entry.entry_id, configured.get(CONF_BLE_DEVICE)
+        )
+    except Exception as error:
+        raise ConfigEntryNotReady(
+            "OpenRBus zone projection history is temporarily unavailable"
+        ) from error
     backend = configured.get(CONF_BACKEND)
     profile, key_provider = _thin_runtime(hass, configured)
     if backend not in {BACKEND_NATIVE, BACKEND_THIN_RPC}:
@@ -315,24 +352,71 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # Retain only a tiny redacted Thin-RPC frame trace so a failed initial
     # discovery can be correlated with the proxy without retaining payloads.
     thin_frame_trace: list[dict[str, Any]] = []
-    coordinator = OpenRBusCoordinator(
-        hass,
-        entry,
-        thin_key_provider=key_provider,
-        thin_profile=profile,
-        thin_frame_trace=thin_frame_trace,
-    )
-    entry.runtime_data = coordinator
-    await coordinator.async_start()
+    config_snapshot = (dict(entry.data), dict(getattr(entry, "options", {})))
+    coordinator = getattr(entry, "runtime_data", None)
+    if isinstance(coordinator, OpenRBusCoordinator) and getattr(
+        coordinator, "_shutting_down", False
+    ):
+        # HA can retain runtime_data after a completed unload or a failed
+        # setup cleanup. Prove the old owner is fully stopped, then build a
+        # fresh coordinator; never revive its shutdown flag or pollers.
+        await _async_prove_coordinator_shutdown(coordinator)
+        coordinator.detach_startup_lifecycle()
+        if getattr(entry, "runtime_data", None) is coordinator:
+            delattr(entry, "runtime_data")
+        coordinator = None
+    if isinstance(coordinator, OpenRBusCoordinator) and (
+        coordinator._startup_config_snapshot != config_snapshot
+    ):
+        # An options change must not reuse a session authorized with stale
+        # credentials or transport settings. Fence the old attempt first.
+        await _async_prove_coordinator_shutdown(coordinator)
+        coordinator.detach_startup_lifecycle()
+        delattr(entry, "runtime_data")
+        coordinator = None
+    if not isinstance(coordinator, OpenRBusCoordinator):
+        coordinator = OpenRBusCoordinator(
+            hass,
+            entry,
+            thin_key_provider=key_provider,
+            thin_profile=profile,
+            thin_frame_trace=thin_frame_trace,
+        )
+        entry.runtime_data = coordinator
+    coordinator.zone_projection_history = zone_projection
+    coordinator.ensure_startup_lifecycle(entry)
+    startup_retryable = False
+
+    async def cleanup_failed_setup() -> None:
+        # Preserve the shared task only when this setup attempt explicitly
+        # reported ConfigEntryNotReady; do not infer continuation from the
+        # mutable config-entry state.
+        if startup_retryable:
+            return
+        try:
+            await coordinator.async_shutdown()
+            if getattr(entry, "runtime_data", None) is coordinator:
+                delattr(entry, "runtime_data")
+        finally:
+            coordinator.detach_startup_lifecycle()
+
+    entry.async_on_unload(cleanup_failed_setup)
+    try:
+        await coordinator.async_wait_for_initial_startup()
+    except ConfigEntryNotReady:
+        startup_retryable = True
+        raise
     # Migrate registry rows before any platform is forwarded.  This is a
     # registry-only projection migration; it performs no transport reads or
     # writes and is safe to repeat on every reload.
     from .register_entities import (
+        cleanup_inactive_zone_entities,
         cleanup_legacy_sensor_entities,
         migrate_stable_registry_ids,
     )
 
     migrate_stable_registry_ids(hass, coordinator)
+    cleanup_inactive_zone_entities(hass, coordinator)
     cleanup_legacy_sensor_entities(hass, coordinator)
     if not hass.services.has_service(DOMAIN, "read_object"):
 
@@ -350,7 +434,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     address, node=call.data["node"]
                 )
             else:
-                result = await target.async_read_object(address, node=call.data["node"])
+                result = await target.async_read_object(
+                    address,
+                    node=call.data["node"],
+                    read_origin="manual_read_service",
+                )
             return {
                 "node": result.node,
                 "object": str(result.address),
@@ -389,7 +477,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 raise HomeAssistantError("objects must use hhhh:ss notation") from error
             if not 1 <= len(addresses) <= 16:
                 raise HomeAssistantError("read_group accepts 1..16 objects")
-            results = await target.async_read_objects(addresses, node=call.data["node"])
+            results = await target.async_read_objects(
+                addresses,
+                node=call.data["node"],
+                read_origin="manual_read_service_batch",
+            )
             results = [
                 (
                     {
@@ -571,6 +663,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         committed_options = dict(entry.options)
         committed_options.pop(CONF_TRANSPORT_MIGRATION, None)
         hass.config_entries.async_update_entry(entry, options=committed_options)
+    coordinator.detach_startup_lifecycle()
     return True
 
 
@@ -604,6 +697,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             bool(getattr(backend, "_owns_controller", False)),
         )
         hass.data.get(f"{DOMAIN}_polling_coordinators", {}).pop(entry.entry_id, None)
+        coordinator.detach_startup_lifecycle()
     else:
         _LOGGER.warning("UNLOAD_TRACE event=coordinator_shutdown_skipped")
     if not hass.config_entries.async_entries(DOMAIN):
@@ -614,6 +708,15 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.services.async_remove(DOMAIN, "reactivate_register")
         hass.services.async_remove(DOMAIN, "prepare_proxy_yaml")
     return unloaded
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Stop a staged initial setup when HA removes an entry in retry state."""
+
+    coordinator = getattr(entry, "runtime_data", None)
+    if isinstance(coordinator, OpenRBusCoordinator):
+        await coordinator.async_shutdown()
+        coordinator.detach_startup_lifecycle()
 
 
 async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
