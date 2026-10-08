@@ -4,6 +4,9 @@
 
 ### Changed
 
+- Retain a bounded, payload-free diagnostic trace when a Thin-RPC batch read
+  triggers session recovery, including the failure class, session state, and
+  safe proxy counters before and after recovery.
 - Preserve in-flight initial discovery across Home Assistant's retryable
   `ConfigEntryNotReady` setup callbacks. Keep fatal setup and shutdown cleanup
   explicit; replace a stopped coordinator only after cleanup is proven

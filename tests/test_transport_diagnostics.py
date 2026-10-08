@@ -27,6 +27,7 @@ from custom_components.openrbus.coordinator import (
 )
 from custom_components.openrbus.diagnostics import (
     _safe_batch_failure_trace,
+    _safe_batch_recovery_trace,
     _safe_poll_selection_snapshot,
     _safe_poll_snapshot,
     _safe_read_operation_trace,
@@ -240,6 +241,54 @@ def test_safe_batch_failure_trace_is_payload_free_and_bounded() -> None:
         )
         == {}
     )
+
+
+def test_safe_batch_recovery_trace_filters_private_fields_and_unknown_classes() -> None:
+    safe = _safe_batch_recovery_trace(
+        [
+            {
+                "origin": "poll_batch",
+                "failure_count": 2,
+                "failure_classes": {"session.timeout": 1, "session.transport": 1},
+                "link_lost_text_match": True,
+                "session_present": True,
+                "session_connected": False,
+                "identity_present": False,
+                "session_epoch": 7,
+                "generation": 9,
+                "disconnect_event_observed": True,
+                "before": {
+                    "epoch": 7,
+                    "notification_callbacks": 11,
+                    "payload": "secret",
+                },
+                "after": {"epoch": 8, "notification_callbacks": 12},
+                "address": "private",
+                "message": "credential-like detail",
+            },
+            {
+                "origin": "poll_batch",
+                "failure_count": 1,
+                "failure_classes": {"session.private": 1},
+            },
+        ]
+    )
+    assert safe == [
+        {
+            "origin": "poll_batch",
+            "failure_count": 2,
+            "failure_classes": {"session.timeout": 1, "session.transport": 1},
+            "link_lost_text_match": True,
+            "session_present": True,
+            "identity_present": False,
+            "session_connected": False,
+            "disconnect_event_observed": True,
+            "session_epoch": 7,
+            "generation": 9,
+            "before": {"epoch": 7, "notification_callbacks": 11},
+            "after": {"epoch": 8, "notification_callbacks": 12},
+        }
+    ]
 
 
 @pytest.mark.asyncio

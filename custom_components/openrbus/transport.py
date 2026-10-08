@@ -103,6 +103,7 @@ _DISCONNECT_ACTION_SUFFIX = "openrbus_disconnect"
 MAX_FRAME_TRACE_ENTRIES = 128
 MAX_FRAME_TRACE_BYTES = 24 * 1024
 MAX_READ_OPERATION_TRACE_ENTRIES = 32
+MAX_BATCH_RECOVERY_TRACE_ENTRIES = 8
 _READ_OPERATION_ORIGIN: contextvars.ContextVar[str] = contextvars.ContextVar(
     "openrbus_read_operation_origin", default="unspecified"
 )
@@ -1575,10 +1576,18 @@ class HomeAssistantThinGattChannel:
             self._decode_notification(frame)
         return frame
 
-    async def diagnostics(self) -> Mapping[str, Any]:
+    async def diagnostics(self, *, timeout: float | None = None) -> Mapping[str, Any]:
         try:
-            response = await self.client.execute_service(
-                self.capability.diagnostics_service, {}, return_response=True
+            request = self.client.execute_service(
+                self.capability.diagnostics_service,
+                {},
+                return_response=True,
+                timeout=timeout,
+            )
+            response = (
+                await asyncio.wait_for(request, timeout)
+                if timeout is not None
+                else await request
             )
             body = self._response_object(response, "snapshot")
             snapshot = self._decode_json_value(body["snapshot"])
@@ -1845,6 +1854,9 @@ class ThinRpcBackend:
         self._last_read_transport_capture: dict[str, Any] | None = None
         self._batch_failure_trace_captured = False
         self._last_batch_failure_trace: dict[str, Any] | None = None
+        self._batch_recovery_trace: deque[dict[str, Any]] = deque(
+            maxlen=MAX_BATCH_RECOVERY_TRACE_ENTRIES
+        )
         self._started = False
         self._owns_controller = False
         self._owner_generation = self._next_owner_generation
@@ -2569,8 +2581,8 @@ class ThinRpcBackend:
                 # readiness check. Retry only those object-local failures once
                 # after Core/Thin-RPC re-prepares the secure session; protocol,
                 # decode, and unsupported-object errors remain object-local.
-                failed = tuple(
-                    address
+                recovery_pairs = tuple(
+                    (address, value)
                     for address, value in zip(addresses, values, strict=True)
                     if isinstance(value, HomeAssistantError)
                     and (
@@ -2578,17 +2590,36 @@ class ThinRpcBackend:
                         or "link lost" in str(value).casefold()
                     )
                 )
+                failed = tuple(address for address, _value in recovery_pairs)
                 if failed:
                     # Retry only after a complete session boundary; preserve
                     # successful results from the first pass.
+                    recovery_trace_captured = False
+                    try:
+                        await self._record_batch_recovery_initiation(
+                            tuple(value for _address, value in recovery_pairs)
+                        )
+                        recovery_trace_captured = True
+                    except Exception:  # noqa: BLE001 - diagnostics must not mask reads
+                        _LOGGER.debug(
+                            "Batch recovery initiation diagnostics unavailable"
+                        )
                     try:
                         await self._recover_after_transport_loss()
+                        recovered = await _read_objects_batched(
+                            self.client, failed, node=node
+                        )
                     except Exception as error:
                         record_failure("recovery_dispatch", error)
                         raise
-                    recovered = await _read_objects_batched(
-                        self.client, failed, node=node
-                    )
+                    finally:
+                        if recovery_trace_captured:
+                            try:
+                                await self._finish_batch_recovery_trace()
+                            except Exception:  # noqa: BLE001 - diagnostics must not mask reads
+                                _LOGGER.debug(
+                                    "Batch recovery completion diagnostics unavailable"
+                                )
                     recovered_by_address = dict(zip(failed, recovered, strict=True))
                     values = tuple(
                         recovered_by_address.get(address, value)
@@ -2614,6 +2645,84 @@ class ThinRpcBackend:
                 raise
             finally:
                 self._end_read_operation(operation_id, "batch", outcome)
+
+    async def _record_batch_recovery_initiation(
+        self, failures: Sequence[HomeAssistantError]
+    ) -> None:
+        """Retain bounded, payload-free evidence before batch recovery."""
+        session = getattr(self, "session", None)
+        epoch = getattr(session, "epoch", None)
+        connected = getattr(session, "connected", None)
+        failure_counts: dict[str, int] = {}
+        link_lost_text_match = False
+        for error in failures:
+            error_class = _read_error_class(error)
+            subtype = _read_error_subtype(error, error_class)
+            label = f"{error_class}.{subtype}" if subtype else error_class
+            failure_counts[label] = min(256, failure_counts.get(label, 0) + 1)
+            link_lost_text_match = link_lost_text_match or (
+                "link lost" in str(error).casefold()
+            )
+        record: dict[str, Any] = {
+            "origin": _READ_OPERATION_ORIGIN.get(),
+            "failure_count": min(len(failures), 256),
+            "failure_classes": failure_counts,
+            "link_lost_text_match": link_lost_text_match,
+            "session_present": session is not None,
+            "session_connected": connected if type(connected) is bool else None,
+            "identity_present": getattr(session, "identity", None) is not None,
+            "session_epoch": epoch
+            if type(epoch) is int and 0 <= epoch <= 4_294_967_295
+            else None,
+            "generation": min(
+                2_147_483_647, max(0, getattr(self, "_session_generation", 0))
+            ),
+        }
+        if isinstance(getattr(self, "channel", None), HomeAssistantThinGattChannel):
+            try:
+                proxy = await self.channel.diagnostics(
+                    timeout=getattr(self, "timeout", _THIN_DISCONNECT_TIMEOUT)
+                )
+            except Exception:  # noqa: BLE001 - tracing must not mask recovery
+                proxy = {}
+            record["before"] = _safe_proxy_read_counters(proxy)
+        else:
+            record["before"] = {}
+        frames = getattr(self, "frame_trace", None)
+        if isinstance(frames, (list, tuple)):
+            record["disconnect_event_observed"] = any(
+                item.get("kind") == "event"
+                and (
+                    item.get("op") == "DISCONNECTED"
+                    or (
+                        item.get("op") == "CONNECTION_STATE"
+                        and item.get("state_category") in {"disconnected", "failed"}
+                    )
+                )
+                and item.get("epoch") == epoch
+                for item in frames[-MAX_FRAME_TRACE_ENTRIES:]
+                if isinstance(item, dict)
+            )
+        trace = getattr(self, "_batch_recovery_trace", None)
+        if not isinstance(trace, deque):
+            trace = deque(maxlen=MAX_BATCH_RECOVERY_TRACE_ENTRIES)
+            self._batch_recovery_trace = trace
+        trace.append(record)
+
+    async def _finish_batch_recovery_trace(self) -> None:
+        """Attach post-recovery proxy counters without changing read outcomes."""
+        trace = getattr(self, "_batch_recovery_trace", None)
+        if not trace or not isinstance(
+            getattr(self, "channel", None), HomeAssistantThinGattChannel
+        ):
+            return
+        try:
+            proxy = await self.channel.diagnostics(
+                timeout=getattr(self, "timeout", _THIN_DISCONNECT_TIMEOUT)
+            )
+        except Exception:  # noqa: BLE001 - tracing must not mask recovery
+            proxy = {}
+        trace[-1]["after"] = _safe_proxy_read_counters(proxy)
 
     async def _finish_batch_failure_trace(
         self,
@@ -3096,6 +3205,7 @@ class ThinRpcBackend:
             "last_batch_failure_trace": getattr(
                 self, "_last_batch_failure_trace", None
             ),
+            "batch_recovery_trace": tuple(getattr(self, "_batch_recovery_trace", ())),
         }
 
     def _record_batch_event(self, event: str) -> None:
