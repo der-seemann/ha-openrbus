@@ -26,6 +26,7 @@ _REGISTER_NAMES_DE = {
     "CM210": "Außentemperatur des Heizkreises",
     "CM220": "Kurzzeitmittel der Außentemperatur des Heizkreises",
     "CM230": "Langzeitmittel der Außentemperatur des Heizkreises",
+    "CM380": "Status des Heizkreis-Sicherheitstemperaturbegrenzers",
     "CP000": "Maximaler Vorlauftemperatur-Sollwertbereich",
     "CP010": "Vorlauftemperatur-Sollwert ohne Außensensor",
     "CP020": "Funktion des Heizkreises",
@@ -37,6 +38,7 @@ _REGISTER_NAMES_DE = {
     "CP080": "Raumsollwert der Heizkreisaktivität",
     "CP130": "Außentemperaturfühler für den Heizkreis",
     "CP140": "Raumsollwert der Heizkreisaktivität im Kühlbetrieb",
+    "CP190": "Heizkreis-Sicherheitstemperaturbegrenzer aktiviert",
     "CP200": "Raumtemperatur-Sollwert im Heizkreis-Kühlbetrieb",
     "CP210": "Komfort-Startwert des Heizkreises",
     "CP220": "Nacht-Startwert des Heizkreises",
@@ -120,6 +122,14 @@ _REGISTER_NAMES_EN = {
     "DP047": "maximum domestic hot water production time",
     "HP003": "minimum heat pump flow temperature in cooling mode",
     "HP180": "external pressure sensor",
+}
+
+# These two exact, per-zone objects share the same manufacturer short label.
+# Their normalized meanings come from their distinct OBD medium descriptions:
+# the CP190 setting enables the safety thermostat check; CM380 reports status.
+_REGISTER_NAMES_EN_DISPLAY = {
+    "CP190": "Heating circuit safety thermostat enabled",
+    "CM380": "Heating circuit safety thermostat status",
 }
 
 # These static code whitelists were generated from exact Core address/code ↔
@@ -439,6 +449,8 @@ def register_display_name(register: Any, language: str) -> str | None:
         return _expand_source_terms(
             getattr(register, "name_de", None), code, _SOURCE_TERMS_DE
         )
+    if language == "en":
+        return _REGISTER_NAMES_EN_DISPLAY.get(code)
     return None
 
 

@@ -39,6 +39,7 @@ from .register_entities import (
     should_project_as_control,
 )
 from .zones import (
+    function_selector_name,
     profile_for,
     zone_device_name,
     zone_enabled,
@@ -384,7 +385,11 @@ class OpenRBusRegisterSensor(
         self._language = language
         self._effective_access_level = effective_access_level
         self._attr_name = register_name(register, language)
-        if zone_label := entity_zone_label(parent, identity, register):
+        if selector_name := function_selector_name(self._attr_name, register):
+            # Selector coordinates identify the parent-device slot even if
+            # CP020 is unread, disabled, or projected as a read-only sensor.
+            self._attr_name = selector_name
+        elif zone_label := entity_zone_label(parent, identity, register):
             self._attr_name = f"{zone_label} — {self._attr_name}"
         if register.datatype == "TIME_OF_DAY" or is_clock_hours_minutes(register):
             # HA has no time-only sensor device class/native value, so publish

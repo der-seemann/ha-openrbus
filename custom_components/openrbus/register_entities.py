@@ -54,6 +54,7 @@ from .zones import (
     ZoneKind,
     ZoneReadState,
     entity_zone_label,
+    function_selector_name,
     override_key,
     profile_for,
     zone_association,
@@ -1979,6 +1980,11 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
     def name_with_zone(name: str, parent: Any, identity: Any, register: Any) -> str:
         """Make zone-scoped register names distinguishable in HA's entity list."""
 
+        if selector_name := function_selector_name(name, register):
+            # CP020 item coordinates identify selector slots even when the
+            # selector is disabled or unread. Keep the entity on its parent
+            # device; this label names the slot without claiming activity.
+            return selector_name
         zone_label = entity_zone_label(parent, identity, register)
         slot = zone_subindex(register, identity)
         profile = (

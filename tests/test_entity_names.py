@@ -25,7 +25,13 @@ from custom_components.openrbus.sensor import (
     OpenRBusRegisterSensor,
 )
 from custom_components.openrbus.switch import OpenRBusSwitch
-from custom_components.openrbus.zones import ZoneProfile, zone_device_name
+from custom_components.openrbus.zones import (
+    ZoneAssociation,
+    ZoneProfile,
+    zone_association,
+    zone_device_name,
+    zone_subindex,
+)
 
 _CATALOG = Registry.load_default()
 
@@ -103,6 +109,16 @@ def test_reviewed_german_names_use_exact_parameter_codes() -> None:
             0x3412,
             "Raumsollwert der Heizkreisaktivität im Kühlbetrieb",
         ),
+        (
+            "CP190",
+            0x342B,
+            "Heizkreis-Sicherheitstemperaturbegrenzer aktiviert",
+        ),
+        (
+            "CM380",
+            0x5411,
+            "Status des Heizkreis-Sicherheitstemperaturbegrenzers",
+        ),
         ("CP200", 0x3413, "Raumtemperatur-Sollwert im Heizkreis-Kühlbetrieb"),
         ("CP210", 0x3414, "Komfort-Startwert des Heizkreises"),
         ("CP220", 0x3415, "Nacht-Startwert des Heizkreises"),
@@ -153,6 +169,37 @@ def test_source_audited_code_address_name_map(code, index, expected) -> None:
 def test_mismatched_parameter_code_is_not_used_for_suggested_id() -> None:
     register = _register("CP730", 0x3604, 0, "Mismatched source row")
     assert parameter_code_for(register) is None
+
+
+@pytest.mark.parametrize(
+    ("code", "index", "expected"),
+    [
+        ("CP190", 0x342B, "Heating circuit safety thermostat enabled"),
+        ("CM380", 0x5411, "Heating circuit safety thermostat status"),
+    ],
+)
+def test_same_short_label_codes_have_distinct_normalized_english_names(
+    code, index, expected
+) -> None:
+    register = _register(code, index, 1, "Safety thermostat")
+    assert register_display_name(register, "en") == expected
+    mismatched = _register(code, index + 1, 1, "Safety thermostat")
+    assert register_display_name(mismatched, "en") is None
+
+
+def test_zone_slot_safety_thermostat_registers_have_distinct_names() -> None:
+    setting = _register("CP190", 0x342B, 1, "Safety thermostat")
+    status = _register("CM380", 0x5411, 1, "Safety thermostat")
+    identity = _identity(family="Scb-10", node=4)
+
+    assert zone_association(setting, identity) is ZoneAssociation.ZONE_SLOT
+    assert zone_association(status, identity) is ZoneAssociation.ZONE_SLOT
+    assert register_display_name(setting, "de") == (
+        "Heizkreis-Sicherheitstemperaturbegrenzer aktiviert"
+    )
+    assert register_display_name(status, "de") == (
+        "Status des Heizkreis-Sicherheitstemperaturbegrenzers"
+    )
 
 
 def test_scalar_parameter_code_requires_exact_core_address_code_join() -> None:
@@ -386,6 +433,78 @@ def test_display_name_does_not_repeat_a_proven_zone_label(
         OpenRBusRegisterEntity.name_with_zone(name, parent, _identity(), register)
         == expected
     )
+
+
+@pytest.mark.parametrize("slot", range(1, 11))
+@pytest.mark.parametrize("read_state", ["unknown", "inactive", "active"])
+def test_cp020_selector_name_always_identifies_its_parent_slot(slot, read_state) -> None:
+    register = _register("CP020", 0x3404, slot, "Zone function")
+    identity = _identity(node=1)
+    profile = {
+        "unknown": None,
+        "inactive": ZoneProfile(1, slot, 0),
+        "active": ZoneProfile(1, slot, 2),
+    }[read_state]
+    parent = _parent(profile)
+
+    assert zone_association(register, identity) is ZoneAssociation.FUNCTION_SELECTOR
+    assert zone_subindex(register, identity) is None
+    assert OpenRBusRegisterEntity.name_with_zone(
+        "Funktion des Heizkreises", parent, identity, register
+    ) == f"Zone {slot} — Funktion des Heizkreises"
+
+
+def test_read_only_cp020_sensor_name_identifies_unknown_parent_slot() -> None:
+    register = _register("CP020", 0x3404, 2, "Zone function")
+    register.datatype = "ENUM"
+    register.unit = None
+    parent = _parent()
+    parent.config_entry = SimpleNamespace(
+        data={"ble_device": "00:11:22:33:44:55"}, options={}, entry_id="entry"
+    )
+    identity = _identity(node=1)
+
+    entity = OpenRBusRegisterSensor(
+        parent,
+        SimpleNamespace(),
+        identity,
+        register,
+        language="de",
+        effective_access_level=1,
+    )
+
+    assert entity.name == "Zone 2 — Funktion des Heizkreises"
+    assert entity.unique_id.endswith(":node:1:object:3404:02")
+    assert zone_subindex(register, identity) is None
+
+
+@pytest.mark.parametrize("subindex", [0, 11])
+def test_cp020_array_header_and_out_of_bounds_item_get_no_zone_label(subindex) -> None:
+    register = _register("CP020", 0x3404, subindex, "Zone function")
+
+    assert OpenRBusRegisterEntity.name_with_zone(
+        "Funktion des Heizkreises", _parent(), _identity(), register
+    ) == "Funktion des Heizkreises"
+
+
+@pytest.mark.parametrize(
+    ("code", "index", "label"),
+    [
+        ("CP080", 0x340C, "Raumsollwert der Heizkreisaktivität"),
+        (
+            "CP140",
+            0x3412,
+            "Raumsollwert der Heizkreisaktivität im Kühlbetrieb",
+        ),
+    ],
+)
+def test_cp080_cp140_activity_indexes_do_not_gain_zone_labels(code, index, label) -> None:
+    register = _register(code, index, 1, "opaque")
+
+    assert zone_association(register, _identity()) is ZoneAssociation.UNRESOLVED
+    assert OpenRBusRegisterEntity.name_with_zone(
+        label, _parent(ZoneProfile(1, 1, 2)), _identity(), register
+    ) == label
 
 
 @pytest.mark.parametrize(

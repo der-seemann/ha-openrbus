@@ -581,6 +581,18 @@ def zone_association(register: Any, identity: Any | None = None) -> ZoneAssociat
     return ZoneAssociation.NOT_ZONE
 
 
+def function_selector_name(name: str, register: Any) -> str | None:
+    """Prefix a CP020 selector with its stable slot, independent of activity."""
+
+    if zone_association(register) is not ZoneAssociation.FUNCTION_SELECTOR:
+        return None
+    address = getattr(register, "address", register)
+    slot = getattr(address, "subindex", None)
+    if not isinstance(slot, int) or not 1 <= slot <= 10:
+        return None
+    return f"Zone {slot} — {name}"
+
+
 def zone_function_slots(rows: Any) -> tuple[int, ...]:
     """Return CP020 slots allowed by the canonical array definition.
 
@@ -810,6 +822,7 @@ __all__ = [
     "ZoneProfile",
     "ZoneReadState",
     "entity_zone_label",
+    "function_selector_name",
     "normalized_overrides",
     "normalized_selection_overrides",
     "override_key",

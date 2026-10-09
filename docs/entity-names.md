@@ -11,7 +11,7 @@ with global text replacement.
 Every row below was joined by exact object address and `FriendlyName` in OBD
 1.47. The HA label is a concise normalized rendering of the German source
 meaning, not a copied translation paragraph. The glossary is a manually
-reviewed subset of 49 codes selected for common short forms resolved by the
+reviewed subset of 51 codes selected for common short forms resolved by the
 per-register German medium description. It does not replace every vendor
 short label.
 
@@ -23,7 +23,7 @@ medium description spelling out the corresponding term. The same code sets
 support concise English ID labels (`heating_circuit`, `domestic_hot_water`,
 `heat_pump`). Substrings such as `PWM` do not match `WP`. If a medium
 description only repeats an abbreviation, the automatic expansion is not
-allowed; the 49 direct glossary entries above still take precedence.
+allowed; the direct glossary entries above still take precedence.
 
 | Code | Address | HA German label |
 | --- | --- | --- |
@@ -31,6 +31,7 @@ allowed; the 49 direct glossary entries above still take precedence.
 | CM210 | `542e:00` | Außentemperatur des Heizkreises |
 | CM220 | `542f:00` | Kurzzeitmittel der Außentemperatur des Heizkreises |
 | CM230 | `5430:00` | Langzeitmittel der Außentemperatur des Heizkreises |
+| CM380 | `5411:00` | Status des Heizkreis-Sicherheitstemperaturbegrenzers |
 | CP000 | `3401:00` | Maximaler Vorlauftemperatur-Sollwertbereich |
 | CP010 | `3402:00` | Vorlauftemperatur-Sollwert ohne Außensensor |
 | CP020 | `3404:00` | Funktion des Heizkreises |
@@ -42,6 +43,7 @@ allowed; the 49 direct glossary entries above still take precedence.
 | CP080 | `340c:00` | Raumsollwert der Heizkreisaktivität |
 | CP130 | `340e:00` | Außentemperaturfühler für den Heizkreis |
 | CP140 | `3412:00` | Raumsollwert der Heizkreisaktivität im Kühlbetrieb |
+| CP190 | `342b:00` | Heizkreis-Sicherheitstemperaturbegrenzer aktiviert |
 | CP200 | `3413:00` | Raumtemperatur-Sollwert im Heizkreis-Kühlbetrieb |
 | CP210 | `3414:00` | Komfort-Startwert des Heizkreises |
 | CP220 | `3415:00` | Nacht-Startwert des Heizkreises |
@@ -83,9 +85,13 @@ items use the positive source-mapped zone slot dimension. CP140 is readable by
 name but its array dimension is unresolved: neither its item ordinal nor its
 `:00` head is treated as a heating-circuit slot. CP080 has the same unresolved
 slot association. Array headers at `:00` are never emitted as zone slots.
-CP020 function selectors remain parent-device entities, and no inactive zone
-is created by label normalization. Existing user-assigned entity names and
-stable unique IDs are preserved.
+CP190 and CM380 share a manufacturer short label but have distinct exact-code
+meanings: the setting enables the circuit safety thermostat check; the status
+register reports its current state. CP020 selectors remain parent-device
+entities. Their item names include `Zone N` to identify the selector slot,
+including when its state is inactive, unknown, or unavailable; the label does
+not claim the zone is active. Existing user-assigned entity names and stable
+unique IDs are preserved.
 
 ## Suggested entity IDs
 
