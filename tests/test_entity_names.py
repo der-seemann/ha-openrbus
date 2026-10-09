@@ -437,7 +437,9 @@ def test_display_name_does_not_repeat_a_proven_zone_label(
 
 @pytest.mark.parametrize("slot", range(1, 11))
 @pytest.mark.parametrize("read_state", ["unknown", "inactive", "active"])
-def test_cp020_selector_name_always_identifies_its_parent_slot(slot, read_state) -> None:
+def test_cp020_selector_name_always_identifies_its_parent_slot(
+    slot, read_state
+) -> None:
     register = _register("CP020", 0x3404, slot, "Zone function")
     identity = _identity(node=1)
     profile = {
@@ -449,9 +451,12 @@ def test_cp020_selector_name_always_identifies_its_parent_slot(slot, read_state)
 
     assert zone_association(register, identity) is ZoneAssociation.FUNCTION_SELECTOR
     assert zone_subindex(register, identity) is None
-    assert OpenRBusRegisterEntity.name_with_zone(
-        "Funktion des Heizkreises", parent, identity, register
-    ) == f"Zone {slot} — Funktion des Heizkreises"
+    assert (
+        OpenRBusRegisterEntity.name_with_zone(
+            "Funktion des Heizkreises", parent, identity, register
+        )
+        == f"Zone {slot} — Funktion des Heizkreises"
+    )
 
 
 def test_read_only_cp020_sensor_name_identifies_unknown_parent_slot() -> None:
@@ -482,9 +487,12 @@ def test_read_only_cp020_sensor_name_identifies_unknown_parent_slot() -> None:
 def test_cp020_array_header_and_out_of_bounds_item_get_no_zone_label(subindex) -> None:
     register = _register("CP020", 0x3404, subindex, "Zone function")
 
-    assert OpenRBusRegisterEntity.name_with_zone(
-        "Funktion des Heizkreises", _parent(), _identity(), register
-    ) == "Funktion des Heizkreises"
+    assert (
+        OpenRBusRegisterEntity.name_with_zone(
+            "Funktion des Heizkreises", _parent(), _identity(), register
+        )
+        == "Funktion des Heizkreises"
+    )
 
 
 @pytest.mark.parametrize(
@@ -498,13 +506,18 @@ def test_cp020_array_header_and_out_of_bounds_item_get_no_zone_label(subindex) -
         ),
     ],
 )
-def test_cp080_cp140_activity_indexes_do_not_gain_zone_labels(code, index, label) -> None:
+def test_cp080_cp140_activity_indexes_do_not_gain_zone_labels(
+    code, index, label
+) -> None:
     register = _register(code, index, 1, "opaque")
 
     assert zone_association(register, _identity()) is ZoneAssociation.UNRESOLVED
-    assert OpenRBusRegisterEntity.name_with_zone(
-        label, _parent(ZoneProfile(1, 1, 2)), _identity(), register
-    ) == label
+    assert (
+        OpenRBusRegisterEntity.name_with_zone(
+            label, _parent(ZoneProfile(1, 1, 2)), _identity(), register
+        )
+        == label
+    )
 
 
 @pytest.mark.parametrize(
