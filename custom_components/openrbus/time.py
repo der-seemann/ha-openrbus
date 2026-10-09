@@ -13,6 +13,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import DOMAIN
 from .bridge import GenericRead
+from .entity_names import assign_compact_entity_id
 from .hours_minutes import (
     hours_minutes_to_text,
     hours_minutes_to_time,
@@ -103,6 +104,8 @@ async def async_setup_entry(
                 enabled_by_default=True,
             )
         )
+    for entity in entities:
+        assign_compact_entity_id(entity, "time")
     async_add_entities(entities)
 
 

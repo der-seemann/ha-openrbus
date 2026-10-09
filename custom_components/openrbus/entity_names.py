@@ -10,8 +10,10 @@ from openrbus.discovery import DeviceIdentity
 from openrbus.registry import Registry
 
 from .zones import (
+    ZoneAssociation,
     ZoneKind,
     profile_for,
+    zone_association,
     zone_device_name,
     zone_enabled,
     zone_subindex,
@@ -1024,6 +1026,91 @@ def suggested_object_id(
     return "_".join(parts)
 
 
+def compact_entity_object_id(
+    parent: Any,
+    identity: DeviceIdentity,
+    register: Any,
+    *,
+    english_name: str | None = None,
+) -> str | None:
+    """Build the full, deterministic ID for a register-backed entity."""
+
+    model = getattr(identity, "model", None) or getattr(identity, "family", None)
+    parts = [f"n{identity.node}"]
+    if model:
+        parts.append(_slug(model))
+
+    slot = zone_subindex(register, identity)
+    association = zone_association(register, identity)
+    address = getattr(register, "address", None)
+    if slot is None and association is ZoneAssociation.FUNCTION_SELECTOR:
+        slot = getattr(address, "subindex", None)
+    if isinstance(slot, int) and slot > 0:
+        parts.append(f"z{slot}")
+        profile = profile_for(parent, identity.node, slot, identity)
+        if profile is not None:
+            designation = (profile.friendly_name or profile.short_name or "").strip()
+            if designation:
+                parts.append(_slug(designation))
+
+    code = parameter_code_for(register, identity)
+    definition = _REGISTRY.find(address) if address is not None else None
+    if slot is None and definition is not None and definition.wire.is_array:
+        code = None
+    if code:
+        parts.append(_slug(code))
+    elif address is not None:
+        # Unknown or wider array dimensions keep their exact address in the ID
+        # instead of relying on Home Assistant's collision suffixes.
+        parts.append(f"obj_{address.index:04x}_{address.subindex:02x}")
+    label = (
+        english_name
+        or (_REGISTER_NAMES_EN.get(code) if code is not None else None)
+        or _expand_source_terms(
+            getattr(register, "name_en", None), code, _SOURCE_TERMS_EN
+        )
+        or getattr(register, "name_en", None)
+        or code
+        or "register"
+    )
+    parts.append(_slug(label) or "register")
+    return "_".join(part for part in parts if part)
+
+
+def assign_compact_entity_id(entity: Any, domain: str) -> None:
+    """Assign a full HA entity ID after a register entity is fully built."""
+
+    parent = getattr(entity, "_parent", None)
+    identity = getattr(entity, "_identity", None)
+    register = getattr(entity, "_register", None)
+    if parent is None or identity is None or register is None:
+        return
+    object_id = compact_entity_object_id(
+        parent,
+        identity,
+        register,
+        english_name=getattr(entity, "_openrbus_english_name", None),
+    )
+    if object_id:
+        entity.entity_id = f"{domain}.{object_id}"
+
+
+def assign_compact_identity_entity_id(entity: Any, domain: str) -> None:
+    """Assign the node-scoped ID for one identity diagnostic after construction."""
+
+    identity = getattr(entity, "_identity", None)
+    field_name = getattr(entity, "_field", None)
+    if identity is None or field_name not in {"device_code", "parameter_number"}:
+        return
+    suffix = "device_type" if field_name == "device_code" else "parameter_number"
+    parts = [f"n{identity.node}"]
+    model = getattr(identity, "model", None) or getattr(identity, "family", None)
+    if model:
+        parts.append(_slug(model))
+    parts.append(suffix)
+    entity.entity_id = f"{domain}.{'_'.join(parts)}"
+
+
 def _expand_source_terms(value: object, code: str | None, terms: dict) -> str | None:
     """Expand only source-audited whole tokens for this exact code."""
 
@@ -1049,6 +1136,9 @@ def _slug(value: object) -> str:
 
 
 __all__ = [
+    "assign_compact_entity_id",
+    "assign_compact_identity_entity_id",
+    "compact_entity_object_id",
     "parameter_code_for",
     "register_display_name",
     "suggested_object_id",

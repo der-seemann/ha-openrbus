@@ -2,8 +2,16 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
+from homeassistant.components.sensor import SensorEntity
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.entity_platform import _async_derive_object_ids
+from homeassistant.helpers.entity_registry import (
+    EntityRegistry,
+    EntityRegistryItems,
+    EntityRegistrySettings,
+)
 from homeassistant.util import slugify
 from openrbus.catalog import catalog_for_node
 from openrbus.discovery import DeviceIdentity, resolve_device_identity
@@ -17,12 +25,19 @@ from custom_components.openrbus.entity_names import (
     _SOURCE_TERMS_EN,
     _TWW_CODES,
     _WP_CODES,
+    _slug,
+    assign_compact_entity_id,
+    assign_compact_identity_entity_id,
+    compact_entity_object_id,
     parameter_code_for,
     register_display_name,
     suggested_object_id,
 )
 from custom_components.openrbus.number import OpenRBusNumber
-from custom_components.openrbus.register_entities import OpenRBusRegisterEntity
+from custom_components.openrbus.register_entities import (
+    OpenRBusRegisterEntity,
+    bitfield_structure,
+)
 from custom_components.openrbus.select import OpenRBusSelect
 from custom_components.openrbus.sensor import (
     OpenRBusDeviceTypeSensor,
@@ -35,6 +50,7 @@ from custom_components.openrbus.zones import (
     ZoneProfile,
     zone_association,
     zone_device_name,
+    zone_subdevice_name,
     zone_subindex,
 )
 
@@ -772,6 +788,147 @@ def test_home_assistant_zone_device_prefix_avoids_duplicate_zone_tokens(monkeypa
     assert _ha_entity_id(monkeypatch, device_name, suffix) == (
         "select.scb_10_node_4_zone_4_heizkreis_direkt_scb_hk1_cp733_heat_up_speed"
     )
+
+
+def test_compact_zone_id_matches_requested_node_model_zone_register_schema():
+    register = _register("CP020", 0x3404, 1, "Zone function")
+    profile = ZoneProfile(4, 1, 1, short_name="SCB HK1", node_name="SCB-10")
+    parent = _parent(profile)
+    identity = _identity(family="SCB-10", node=4)
+
+    assert compact_entity_object_id(parent, identity, register) == (
+        "n4_scb_10_z1_scb_hk1_cp020_heating_circuit_function"
+    )
+
+
+def test_compact_zone_entity_id_is_assigned_after_entity_construction():
+    register = _register("CP020", 0x3404, 1, "Zone function")
+    profile = ZoneProfile(4, 1, 1, short_name="SCB HK1", node_name="SCB-10")
+    entity = SensorEntity()
+    entity._parent = _parent(profile)
+    entity._identity = _identity(family="SCB-10", node=4)
+    entity._register = register
+
+    assign_compact_entity_id(entity, "sensor")
+
+    assert entity.entity_id == (
+        "sensor.n4_scb_10_z1_scb_hk1_cp020_heating_circuit_function"
+    )
+    entity.internal_integration_suggested_object_id = entity.entity_id.removeprefix(
+        "sensor."
+    )
+    suggested, base = _async_derive_object_ids(
+        entity, SimpleNamespace(entity_namespace=None, platform_name="openrbus")
+    )
+    assert suggested == "n4_scb_10_z1_scb_hk1_cp020_heating_circuit_function"
+    assert base is None
+
+
+def test_compact_bitfield_ids_keep_the_field_name_and_stable_unique_id():
+    register = _register(None, 0x5503, 0, "Configuration flags")
+    structure = bitfield_structure(register)
+    assert structure is not None
+    parent = _parent()
+    identity = _identity(family="SCB-10", node=4)
+    entities = []
+    for field in [item for item in structure.fields if item.bit_length == 1][:2]:
+        entity = OpenRBusBitfieldSensor.__new__(OpenRBusBitfieldSensor)
+        entity._parent = parent
+        entity._identity = identity
+        entity._register = register
+        entity._openrbus_english_name = field.name
+        entity._attr_unique_id = f"stable-register-id:bit:{field.name}"
+        unique_id = entity.unique_id
+        assign_compact_entity_id(entity, "binary_sensor")
+        assert entity.unique_id == unique_id
+        entities.append(entity)
+
+    assert len(entities) == 2
+    assert entities[0].entity_id != entities[1].entity_id
+    assert all("_2" not in entity.entity_id for entity in entities)
+    assert all(
+        entity.entity_id.endswith(_slug(entity._openrbus_english_name))
+        for entity in entities
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "suffix"),
+    [("device_code", "device_type"), ("parameter_number", "parameter_number")],
+)
+def test_node_identity_sensor_ids_use_compact_model_prefix_and_keep_unique_id(
+    field, suffix
+):
+    entity = OpenRBusIdentitySensor.__new__(OpenRBusIdentitySensor)
+    entity._identity = _identity(family="SCB-10", node=4)
+    entity._field = field
+    entity._attr_unique_id = f"stable:{field}"
+    unique_id = entity.unique_id
+
+    assign_compact_identity_entity_id(entity, "sensor")
+
+    assert entity.entity_id == f"sensor.n4_scb_10_{suffix}"
+    assert entity.unique_id == unique_id
+
+
+@pytest.mark.asyncio
+async def test_existing_custom_entity_id_is_kept_for_the_same_unique_id(
+    tmp_path, monkeypatch
+):
+    hass = HomeAssistant(str(tmp_path))
+    registry = EntityRegistry(hass)
+    registry.entities = EntityRegistryItems(hass)
+    registry._entities_data = registry.entities.data
+    registry.deleted_entities = {}
+    registry.settings = EntityRegistrySettings()
+    monkeypatch.setattr(registry, "async_schedule_save", lambda: None)
+    original = registry.async_get_or_create(
+        "sensor",
+        "openrbus",
+        "stable-openrbus-unique-id",
+        suggested_object_id="user_chosen_entity_name",
+    )
+
+    candidate = registry.async_get_or_create(
+        "sensor",
+        "openrbus",
+        "stable-openrbus-unique-id",
+        suggested_object_id="n4_scb_10_bm001_measured_buffer_tank_temperature",
+    )
+
+    assert original.entity_id == "sensor.user_chosen_entity_name"
+    assert candidate.entity_id == original.entity_id
+
+
+def test_unknown_dimensions_keep_the_exact_address_in_compact_entity_ids():
+    profile = ZoneProfile(4, 1, 1, short_name="SCB HK1", node_name="SCB-10")
+    parent = _parent(profile)
+    identity = _identity(family="SCB-10", node=4)
+    unknown = _register("CP999", 0x3404, 1, "Unknown zone row")
+
+    assert compact_entity_object_id(parent, identity, unknown) == (
+        "n4_scb_10_z1_scb_hk1_obj_3404_01_unknown_zone_row"
+    )
+    assert compact_entity_object_id(
+        parent, identity, _register("CP020", 0x3404, 0, "Zone function")
+    ) == ("n4_scb_10_obj_3404_00_zone_function")
+
+
+def test_unzoned_register_ids_include_node_model_and_exact_address():
+    register = _register(None, 0x2001, 2, "Device identity")
+    assert compact_entity_object_id(
+        _parent(), _identity(family="SCB-10", node=4), register
+    ) == ("n4_scb_10_obj_2001_02_device_identity")
+
+
+def test_zone_subdevice_name_uses_register_designation_model_node_and_slot():
+    profile = ZoneProfile(4, 1, 1, short_name="SCB HK1", node_name="SCB-10")
+    assert zone_subdevice_name(profile) == "SCB HK1 (SCB-10 (N4) - Zone 1)"
+
+
+def test_non_heating_subdevice_keeps_the_selected_language():
+    profile = ZoneProfile(4, 1, 6, short_name="TWW")
+    assert zone_subdevice_name(profile, "en") == zone_device_name(profile, "en")
 
 
 @pytest.mark.parametrize(

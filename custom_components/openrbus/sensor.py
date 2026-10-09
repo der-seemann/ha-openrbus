@@ -21,7 +21,11 @@ from openrbus.value_codec import CanOpenTimeOfDay
 from .bridge import GenericRead
 from .const import CONF_READ_ACCESS_LEVEL, DOMAIN
 from .coordinator import OpenRBusCoordinator, OpenRBusPollingCoordinator
-from .entity_names import suggested_object_id
+from .entity_names import (
+    assign_compact_entity_id,
+    assign_compact_identity_entity_id,
+    suggested_object_id,
+)
 from .hours_minutes import hours_minutes_to_text, is_clock_hours_minutes
 from .identity import stable_node_id, stable_object_id
 from .register_entities import (
@@ -42,11 +46,11 @@ from .register_entities import (
 from .zones import (
     function_selector_name,
     profile_for,
-    zone_device_name,
     zone_enabled,
     zone_is_active,
     zone_projection_exists,
     zone_read_state,
+    zone_subdevice_name,
     zone_subindex,
 )
 
@@ -136,20 +140,20 @@ async def async_setup_entry(
     for runtime_node in runtime_nodes:
         identity = getattr(runtime_node, "identity", runtime_node)
         if show_diagnostics and identity.device_code is not None:
-            entities.append(
-                OpenRBusIdentitySensor(
-                    coordinator, identity, "device_code", language=coordinator.language
-                )
+            entity = OpenRBusIdentitySensor(
+                coordinator, identity, "device_code", language=coordinator.language
             )
+            assign_compact_identity_entity_id(entity, "sensor")
+            entities.append(entity)
         if show_diagnostics and identity.parameter_number is not None:
-            entities.append(
-                OpenRBusIdentitySensor(
-                    coordinator,
-                    identity,
-                    "parameter_number",
-                    language=coordinator.language,
-                )
+            entity = OpenRBusIdentitySensor(
+                coordinator,
+                identity,
+                "parameter_number",
+                language=coordinator.language,
             )
+            assign_compact_identity_entity_id(entity, "sensor")
+            entities.append(entity)
     # Register every readable row, but let typed control platforms own rows
     # whose registry metadata proves a Number/Select/Switch projection.
     for identity, register, group, _poll_allowed in rows:
@@ -188,6 +192,8 @@ async def async_setup_entry(
                 ),
             )
         )
+    for entity in entities:
+        assign_compact_entity_id(entity, "sensor")
     async_add_entities(entities)
     restore_migrated_sensor_entities(hass, coordinator)
 
@@ -519,7 +525,7 @@ class OpenRBusRegisterSensor(
                 identifiers={
                     ("openrbus", f"{node_identifier}:zone:{profile.subindex}")
                 },
-                name=zone_device_name(profile, self._parent.language),
+                name=zone_subdevice_name(profile, self._parent.language),
                 manufacturer=getattr(self._identity, "manufacturer", None)
                 or "OpenRBus",
                 model=getattr(self._identity, "model", None)

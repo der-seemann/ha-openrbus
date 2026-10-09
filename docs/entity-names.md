@@ -37,7 +37,10 @@ as `Hzg`, `Temp.`, `Vorlauftemp.`, `Rücklauftemp.`, `Außentemp.`, `Sollw.`,
 `Abt.`, `Konf.`, `Betr.`, `TWWSp`, `TVorlauf`, `Trücklauf`, `Drehz`, `Ges.`,
 `Gel.`, and `Energieverbr.` for exact catalog codes. English slug expansion
 continues to use the earlier frozen code lists; these display changes do not
-change generated entity-ID suggestions or existing entity IDs.
+change the existing suggested-ID helper or existing entity IDs. The separate
+compact-ID candidate sets exact IDs at platform registration time for future
+registry entries; its schema, collision audit, and migration boundary are
+documented in [the dated candidate note](compact-entity-ids-2026-10-09.md).
 
 | Code | Address | HA German label |
 | --- | --- | --- |

@@ -808,6 +808,18 @@ def zone_device_name(profile: ZoneProfile, language: str = "de") -> str:
     return zone_display_name(profile, language)
 
 
+def zone_subdevice_name(profile: ZoneProfile, language: str = "de") -> str:
+    """Return the compact device label used for a discovered circuit child."""
+
+    if profile.kind is not ZoneKind.HEATING:
+        return zone_display_name(profile, language)
+    designation = (profile.friendly_name or profile.short_name or "").strip()
+    model = (profile.node_name or "OpenRBus").strip()
+    zone = max(1, profile.subindex)
+    label = designation or f"Zone {zone}"
+    return f"{label} ({model} (N{profile.node}) - Zone {zone})"
+
+
 __all__ = [
     "ZONE_FAMILY_SLOT_OBJECTS",
     "ZONE_FRIENDLY_NAME_INDEX",
@@ -837,5 +849,6 @@ __all__ = [
     "zone_projection_exists",
     "zone_projection_record",
     "zone_read_state",
+    "zone_subdevice_name",
     "zone_subindex",
 ]

@@ -62,13 +62,13 @@ from .zones import (
     override_key,
     profile_for,
     zone_association,
-    zone_device_name,
     zone_enabled,
     zone_is_active,
     zone_is_confirmed_disabled,
     zone_projection_exists,
     zone_projection_record,
     zone_read_state,
+    zone_subdevice_name,
     zone_subindex,
 )
 
@@ -2177,7 +2177,7 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
                 identifiers={
                     ("openrbus", f"{node_identifier}:zone:{profile.subindex}")
                 },
-                name=zone_device_name(profile, self._parent.language),
+                name=zone_subdevice_name(profile, self._parent.language),
                 manufacturer=getattr(self._identity, "manufacturer", None)
                 or "OpenRBus",
                 model=getattr(self._identity, "model", None)
