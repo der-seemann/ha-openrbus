@@ -12,6 +12,7 @@ from custom_components.openrbus.const import (
     CONF_COOLING_ENABLED,
     CONF_DIAGNOSTICS_ENABLED,
     CONF_GROUP_OVERRIDES,
+    CONF_HOLIDAY_ENABLED,
     CONF_NODE_OVERRIDES,
     CONF_SCREED_DRYING_ENABLED,
     DOMAIN,
@@ -1499,6 +1500,70 @@ def test_cascade_visibility_cleanup_and_user_disable_are_preserved(monkeypatch) 
     register_entities.async_apply_diagnostic_visibility(object(), parent)
     assert entity.disabled_by == "user"
     parent.config_entry.options[CONF_CASCADE_ENABLED] = True
+    register_entities.async_apply_diagnostic_visibility(object(), parent)
+    assert entity.disabled_by == "user"
+
+
+def test_holiday_visibility_cleanup_and_user_disable_are_preserved(monkeypatch) -> None:
+    entity = SimpleNamespace(
+        platform=DOMAIN,
+        config_entry_id="entry",
+        unique_id="holiday-row-stable-id",
+        entity_id="sensor.holiday_row",
+        disabled_by=None,
+    )
+
+    class Registry:
+        def __init__(self):
+            self.entities = {entity.entity_id: entity}
+
+        def async_update_entity(self, entity_id, **changes):
+            assert entity_id == entity.entity_id
+            entity.disabled_by = changes["disabled_by"]
+
+    monkeypatch.setattr(register_entities.er, "async_get", lambda _hass: Registry())
+    monkeypatch.setattr(
+        register_entities, "entity_unique_id", lambda *_args: entity.unique_id
+    )
+    row = _register("3421:00", levels=("User",), datatype="TIME_OF_DAY")
+    row.node = 1
+    row.writable = False
+    monkeypatch.setattr(register_entities, "catalog_for_node", lambda *_args: (row,))
+    monkeypatch.setattr(
+        register_entities,
+        "zone_association",
+        lambda *_args: register_entities.ZoneAssociation.NOT_ZONE,
+    )
+    parent = SimpleNamespace(
+        config_entry=SimpleNamespace(
+            entry_id="entry",
+            data={"ble_device": "00:11:22:33:44:55"},
+            options={},
+        ),
+        inventories=(SimpleNamespace(identity=SimpleNamespace(node=1)),),
+        devices=(),
+        language="en",
+        effective_access_levels={1: 1},
+        configured_access_level=1,
+        write_enabled=False,
+    )
+
+    assert register_entities.rows_for_parent(parent) == ()
+    register_entities.async_apply_diagnostic_visibility(object(), parent)
+    assert entity.disabled_by == "integration"
+
+    parent.config_entry.options[CONF_HOLIDAY_ENABLED] = True
+    assert len(register_entities.rows_for_parent(parent)) == 1
+    register_entities.async_apply_diagnostic_visibility(object(), parent)
+    assert entity.disabled_by is None
+    assert entity.unique_id == "holiday-row-stable-id"
+
+    entity.disabled_by = "user"
+    parent.config_entry.options[CONF_HOLIDAY_ENABLED] = False
+    assert register_entities.rows_for_parent(parent) == ()
+    register_entities.async_apply_diagnostic_visibility(object(), parent)
+    assert entity.disabled_by == "user"
+    parent.config_entry.options[CONF_HOLIDAY_ENABLED] = True
     register_entities.async_apply_diagnostic_visibility(object(), parent)
     assert entity.disabled_by == "user"
 

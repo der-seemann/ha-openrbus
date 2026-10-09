@@ -54,7 +54,8 @@
           "flow_action": "Navigation",
           "cooling_enabled": "Kühlfunktionen aktivieren",
           "experimental_writes": "Laut OBD schreibbare Register ohne bestätigten RW-Quellennachweis als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt.",
-          "cascade_enabled": "Kaskadenfunktionen aktivieren"
+          "cascade_enabled": "Kaskadenfunktionen aktivieren",
+          "holiday_enabled": "Ferienfunktionen anzeigen"
         },
         "data_description": {
           "read_access_level": "Schieberegler: 1 Benutzer, 2 Installateur, 3 Fachhandwerker. Die gespeicherte Stufe ist vorausgewählt.",
@@ -64,7 +65,8 @@
           "screed_drying_enabled": "Fügt Entitäten für das Estrichtrocknungsprogramm hinzu, sofern der Regler diese bereitstellt.",
           "cooling_enabled": "Register aus der geprüften Funktionszuordnung Kühlung anzeigen. Ist die Option aus, werden genau diese Register vor Auswahl und Entitätserzeugung ausgeschlossen.",
           "experimental_writes": "Laut OBD schreibbare Register ohne bestätigten RW-Quellennachweis als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt.",
-          "cascade_enabled": "Zusätzliche Einstellungen und Statuswerte für Anlagen anzeigen, in denen mehrere Wärmeerzeuger gemeinsam geregelt werden. Für Kaskaden-Kühlfunktionen muss auch Kühlbetrieb aktiviert sein."
+          "cascade_enabled": "Zusätzliche Einstellungen und Statuswerte für Anlagen anzeigen, in denen mehrere Wärmeerzeuger gemeinsam geregelt werden. Für Kaskaden-Kühlfunktionen muss auch Kühlbetrieb aktiviert sein.",
+          "holiday_enabled": "Zeigt Einstellungen für Ferienzeiten und Ferientemperaturen, sofern der Regler sie bereitstellt."
         }
       },
       "access_warning": {
@@ -152,7 +154,8 @@
           "cooling_enabled": "Kühlfunktionen aktivieren",
           "_openrbus_entity_picker": "Entitätsauswahl konfigurieren",
           "experimental_writes": "Laut OBD schreibbare Register ohne bestätigten RW-Quellennachweis als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt.",
-          "cascade_enabled": "Kaskadenfunktionen aktivieren"
+          "cascade_enabled": "Kaskadenfunktionen aktivieren",
+          "holiday_enabled": "Ferienfunktionen anzeigen"
         },
         "data_description": {
           "language": "Legt die Sprache für Namen und Beschreibungen der Entitäten fest.",
@@ -173,7 +176,8 @@
           "cooling_enabled": "Register aus der geprüften Funktionszuordnung Kühlung anzeigen. Ist die Option aus, werden genau diese Register vor Auswahl und Entitätserzeugung ausgeschlossen.",
           "_openrbus_entity_picker": "Dreistufige Auswahl öffnen: Gerät, Kategorie, Entitäten. Vorhandene Entitätskennungen und gespeicherte Auswahl bleiben erhalten.",
           "experimental_writes": "Laut OBD schreibbare Register ohne bestätigten RW-Quellennachweis als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt.",
-          "cascade_enabled": "Zusätzliche Einstellungen und Statuswerte für Anlagen anzeigen, in denen mehrere Wärmeerzeuger gemeinsam geregelt werden. Für Kaskaden-Kühlfunktionen muss auch Kühlbetrieb aktiviert sein."
+          "cascade_enabled": "Zusätzliche Einstellungen und Statuswerte für Anlagen anzeigen, in denen mehrere Wärmeerzeuger gemeinsam geregelt werden. Für Kaskaden-Kühlfunktionen muss auch Kühlbetrieb aktiviert sein.",
+          "holiday_enabled": "Zeigt Einstellungen für Ferienzeiten und Ferientemperaturen, sofern der Regler sie bereitstellt."
         },
         "description": "Kein passender Bluetooth-Adapter in Reichweite? [ESP-Proxy einrichten]({esphome_proxy_setup_url})."
       },

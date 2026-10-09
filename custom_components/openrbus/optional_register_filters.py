@@ -13,6 +13,16 @@ def _addresses(*values: str) -> frozenset[ObjectAddress]:
     return frozenset(ObjectAddress.parse(value) for value in values)
 
 
+_HOLIDAY = _addresses(
+    "340a:00",
+    "3421:00",
+    "3422:00",
+    "3427:00",
+    "365e:00",
+    "365f:00",
+    "3675:00",
+)
+
 _COOLING = _addresses(
     "2303:00",
     "234f:00",
@@ -306,8 +316,9 @@ OPTIONAL_REGISTER_FILTERS: dict[ObjectAddress, frozenset[str]] = {
             ("cooling", _COOLING),
             ("screed", _SCREED),
             ("cascade", _CASCADE),
+            ("holiday", _HOLIDAY),
         )
         if address in addresses
     )
-    for address in _COOLING | _SCREED | _CASCADE
+    for address in _COOLING | _SCREED | _CASCADE | _HOLIDAY
 }

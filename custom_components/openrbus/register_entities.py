@@ -32,11 +32,13 @@ from .const import (
     CONF_COOLING_ENABLED,
     CONF_DIAGNOSTICS_ENABLED,
     CONF_GROUP_OVERRIDES,
+    CONF_HOLIDAY_ENABLED,
     CONF_NODE_OVERRIDES,
     CONF_SCREED_DRYING_ENABLED,
     CONF_ZONE_OVERRIDES,
     DEFAULT_CASCADE_ENABLED,
     DEFAULT_COOLING_ENABLED,
+    DEFAULT_HOLIDAY_ENABLED,
     DOMAIN,
 )
 from .coordinator import (
@@ -254,6 +256,14 @@ def cascade_enabled(parent: OpenRBusCoordinator) -> bool:
     return bool(configured.get(CONF_CASCADE_ENABLED, DEFAULT_CASCADE_ENABLED))
 
 
+def holiday_enabled(parent: OpenRBusCoordinator) -> bool:
+    """Return the explicit parent-level holiday projection preference."""
+
+    configured = dict(getattr(parent.config_entry, "data", {}) or {})
+    configured.update(getattr(parent.config_entry, "options", {}) or {})
+    return bool(configured.get(CONF_HOLIDAY_ENABLED, DEFAULT_HOLIDAY_ENABLED))
+
+
 def optional_register_memberships(
     register: RegisterCatalogEntry,
 ) -> frozenset[str]:
@@ -321,6 +331,12 @@ def is_cascade_register(register: RegisterCatalogEntry) -> bool:
     return "cascade" in optional_register_memberships(register)
 
 
+def is_holiday_register(register: RegisterCatalogEntry) -> bool:
+    """Return whether the exact reviewed map classifies a holiday row."""
+
+    return "holiday" in optional_register_memberships(register)
+
+
 def is_optional_filter_register(
     parent: OpenRBusCoordinator,
     identity: DeviceIdentity,
@@ -339,6 +355,7 @@ def rows_for_parent(
     include_screed_drying: bool | None = None,
     include_cooling: bool | None = None,
     include_cascade: bool | None = None,
+    include_holiday: bool | None = None,
 ) -> tuple[tuple[DeviceIdentity, RegisterCatalogEntry, str, bool], ...]:
     """Project all known rows and their poll eligibility for this entry."""
 
@@ -363,6 +380,8 @@ def rows_for_parent(
         include_cooling = cooling_enabled(parent)
     if include_cascade is None:
         include_cascade = cascade_enabled(parent)
+    if include_holiday is None:
+        include_holiday = holiday_enabled(parent)
     rows: list[tuple[DeviceIdentity, RegisterCatalogEntry, str, bool]] = []
     for runtime_node in runtime_nodes(parent):
         identity = identity_for_runtime(runtime_node)
@@ -426,6 +445,10 @@ def rows_for_parent(
                 continue
             if not include_cascade and is_optional_filter_register(
                 parent, identity, register, "cascade"
+            ):
+                continue
+            if not include_holiday and is_optional_filter_register(
+                parent, identity, register, "holiday"
             ):
                 continue
             rows.append(
@@ -506,6 +529,7 @@ def _poll_selection_filter_counts(
         "screed_filtered": 0,
         "cooling_filtered": 0,
         "cascade_filtered": 0,
+        "holiday_filtered": 0,
         "rows_after_optional_filters": len(rows),
     }
     for _identity, register, _group, _allowed in complete_rows:
@@ -517,6 +541,8 @@ def _poll_selection_filter_counts(
             counts["cooling_filtered"] += 1
         if not cascade_enabled(parent) and is_cascade_register(register):
             counts["cascade_filtered"] += 1
+        if not holiday_enabled(parent) and is_holiday_register(register):
+            counts["holiday_filtered"] += 1
     return counts
 
 
@@ -653,6 +679,8 @@ def entity_group_key(
         base = f"node:{node}:optional:cooling"
     elif is_optional_filter_register(parent, identity, register, "cascade"):
         base = f"node:{node}:optional:cascade"
+    elif is_optional_filter_register(parent, identity, register, "holiday"):
+        base = f"node:{node}:optional:holiday"
     else:
         slot = zone_subindex(register, identity)
         if slot is not None:
@@ -988,6 +1016,7 @@ def async_apply_entity_overrides(
         include_screed_drying=True,
         include_cooling=True,
         include_cascade=True,
+        include_holiday=True,
     ):
         uid = entity_unique_id(parent, identity, register)
         rows_by_uid[uid] = (identity, register)
@@ -1016,6 +1045,10 @@ def async_apply_entity_overrides(
             and (
                 not is_optional_filter_register(parent, identity, register, "cascade")
                 or cascade_enabled(parent)
+            )
+            and (
+                not is_optional_filter_register(parent, identity, register, "holiday")
+                or holiday_enabled(parent)
             )
         )
         safe[uid] = bool(
@@ -1136,6 +1169,7 @@ def async_apply_diagnostic_visibility(
     screed_drying_visible = screed_drying_enabled(parent)
     cooling_visible = cooling_enabled(parent)
     cascade_visible = cascade_enabled(parent)
+    holiday_visible = holiday_enabled(parent)
     permitted: dict[str, bool] = {}
     visibility: dict[str, bool] = {}
     row_policies: dict[str, tuple[DeviceIdentity, RegisterCatalogEntry, bool]] = {}
@@ -1159,6 +1193,7 @@ def async_apply_diagnostic_visibility(
         include_screed_drying=True,
         include_cooling=True,
         include_cascade=True,
+        include_holiday=True,
     ):
         diagnostic = is_diagnostic_register(register)
         screed_drying = is_optional_filter_register(
@@ -1166,7 +1201,14 @@ def async_apply_diagnostic_visibility(
         )
         cooling = is_optional_filter_register(parent, identity, register, "cooling")
         cascade = is_optional_filter_register(parent, identity, register, "cascade")
-        if not diagnostic and not screed_drying and not cooling and not cascade:
+        holiday = is_optional_filter_register(parent, identity, register, "holiday")
+        if (
+            not diagnostic
+            and not screed_drying
+            and not cooling
+            and not cascade
+            and not holiday
+        ):
             continue
         unique_id = entity_unique_id(parent, identity, register)
         read_safe = bool(allowed and zone_row_enabled(parent, identity, register))
@@ -1190,6 +1232,7 @@ def async_apply_diagnostic_visibility(
             and (not screed_drying or screed_drying_visible)
             and (not cooling or cooling_visible)
             and (not cascade or cascade_visible)
+            and (not holiday or holiday_visible)
         )
         if structure is not None:
             for field in structure.fields:
@@ -1244,6 +1287,7 @@ def ensure_polling_coordinators(
         include_screed_drying=True,
         include_cooling=True,
         include_cascade=True,
+        include_holiday=True,
     )
     rows = rows_for_parent(parent)
     selection_counts = {

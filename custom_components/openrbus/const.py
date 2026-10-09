@@ -49,6 +49,8 @@ CONF_COOLING_ENABLED = "cooling_enabled"
 DEFAULT_COOLING_ENABLED = False
 CONF_CASCADE_ENABLED = "cascade_enabled"
 DEFAULT_CASCADE_ENABLED = False
+CONF_HOLIDAY_ENABLED = "holiday_enabled"
+DEFAULT_HOLIDAY_ENABLED = False
 # Explicit zone selection is intentionally separate from HA's entity-registry
 # disable state: it controls whether a discovered inactive zone is projected
 # and polled at all.  Keys are stable ``<node>:<zone-array-subindex>`` values.

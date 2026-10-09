@@ -42,6 +42,7 @@ from custom_components.openrbus.const import (
     CONF_COOLING_ENABLED,
     CONF_DIAGNOSTICS_ENABLED,
     CONF_FLOW_ACTION,
+    CONF_HOLIDAY_ENABLED,
     CONF_PASSKEY,
     CONF_READ_ACCESS_LEVEL,
     CONF_SCREED_DRYING_ENABLED,
@@ -199,6 +200,7 @@ async def test_options_form_reopens_independent_read_and_no_write_levels(
     assert defaults[CONF_WRITE_ACCESS_LEVEL] == 0
     assert defaults[config_flow_module.CONF_COOLING_ENABLED] is False
     assert defaults[CONF_CASCADE_ENABLED] is False
+    assert defaults[CONF_HOLIDAY_ENABLED] is False
 
     selectors = {
         marker.schema: validator
@@ -269,6 +271,7 @@ async def test_access_level_change_saves_and_reopens_without_policy_drift(
             CONF_WRITE_ACCESS_LEVEL: 0,
             CONF_ACCESS_ACK: True,
             CONF_AUTH_KEY: "abcdef12",
+            CONF_HOLIDAY_ENABLED: True,
         }
     )
     monkeypatch.setattr(
@@ -279,6 +282,7 @@ async def test_access_level_change_saves_and_reopens_without_policy_drift(
     saved = await flow.async_step_init(submitted)
     assert saved["data"][CONF_READ_ACCESS_LEVEL] == 3
     assert saved["data"][CONF_WRITE_ACCESS_LEVEL] == 0
+    assert saved["data"][CONF_HOLIDAY_ENABLED] is True
 
     entry.options.update(saved["data"])
     reopened = await OpenRBusOptionsFlowHandler(entry).async_step_init()
@@ -289,6 +293,12 @@ async def test_access_level_change_saves_and_reopens_without_policy_drift(
         in {CONF_READ_ACCESS_LEVEL, CONF_WRITE_ACCESS_LEVEL}
     }
     assert defaults == {CONF_READ_ACCESS_LEVEL: 3, CONF_WRITE_ACCESS_LEVEL: 0}
+    holiday_marker = next(
+        marker
+        for marker in reopened["data_schema"].schema
+        if getattr(marker, "schema", None) == CONF_HOLIDAY_ENABLED
+    )
+    assert holiday_marker.default() is True
 
 
 @pytest.mark.asyncio
@@ -304,6 +314,11 @@ async def test_setup_access_levels_are_discrete_numeric_sliders() -> None:
         for marker in result["data_schema"].schema
         if getattr(marker, "schema", None) == CONF_CASCADE_ENABLED
     )
+    holiday_marker = next(
+        marker
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None) == CONF_HOLIDAY_ENABLED
+    )
     fields = {
         marker.schema: (marker, validator)
         for marker, validator in result["data_schema"].schema.items()
@@ -314,6 +329,7 @@ async def test_setup_access_levels_are_discrete_numeric_sliders() -> None:
     assert fields[CONF_READ_ACCESS_LEVEL][0].default() == 2
     assert fields[CONF_WRITE_ACCESS_LEVEL][0].default() == 0
     assert cascade_marker.default() is False
+    assert holiday_marker.default() is False
     assert fields[CONF_READ_ACCESS_LEVEL][1].config["step"] == 1.0
     assert fields[CONF_WRITE_ACCESS_LEVEL][1].config["step"] == 1.0
 
@@ -547,6 +563,12 @@ async def test_options_form_defaults_screed_drying_to_off_and_preserves_it(
         if getattr(marker, "schema", None) == CONF_CASCADE_ENABLED
     )
     assert cascade_marker.default() is False
+    holiday_marker = next(
+        marker
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None) == CONF_HOLIDAY_ENABLED
+    )
+    assert holiday_marker.default() is False
 
     entry.options = {CONF_SCREED_DRYING_ENABLED: True}
     result = await OpenRBusOptionsFlowHandler(entry).async_step_init()
@@ -556,6 +578,14 @@ async def test_options_form_defaults_screed_drying_to_off_and_preserves_it(
         if getattr(marker, "schema", None) == CONF_SCREED_DRYING_ENABLED
     )
     assert marker.default() is True
+    entry.options[CONF_HOLIDAY_ENABLED] = True
+    result = await OpenRBusOptionsFlowHandler(entry).async_step_init()
+    holiday_marker = next(
+        marker
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None) == CONF_HOLIDAY_ENABLED
+    )
+    assert holiday_marker.default() is True
     cooling_marker = next(
         marker
         for marker in result["data_schema"].schema

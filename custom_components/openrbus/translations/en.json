@@ -53,7 +53,8 @@
           "flow_action": "Navigation",
           "cooling_enabled": "Enable cooling functions",
           "experimental_writes": "Expose OBD-declared writable registers without qualifying RW source evidence as experimental controls. Requires write access to be enabled; these registers are not confirmed as regular writable parameters.",
-          "cascade_enabled": "Enable cascade functions"
+          "cascade_enabled": "Enable cascade functions",
+          "holiday_enabled": "Show holiday functions"
         },
         "data_description": {
           "read_access_level": "Slider: 1 User, 2 Installer, 3 Professional. The saved level is selected.",
@@ -63,7 +64,8 @@
           "screed_drying_enabled": "Add entities for the screed-drying program when the controller provides them.",
           "cooling_enabled": "Include registers in the reviewed cooling-function map. When disabled, those exact registers are excluded before entity selection and creation.",
           "experimental_writes": "Expose OBD-declared writable registers without qualifying RW source evidence as experimental controls. Requires write access to be enabled; these registers are not confirmed as regular writable parameters.",
-          "cascade_enabled": "Show additional settings and status values for installations with multiple heat producers controlled together. To show cascade cooling functions, also enable cooling."
+          "cascade_enabled": "Show additional settings and status values for installations with multiple heat producers controlled together. To show cascade cooling functions, also enable cooling.",
+          "holiday_enabled": "Show holiday schedule and temperature settings when the controller provides them."
         },
         "description": "Choose independent read and write access policies. A higher read policy does not enable writes."
       },
@@ -152,7 +154,8 @@
           "cooling_enabled": "Enable cooling functions",
           "_openrbus_entity_picker": "Configure entity selection",
           "experimental_writes": "Expose OBD-declared writable registers without qualifying RW source evidence as experimental controls. Requires write access to be enabled; these registers are not confirmed as regular writable parameters.",
-          "cascade_enabled": "Enable cascade functions"
+          "cascade_enabled": "Enable cascade functions",
+          "holiday_enabled": "Show holiday functions"
         },
         "data_description": {
           "language": "Choose the language used for entity names and descriptions.",
@@ -173,7 +176,8 @@
           "cooling_enabled": "Include registers in the reviewed cooling-function map. When disabled, those exact registers are excluded before entity selection and creation.",
           "_openrbus_entity_picker": "Open the three-step selector: Device, Category, then Entities. Existing entity identities and saved choices are retained.",
           "experimental_writes": "Expose OBD-declared writable registers without qualifying RW source evidence as experimental controls. Requires write access to be enabled; these registers are not confirmed as regular writable parameters.",
-          "cascade_enabled": "Show additional settings and status values for installations with multiple heat producers controlled together. To show cascade cooling functions, also enable cooling."
+          "cascade_enabled": "Show additional settings and status values for installations with multiple heat producers controlled together. To show cascade cooling functions, also enable cooling.",
+          "holiday_enabled": "Show holiday schedule and temperature settings when the controller provides them."
         },
         "description": "No suitable Bluetooth adapter nearby? [Set up an ESP proxy]({esphome_proxy_setup_url})."
       },

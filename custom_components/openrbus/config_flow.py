@@ -40,6 +40,7 @@ from .const import (
     CONF_EXPERIMENTAL_WRITES,
     CONF_FLOW_ACTION,
     CONF_GROUP_OVERRIDES,
+    CONF_HOLIDAY_ENABLED,
     CONF_INVALID_VALUE_DISABLE_AFTER,
     CONF_LANGUAGE,
     CONF_NODE_OVERRIDES,
@@ -67,6 +68,7 @@ from .const import (
     DEFAULT_COOLING_ENABLED,
     DEFAULT_DIAGNOSTICS_ENABLED,
     DEFAULT_EXPERIMENTAL_WRITES,
+    DEFAULT_HOLIDAY_ENABLED,
     DEFAULT_INVALID_VALUE_DISABLE_AFTER,
     DEFAULT_LANGUAGE,
     DEFAULT_POLL_INTERVALS,
@@ -831,6 +833,12 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                                 CONF_CASCADE_ENABLED, DEFAULT_CASCADE_ENABLED
                             ),
                         ): cv.boolean,
+                        vol.Required(
+                            CONF_HOLIDAY_ENABLED,
+                            default=pending.get(
+                                CONF_HOLIDAY_ENABLED, DEFAULT_HOLIDAY_ENABLED
+                            ),
+                        ): cv.boolean,
                     }
                 ),
             )
@@ -1068,6 +1076,9 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_CASCADE_ENABLED: bool(
                         user_input.get(CONF_CASCADE_ENABLED, DEFAULT_CASCADE_ENABLED)
                     ),
+                    CONF_HOLIDAY_ENABLED: bool(
+                        user_input.get(CONF_HOLIDAY_ENABLED, DEFAULT_HOLIDAY_ENABLED)
+                    ),
                     CONF_POLL_FAST: int(
                         user_input.get(
                             CONF_POLL_FAST, DEFAULT_POLL_INTERVALS[CONF_POLL_FAST]
@@ -1232,6 +1243,9 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             include_cascade=bool(
                 preferences.get(CONF_CASCADE_ENABLED, DEFAULT_CASCADE_ENABLED)
             ),
+            include_holiday=bool(
+                preferences.get(CONF_HOLIDAY_ENABLED, DEFAULT_HOLIDAY_ENABLED)
+            ),
         ):
             if (
                 not allowed
@@ -1306,6 +1320,7 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
         configured.update(getattr(self, "_entity_picker_pending", {}) or {})
         cooling = bool(configured.get(CONF_COOLING_ENABLED, DEFAULT_COOLING_ENABLED))
         cascade = bool(configured.get(CONF_CASCADE_ENABLED, DEFAULT_CASCADE_ENABLED))
+        holiday = bool(configured.get(CONF_HOLIDAY_ENABLED, DEFAULT_HOLIDAY_ENABLED))
         rows = rows_for_parent(
             runtime,
             include_diagnostics=bool(
@@ -1318,6 +1333,7 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             ),
             include_cooling=cooling,
             include_cascade=cascade,
+            include_holiday=holiday,
         )
         groups: dict[str, dict[str, Any]] = {}
         for identity, register, _poll_group, allowed in rows:
@@ -1452,6 +1468,7 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                 include_screed_drying=True,
                 include_cooling=True,
                 include_cascade=True,
+                include_holiday=True,
             )
             if allowed
         }
@@ -2004,6 +2021,10 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             vol.Required(
                 CONF_CASCADE_ENABLED,
                 default=current.get(CONF_CASCADE_ENABLED, DEFAULT_CASCADE_ENABLED),
+            ): cv.boolean,
+            vol.Required(
+                CONF_HOLIDAY_ENABLED,
+                default=current.get(CONF_HOLIDAY_ENABLED, DEFAULT_HOLIDAY_ENABLED),
             ): cv.boolean,
             vol.Required(
                 CONF_BLE_DEVICE,
