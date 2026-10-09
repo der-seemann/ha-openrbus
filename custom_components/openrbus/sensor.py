@@ -33,6 +33,7 @@ from .register_entities import (
     entity_enabled_by_default,
     entity_unique_id,
     entity_zone_label,
+    enum_options,
     register_name,
     restore_migrated_sensor_entities,
     rows_for_parent,
@@ -50,6 +51,51 @@ from .zones import (
 )
 
 _CATALOG_REGISTRY = Registry.load_default()
+
+
+def _enum_sensor_options(register, language: str) -> dict[int, str]:
+    """Return labels only for a type-consistent scalar or valid array item."""
+
+    address = getattr(register, "address", None)
+    if address is None:
+        return {}
+    definition = _CATALOG_REGISTRY.find(address)
+    wire = getattr(definition, "wire", None)
+    wire_type = getattr(wire, "type", None)
+    storage = getattr(wire, "storage", None)
+    if (
+        definition is None
+        or getattr(register, "internal_code", None) != definition.code
+        or getattr(register, "datatype", None) != "ENUMERATION"
+        or str(getattr(wire_type, "value", wire_type)) != "ENUMERATION"
+        or getattr(register, "storage", None) != str(getattr(storage, "value", storage))
+        or getattr(register, "unit", None) is not None
+        or getattr(wire, "unit", None) is not None
+        or getattr(getattr(definition, "evidence", None), "type_conflict", False)
+    ):
+        return {}
+
+    if wire.is_array:
+        if (
+            definition.address.subindex != 0
+            or address.index != definition.address.index
+            or not 1 <= address.subindex <= (wire.max_items or 0)
+        ):
+            return {}
+    elif address != definition.address:
+        return {}
+
+    return dict(enum_options(register, language))
+
+
+def _enum_sensor_native_value(register, value: Any, language: str) -> Any:
+    """Show a catalog-labelled enum value as text while preserving unknowns."""
+
+    # ``bool`` is an ``int`` subclass, but it is not a decoded CANopen enum
+    # value. Keep it and every non-integer payload unchanged.
+    if type(value) is not int:
+        return value
+    return _enum_sensor_options(register, language).get(value, value)
 
 
 async def async_setup_entry(
@@ -391,10 +437,14 @@ class OpenRBusRegisterSensor(
             self._attr_name = selector_name
         elif zone_label := entity_zone_label(parent, identity, register):
             self._attr_name = f"{zone_label} — {self._attr_name}"
-        if register.datatype == "TIME_OF_DAY" or is_clock_hours_minutes(register):
-            # HA has no time-only sensor device class/native value, so publish
-            # a stable clock string. Keep the standardized protocol date
-            # separately; it has no timezone semantics and is not a timestamp.
+        if (
+            register.datatype == "TIME_OF_DAY"
+            or is_clock_hours_minutes(register)
+            or _enum_sensor_options(register, language)
+        ):
+            # Clock strings and catalog-labelled enum states are text values,
+            # so keep them unitless. Preserve protocol dates separately; they
+            # have no timezone semantics and are not timestamps.
             self._attr_native_unit_of_measurement = None
         else:
             self._attr_native_unit_of_measurement = register.unit
@@ -414,7 +464,7 @@ class OpenRBusRegisterSensor(
             return _time_of_day_native_value(result.value)
         if is_clock_hours_minutes(self._register):
             return hours_minutes_to_text(result.value)
-        return result.value
+        return _enum_sensor_native_value(self._register, result.value, self._language)
 
     @property
     def available(self) -> bool:
@@ -518,9 +568,7 @@ class OpenRBusRegisterSensor(
             if isinstance(self._result, GenericRead)
             else "",
             "raw_numeric_value": self._result.value
-            if isinstance(self._result, GenericRead)
-            and is_clock_hours_minutes(register)
-            and type(self._result.value) is int
+            if isinstance(self._result, GenericRead) and type(self._result.value) is int
             else None,
             "formatted_time": hours_minutes_to_text(self._result.value)
             if isinstance(self._result, GenericRead)

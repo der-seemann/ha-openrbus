@@ -131,6 +131,42 @@ _REGISTER_NAMES_DE = {
     "HP180": "Externer Drucksensor",
 }
 
+# Exact-address expansions for manufacturer entries with no parameter code or
+# with an abbreviated German short label. The expected source label prevents
+# stale catalog rows from receiving an unrelated override.
+_REGISTER_NAMES_DE_BY_ADDRESS = {
+    "2001:0d": (
+        None,
+        "Konfig. Tabellenver.",
+        "Version der Gerätekonfigurationstabelle",
+        "UINT16",
+        "UINT16",
+        None,
+        False,
+    ),
+    "4356:00": (
+        None,
+        "AE-Schutzfunktionen",
+        "Schutzfunktionen der Außeneinheit der Wärmepumpe",
+        "UINT8",
+        "UINT8",
+        None,
+        False,
+    ),
+}
+
+_REGISTER_ARRAY_NAMES_DE = {
+    0x3811: (
+        "EP046",
+        "Fktauswahl dig. Eing",
+        "Auswahl der Funktion des Digitaleingangs",
+        "ENUMERATION",
+        "UINT8",
+        "InputDigitalConfiguration",
+        10,
+    ),
+}
+
 # Concise English slugs for the same reviewed code/address set. These expand
 # awkward source labels for new HA entity IDs; all other IDs use Core's
 # localized English short label.
@@ -786,6 +822,71 @@ def register_display_name(register: Any, language: str) -> str | None:
 
     code = getattr(register, "internal_code", None)
     address = getattr(register, "address", None)
+    if language == "de" and address is not None:
+        array_name = _REGISTER_ARRAY_NAMES_DE.get(address.index)
+        if array_name is not None and 1 <= address.subindex:
+            (
+                expected_code,
+                source_label,
+                reviewed,
+                expected_type,
+                expected_storage,
+                expected_enum,
+                expected_max_items,
+            ) = array_name
+            definition = _REGISTRY.find(address)
+            wire = getattr(definition, "wire", None)
+            wire_type = getattr(wire, "type", None)
+            storage = getattr(wire, "storage", None)
+            if (
+                definition is not None
+                and definition.address.index == address.index
+                and definition.address.subindex == 0
+                and definition.code == expected_code
+                and code == expected_code
+                and getattr(register, "name_de", None) == source_label
+                and getattr(register, "datatype", None) == expected_type
+                and str(getattr(wire_type, "value", wire_type)) == expected_type
+                and getattr(register, "storage", None) == expected_storage
+                and str(getattr(storage, "value", storage)) == expected_storage
+                and getattr(wire, "enum_name", None) == expected_enum
+                and getattr(wire, "is_array", None) is True
+                and getattr(wire, "max_items", None) == expected_max_items
+                and address.subindex <= expected_max_items
+            ):
+                return reviewed
+        if array_name is not None and address.subindex == 0:
+            # CANopen :00 is the array count object, not a concrete selector.
+            return None
+
+        reviewed_at_address = _REGISTER_NAMES_DE_BY_ADDRESS.get(str(address))
+        if reviewed_at_address is not None:
+            (
+                expected_code,
+                source_label,
+                reviewed,
+                expected_type,
+                expected_storage,
+                expected_enum,
+                expected_array,
+            ) = reviewed_at_address
+            definition = _REGISTRY.find(address)
+            wire = getattr(definition, "wire", None)
+            wire_type = getattr(wire, "type", None)
+            storage = getattr(wire, "storage", None)
+            if (
+                definition is not None
+                and definition.code == expected_code
+                and code == expected_code
+                and getattr(register, "name_de", None) == source_label
+                and getattr(register, "datatype", None) == expected_type
+                and str(getattr(wire_type, "value", wire_type)) == expected_type
+                and getattr(register, "storage", None) == expected_storage
+                and str(getattr(storage, "value", storage)) == expected_storage
+                and getattr(wire, "enum_name", None) == expected_enum
+                and getattr(wire, "is_array", None) is expected_array
+            ):
+                return reviewed
     if not isinstance(code, str) or address is None:
         return None
     definition = _REGISTRY.find(address)

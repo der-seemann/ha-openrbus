@@ -1,9 +1,12 @@
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import slugify
+from openrbus.catalog import catalog_for_node
+from openrbus.discovery import DeviceIdentity, resolve_device_identity
 from openrbus.protocol.canip import ObjectAddress
 from openrbus.registry import Registry
 
@@ -98,6 +101,81 @@ def test_reviewed_german_names_use_exact_parameter_codes() -> None:
         is None
     )
     assert register_display_name(_register("CP999", 0x346A, 0, "Unknown"), "de") is None
+
+
+@pytest.mark.parametrize(
+    (
+        "address",
+        "code",
+        "source_name",
+        "datatype",
+        "storage",
+        "wrong_storage",
+        "expected",
+    ),
+    [
+        (
+            "2001:0d",
+            None,
+            "Konfig. Tabellenver.",
+            "UINT16",
+            "UINT16",
+            "UINT8",
+            "Version der Gerätekonfigurationstabelle",
+        ),
+        (
+            "4356:00",
+            None,
+            "AE-Schutzfunktionen",
+            "UINT8",
+            "UINT8",
+            "UINT16",
+            "Schutzfunktionen der Außeneinheit der Wärmepumpe",
+        ),
+    ],
+)
+def test_exact_address_names_expand_only_matching_catalog_rows(
+    address, code, source_name, datatype, storage, wrong_storage, expected
+) -> None:
+    register = SimpleNamespace(
+        internal_code=code,
+        address=ObjectAddress.parse(address),
+        name_de=source_name,
+        datatype=datatype,
+        storage=storage,
+    )
+
+    assert register_display_name(register, "de") == expected
+    register.datatype = "UINT8" if datatype != "UINT8" else "ENUMERATION"
+    assert register_display_name(register, "de") is None
+    register.datatype = datatype
+    register.storage = wrong_storage
+    assert register_display_name(register, "de") is None
+
+
+def test_input_function_name_only_expands_bounded_array_elements() -> None:
+    identity = resolve_device_identity(
+        DeviceIdentity(4, None, None, "SCB-10", family="Scb-10")
+    )
+    head = next(
+        row
+        for row in catalog_for_node(identity)
+        if row.address == ObjectAddress.parse("3811:00")
+    )
+
+    assert register_display_name(head, "de") is None
+    for subindex in (1, 6, 10):
+        child = replace(head, index=0x3811, subindex=subindex)
+        assert register_display_name(child, "de") == (
+            "Auswahl der Funktion des Digitaleingangs"
+        )
+
+    overflow = replace(head, index=0x3811, subindex=11)
+    assert register_display_name(overflow, "de") is None
+    assert register_display_name(replace(head, datatype="UINT8"), "de") is None
+    assert register_display_name(replace(head, storage="UINT16"), "de") is None
+    assert register_display_name(replace(head, internal_code=None), "de") is None
+    assert register_display_name(replace(head, name_de="Other"), "de") is None
 
 
 @pytest.mark.parametrize(

@@ -1,18 +1,22 @@
 """Focused HA catalog-to-entity projection tests."""
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 from openrbus.catalog import catalog_for_node
 from openrbus.discovery import DeviceIdentity, resolve_device_identity
 from openrbus.protocol.canip import ObjectAddress
 from openrbus.value_codec import CanOpenTimeOfDay
 
+from custom_components.openrbus import sensor as sensor_module
+from custom_components.openrbus.bridge import GenericRead
 from custom_components.openrbus.register_entities import (
     control_kind,
     entity_unique_id,
     should_project_as_control,
 )
 from custom_components.openrbus.sensor import (
+    OpenRBusRegisterSensor,
     _catalog_visible,
     _time_of_day_native_value,
 )
@@ -63,6 +67,154 @@ def test_canopen_time_projects_clock_text_and_standardized_date() -> None:
         milliseconds=milliseconds, days=42
     ).protocol_date.isoformat()
     assert protocol_date == "1984-02-12"
+
+
+def _register_sensor(identity, register, value, language: str = "de"):
+    raw_value = bytes([value]) if type(value) is int else b""
+    coordinator = SimpleNamespace(
+        group="standard",
+        data={
+            (identity.node, register.address): GenericRead(
+                identity.node, register.address, raw_value, value
+            )
+        },
+    )
+    parent = SimpleNamespace(
+        language=language,
+        config_entry=SimpleNamespace(
+            data={"ble_device": "00:11:22:33:44:55"}, options={}
+        ),
+        write_enabled=False,
+        zone_profiles={},
+        zone_overrides={},
+    )
+    return OpenRBusRegisterSensor(
+        parent,
+        coordinator,
+        identity,
+        register,
+        language=language,
+        effective_access_level=3,
+    )
+
+
+def _status_sensor(address: str, value, language: str = "de"):
+    identity = resolve_device_identity(
+        DeviceIdentity(1, None, None, "EHC-16", family="Ehc-16")
+    )
+    register = next(
+        row
+        for row in catalog_for_node(identity)
+        if row.address == ObjectAddress.parse(address)
+    )
+    return _register_sensor(identity, register, value, language)
+
+
+def test_status_and_substatus_sensors_show_catalogued_german_labels() -> None:
+    status = _status_sensor("500f:00", 1)
+    substatus = _status_sensor("5011:00", 1)
+
+    assert status.native_value == "Wärmeanforderung"
+    assert substatus.native_value == "Pausenzeit"
+    assert status.extra_state_attributes["raw_numeric_value"] == 1
+    assert substatus.extra_state_attributes["raw_numeric_value"] == 1
+    assert status.native_unit_of_measurement is None
+    assert substatus.native_unit_of_measurement is None
+    assert status.device_class is None and status.state_class is None
+    assert substatus.device_class is None and substatus.state_class is None
+
+
+def test_enum_sensor_keeps_unknown_values_and_existing_text_unchanged() -> None:
+    unknown = _status_sensor("500f:00", 253)
+    text_value = _status_sensor("5011:00", "vendor text")
+
+    assert unknown.native_value == 253
+    assert unknown.extra_state_attributes["raw_numeric_value"] == 253
+    assert text_value.native_value == "vendor text"
+    assert text_value.extra_state_attributes["raw_numeric_value"] is None
+
+
+def test_enum_sensor_does_not_treat_boolean_as_numeric_enum() -> None:
+    entity = _status_sensor("500f:00", True)
+
+    assert entity.native_value is True
+    assert entity.extra_state_attributes["raw_numeric_value"] is None
+
+
+def test_array_enum_sensor_formats_only_bounded_elements_not_count_header() -> None:
+    identity = resolve_device_identity(
+        DeviceIdentity(4, None, None, "SCB-10", family="Scb-10")
+    )
+    head = next(
+        row
+        for row in catalog_for_node(identity)
+        if row.address == ObjectAddress.parse("3811:00")
+    )
+
+    count_sensor = _register_sensor(identity, head, 1)
+    assert count_sensor.native_value == 1
+    assert count_sensor.extra_state_attributes["raw_numeric_value"] == 1
+
+    for subindex in (1, 6, 10):
+        child = replace(head, index=0x3811, subindex=subindex)
+        sensor = _register_sensor(identity, child, 1)
+        assert sensor.native_value == "Erzeugersperre HK"
+        assert sensor.native_unit_of_measurement is None
+
+    overflow = replace(head, index=0x3811, subindex=11)
+    assert _register_sensor(identity, overflow, 1).native_value == 1
+
+
+def test_enum_sensor_rejects_inconsistent_catalog_wire_metadata() -> None:
+    identity = resolve_device_identity(
+        DeviceIdentity(1, None, None, "EHC-16", family="Ehc-16")
+    )
+    status = next(
+        row
+        for row in catalog_for_node(identity)
+        if row.address == ObjectAddress.parse("500f:00")
+    )
+
+    assert (
+        _register_sensor(identity, replace(status, datatype="UINT8"), 1).native_value
+        == 1
+    )
+    assert (
+        _register_sensor(identity, replace(status, storage="UINT16"), 1).native_value
+        == 1
+    )
+    with_unit = replace(status, unit="°C")
+    unit_sensor = _register_sensor(identity, with_unit, 1)
+    assert unit_sensor.native_value == 1
+    assert unit_sensor.native_unit_of_measurement == "°C"
+
+
+def test_enum_sensor_rejects_catalog_type_conflict(monkeypatch) -> None:
+    identity = resolve_device_identity(
+        DeviceIdentity(1, None, None, "EHC-16", family="Ehc-16")
+    )
+    status = next(
+        row
+        for row in catalog_for_node(identity)
+        if row.address == ObjectAddress.parse("500f:00")
+    )
+
+    class ConflictedRegistry:
+        def find(self, _address):
+            return SimpleNamespace(
+                address=status.address,
+                code=status.internal_code,
+                wire=SimpleNamespace(
+                    type=SimpleNamespace(value="ENUMERATION"),
+                    storage=SimpleNamespace(value="UINT8"),
+                    unit=None,
+                    is_array=False,
+                ),
+                evidence=SimpleNamespace(type_conflict=True),
+            )
+
+    monkeypatch.setattr(sensor_module, "_CATALOG_REGISTRY", ConflictedRegistry())
+    assert _register_sensor(identity, status, 1).native_value == 1
 
 
 def test_scb_catalog_is_projected_and_pollable_at_each_configured_level() -> None:
