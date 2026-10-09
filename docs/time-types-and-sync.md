@@ -33,3 +33,23 @@ object. Before clock synchronization, obtain the vendor definition of the
 exact set command, its family access levels, and the `504a:00` update-type/DLS
 semantics. Do not use writes as discovery probes; separately authorize any
 reversible validation under the project live-write policy.
+
+## Vendor `HoursMinutes` values
+
+The OBD 1.47 `HoursMinutes` unit is distinct from the six-byte CANopen
+`TIME_OF_DAY` type. For the clock-of-day objects HP094/HP095, SP069/SP079,
+SP292/SP293, CP390, DP440, NP080 and NP090, values are unsigned ten-minute
+ticks since midnight. The OBD description for SP069/SP079/SP292/SP293 gives
+the range 00:00–23:50 and explicitly states that value 10 means 1:40. Thus
+108, 72 and 18 display as 18:00, 12:00 and 03:00 respectively. The maximum
+valid clock tick is 143 (23:50); out-of-range values are unavailable instead
+of being shown as a plausible time.
+
+HA keeps the existing numeric entity and its entity ID for compatibility,
+and adds a native time-picker companion only when that exact number entity is
+already enabled and the existing read/write evidence gates pass. The picker
+accepts only ten-minute values and routes changes through the existing
+verified write/read-back path. It shares the same polling coordinator and
+register selection. `CP820` (3475) also uses the `HoursMinutes` unit but
+describes a charging duration, so it remains numeric and is not treated as a
+clock-of-day value.

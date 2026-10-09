@@ -410,7 +410,10 @@ async def test_entry_setup_keeps_coordinator_until_retry_then_forwards_once(
     assert entry.runtime_data is first_coordinator
     assert first_coordinator.wait_calls == 2
     assert created == [first_coordinator]
-    assert forwarded == [tuple(integration.PLATFORMS)]
+    assert forwarded == [
+        tuple(platform for platform in integration.PLATFORMS if platform != "time"),
+        ("time",),
+    ]
 
 
 @pytest.mark.asyncio

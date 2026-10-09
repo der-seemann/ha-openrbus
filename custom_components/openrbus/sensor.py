@@ -22,6 +22,7 @@ from .bridge import GenericRead
 from .const import CONF_READ_ACCESS_LEVEL, DOMAIN
 from .coordinator import OpenRBusCoordinator, OpenRBusPollingCoordinator
 from .entity_names import suggested_object_id
+from .hours_minutes import hours_minutes_to_text, is_clock_hours_minutes
 from .identity import stable_node_id, stable_object_id
 from .register_entities import (
     async_apply_diagnostic_visibility,
@@ -385,7 +386,7 @@ class OpenRBusRegisterSensor(
         self._attr_name = register_name(register, language)
         if zone_label := entity_zone_label(parent, identity, register):
             self._attr_name = f"{zone_label} — {self._attr_name}"
-        if register.datatype == "TIME_OF_DAY":
+        if register.datatype == "TIME_OF_DAY" or is_clock_hours_minutes(register):
             # HA has no time-only sensor device class/native value, so publish
             # a stable clock string. Keep the standardized protocol date
             # separately; it has no timezone semantics and is not a timestamp.
@@ -406,6 +407,8 @@ class OpenRBusRegisterSensor(
             return None
         if isinstance(result.value, CanOpenTimeOfDay):
             return _time_of_day_native_value(result.value)
+        if is_clock_hours_minutes(self._register):
+            return hours_minutes_to_text(result.value)
         return result.value
 
     @property
@@ -415,12 +418,19 @@ class OpenRBusRegisterSensor(
             self._parent, self._identity.node, slot
         ):
             return False
-        return (
+        read_available = (
             self._effective_access_level is not None
             and _catalog_visible(self._register, self._effective_access_level)
             and self.coordinator.is_value_available(
                 self._identity.node, self._register.address
             )
+        )
+        if not read_available:
+            return False
+        result = self._result
+        return not is_clock_hours_minutes(self._register) or (
+            isinstance(result, GenericRead)
+            and hours_minutes_to_text(result.value) is not None
         )
 
     @property
@@ -502,6 +512,15 @@ class OpenRBusRegisterSensor(
             "raw_value": self._result.raw_value.hex()
             if isinstance(self._result, GenericRead)
             else "",
+            "raw_numeric_value": self._result.value
+            if isinstance(self._result, GenericRead)
+            and is_clock_hours_minutes(register)
+            and type(self._result.value) is int
+            else None,
+            "formatted_time": hours_minutes_to_text(self._result.value)
+            if isinstance(self._result, GenericRead)
+            and is_clock_hours_minutes(register)
+            else None,
             "protocol_day_counter": self._result.value.days
             if isinstance(self._result, GenericRead)
             and isinstance(self._result.value, CanOpenTimeOfDay)

@@ -1,5 +1,6 @@
 """Read-only entity visibility remains independent from control authorization."""
 
+from datetime import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -22,6 +23,7 @@ from custom_components.openrbus.coordinator import OpenRBusPollingCoordinator
 from custom_components.openrbus.number import OpenRBusNumber
 from custom_components.openrbus.select import OpenRBusSelect
 from custom_components.openrbus.switch import OpenRBusSwitch
+from custom_components.openrbus.time import OpenRBusTime
 
 
 def _catalog_row(name: str, address: str) -> SimpleNamespace:
@@ -515,6 +517,7 @@ async def test_enabled_readonly_sensor_polls_while_experimental_write_stays_deni
 
     for entity_type, action in (
         (OpenRBusNumber, lambda entity: entity.async_set_native_value(1)),
+        (OpenRBusTime, lambda entity: entity.async_set_value(time(0, 10))),
         (
             OpenRBusSelect,
             lambda entity: entity.async_select_option("On"),
@@ -526,6 +529,8 @@ async def test_enabled_readonly_sensor_polls_while_experimental_write_stays_deni
         entity._identity = identity
         entity._register = row
         entity._effective_access_level = 3
+        if entity_type is OpenRBusTime:
+            entity._hours_minutes_bounds = (0, 143)
         if entity_type is OpenRBusSelect:
             entity._option_to_value = {"On": 1}
         with pytest.raises(HomeAssistantError, match="write access is unavailable"):

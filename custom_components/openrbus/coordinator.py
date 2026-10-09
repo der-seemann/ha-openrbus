@@ -910,6 +910,7 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
         parent: Any, runtime_node: Any, identity: Any, slot: int
     ) -> list[str]:
         # Import at call time to avoid the coordinator/entity module cycle.
+        from .hours_minutes import is_clock_hours_minutes
         from .register_entities import (
             bitfield_structure,
             entity_unique_id,
@@ -925,6 +926,8 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                 continue
             unique_id = entity_unique_id(parent, row_identity, register)
             manifest.add(unique_id)
+            if is_clock_hours_minutes(register):
+                manifest.add(f"{unique_id}:time")
             structure = bitfield_structure(register)
             if structure is not None and parent.effective_access_levels.get(
                 identity.node
@@ -1273,6 +1276,18 @@ class OpenRBusCoordinator(DataUpdateCoordinator[BridgeRead]):
                         == "integration"
                     ):
                         registry.async_update_entity(entity_id, disabled_by=None)
+                time_entity_id = registry.async_get_entity_id(
+                    "time", DOMAIN, f"{unique_id}:time"
+                )
+                time_entity = (
+                    registry.entities.get(time_entity_id) if time_entity_id else None
+                )
+                if (
+                    time_entity is not None
+                    and str(getattr(time_entity, "disabled_by", "")).casefold()
+                    == "integration"
+                ):
+                    registry.async_update_entity(time_entity_id, disabled_by=None)
             except (AttributeError, TypeError, ValueError):
                 _LOGGER.debug("Could not re-enable OpenRBus entity %s", address)
             await coordinator.async_request_refresh()
@@ -1505,6 +1520,13 @@ class OpenRBusPollingCoordinator(
                         entry = entity_registry.entities.get(entity_id)
                         if entry is not None:
                             entries.append(entry)
+                time_entity_id = entity_registry.async_get_entity_id(
+                    "time", DOMAIN, f"{unique_id}:time"
+                )
+                if time_entity_id:
+                    entry = entity_registry.entities.get(time_entity_id)
+                    if entry is not None:
+                        entries.append(entry)
             if not _should_poll_registry_entries(tuple(entries)):
                 self._diagnostic_registry_disabled_count = min(
                     _DIAGNOSTIC_COUNTER_MAX,
@@ -1694,3 +1716,18 @@ class OpenRBusPollingCoordinator(
                 )
             except (TypeError, ValueError):
                 _LOGGER.debug("Could not disable expired OpenRBus entity %s", entity_id)
+        time_entity_id = registry.async_get_entity_id(
+            "time", DOMAIN, f"{unique_id}:time"
+        )
+        if time_entity_id:
+            entity = registry.entities.get(time_entity_id)
+            if entity is not None and not getattr(entity, "disabled_by", None):
+                try:
+                    registry.async_update_entity(
+                        time_entity_id,
+                        disabled_by=er.RegistryEntryDisabler.INTEGRATION,
+                    )
+                except (TypeError, ValueError):
+                    _LOGGER.debug(
+                        "Could not disable expired OpenRBus entity %s", time_entity_id
+                    )

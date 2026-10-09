@@ -776,6 +776,18 @@ def _poll_row_selected(
         return False
 
     base_uid = entity_unique_id(parent, identity, register)
+    time_entities = enabled_registry_entities.get(f"{base_uid}:time", ())
+    if (
+        time_entities
+        and _selection_override(parent, identity, register, base_uid) is not False
+        and write_access_allowed(
+            parent,
+            register,
+            getattr(parent, "effective_access_levels", {}).get(identity.node),
+        )
+        and any(_registry_entity_domain(entity) == "time" for entity in time_entities)
+    ):
+        return True
     for unique_id, entities in enabled_registry_entities.items():
         if unique_id != base_uid and not (
             unique_id.startswith(f"{base_uid}:bit:")
@@ -791,7 +803,12 @@ def _poll_row_selected(
             domain = _registry_entity_domain(entity)
             if domain in {"sensor", "binary_sensor"}:
                 return True
-            if domain in {"number", "select", "switch"} and write_access_allowed(
+            if domain in {
+                "number",
+                "select",
+                "switch",
+                "time",
+            } and write_access_allowed(
                 parent,
                 register,
                 getattr(parent, "effective_access_levels", {}).get(identity.node),
@@ -1462,10 +1479,20 @@ def cleanup_inactive_zone_entities(
                     inactive_unique_ids.add(unique_id)
                     continue
     removed = 0
-    allowed_domains = {"sensor", "binary_sensor", "number", "select", "switch"}
+    allowed_domains = {
+        "sensor",
+        "binary_sensor",
+        "number",
+        "select",
+        "switch",
+        "time",
+    }
     for entity in tuple(registry.entities.values()):
         unique_id = getattr(entity, "unique_id", "")
-        base_unique_id, bit_separator, bit_name = unique_id.partition(":bit:")
+        projection_unique_id = unique_id.removesuffix(":time")
+        base_unique_id, bit_separator, bit_name = projection_unique_id.partition(
+            ":bit:"
+        )
         exact_mapped_row = base_unique_id in inactive_unique_ids and (
             not bit_separator or (bool(bit_name) and ":" not in bit_name)
         )
