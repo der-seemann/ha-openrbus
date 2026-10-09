@@ -10,6 +10,8 @@ from openrbus.registry import Registry
 from custom_components.openrbus.binary_sensor import OpenRBusBitfieldSensor
 from custom_components.openrbus.entity_names import (
     _HK_CODES,
+    _SOURCE_TERM_PATTERNS,
+    _SOURCE_TERMS_EN,
     _TWW_CODES,
     _WP_CODES,
     parameter_code_for,
@@ -37,9 +39,12 @@ _CATALOG = Registry.load_default()
 
 
 def test_source_term_whitelists_match_the_audited_coverage() -> None:
-    assert len(_HK_CODES) == 49
-    assert len(_TWW_CODES) == 14
-    assert len(_WP_CODES) == 133
+    assert len(_HK_CODES) == 52
+    assert len(_TWW_CODES) == 53
+    assert len(_WP_CODES) == 134
+    assert len(_SOURCE_TERMS_EN["HK"][0]) == 49
+    assert len(_SOURCE_TERMS_EN["TWW"][0]) == 14
+    assert len(_SOURCE_TERMS_EN["WP"][0]) == 133
 
 
 def _register(code: str | None, index: int, subindex: int, name_en: str):
@@ -66,6 +71,22 @@ def _identity(*, family="Ehc-16", node=1):
 
 
 def test_reviewed_german_names_use_exact_parameter_codes() -> None:
+    assert (
+        register_display_name(_register("BM001", 0x5501, 1, "Gem.PuSpTemp"), "de")
+        == "Gemessene Pufferspeichertemperatur"
+    )
+    assert (
+        register_display_name(_register("BM001", 0x5501, 1, "Meas Btank temp"), "en")
+        == "Measured buffer tank temperature"
+    )
+    assert (
+        register_display_name(_register("BM001", 0x5502, 1, "Gem.PuSpTemp"), "de")
+        is None
+    )
+    assert (
+        register_display_name(_register("AP004", 0x3004, 0, "Hydr. Ventil Verz."), "de")
+        == "Verzögerungszeit bis zur Öffnung des Hydraulikventils"
+    )
     assert register_display_name(
         _register("CP730", 0x346A, 0, "Zone Heat up speed"), "de"
     ) == ("Heizkreis-Aufheizgeschwindigkeit")
@@ -212,8 +233,7 @@ def test_scalar_parameter_code_requires_exact_core_address_code_join() -> None:
 @pytest.mark.parametrize(
     ("code", "index", "source_short", "expected"),
     [
-        ("CP430", 0x342D, "TWW Sp.lad. Opt.", "Trinkwarmwasser Sp.lad. Opt."),
-        ("HP002", 0x2302, "Max. Vorlauftemp. WP", "Max. Vorlauftemp. Wärmepumpe"),
+        ("AC009", 0x5086, "Gel. Energie TWW", "Gelieferte Energie Trinkwarmwasser"),
     ],
 )
 def test_whitelisted_source_abbreviations_expand_by_exact_code(
@@ -222,6 +242,101 @@ def test_whitelisted_source_abbreviations_expand_by_exact_code(
     register = _register(code, index, 0, "ignored fallback")
     register.name_de = source_short
     assert register_display_name(register, "de") == expected
+
+
+@pytest.mark.parametrize(
+    ("code", "index", "source_short", "expected"),
+    [
+        (
+            "HP002",
+            0x2302,
+            "Max. Vorlauftemp. WP",
+            "Maximale Vorlauftemperatur der Wärmepumpe ohne Zusatzerzeuger",
+        ),
+        (
+            "HP094",
+            0x235E,
+            "Beginn leiser Betr.",
+            "Startzeit des leisen Betriebs der Wärmepumpe",
+        ),
+        ("DM001", 0x5601, "TWWSp oben", "Trinkwarmwasserspeicher oben"),
+        (
+            "HP072",
+            0x2348,
+            "Min. TVorlauf Abt.WP",
+            "Minimale Vorlauftemperatur der Wärmepumpe, unterhalb der der Zusatzerzeuger beim Abtauen startet",
+        ),
+        (
+            "HP070",
+            0x2346,
+            "Min. TRücklauf Abt.",
+            "Minimale Rücklauftemperatur der Wärmepumpe, unterhalb der der Zusatzerzeuger beim Abtauen startet",
+        ),
+        (
+            "HP071",
+            0x2347,
+            "Min.Trücklauf Abt.WP",
+            "Minimale Rücklauftemperatur der Wärmepumpe, unterhalb der das Abtauen abgebrochen wird",
+        ),
+        (
+            "HP073",
+            0x2349,
+            "Min. TVorlauf Abt.",
+            "Minimale Vorlauftemperatur der Wärmepumpe, unterhalb der das Abtauen gestoppt wird",
+        ),
+        (
+            "HP095",
+            0x235F,
+            "Ende leiser Betrieb",
+            "Endzeit des leisen Betriebs der Wärmepumpe",
+        ),
+        (
+            "CM320",
+            0x543B,
+            "Startzeit ZusatzHzg",
+            "Geschätzte Zeit bis zum Start der elektrischen Zusatzheizung für den Trinkwarmwasserspeicher",
+        ),
+        (
+            "HP155",
+            0x23A6,
+            "Min.Stillstandsz. WP",
+            "Mindeststillstandszeit des Wärmepumpenverdichters",
+        ),
+        (
+            "CP430",
+            0x342D,
+            "TWW Sp.lad. Opt.",
+            "Optimierung der Trinkwarmwasser-Speicherladung",
+        ),
+        (
+            "CP360",
+            0x3426,
+            "Eco TWW-Temp. Kreis",
+            "Trinkwarmwasser-Sollwert des Kreises im Eco-Betrieb",
+        ),
+    ],
+)
+def test_verified_german_short_forms_expand_only_for_exact_codes(
+    code, index, source_short, expected
+) -> None:
+    register = _register(code, index, 0, "unchanged English fallback")
+    register.name_de = source_short
+    assert register_display_name(register, "de") == expected
+
+
+def test_punctuated_token_match_is_literal_and_does_not_change_english_ids() -> None:
+    temp_pattern = _SOURCE_TERM_PATTERNS["Temp."]
+    assert temp_pattern.search("Temp.")
+    assert not temp_pattern.search("TempX")
+
+    umlaut = _register("AM018", 0x5015, 0, "Trücklauf Pumpe")
+    umlaut.name_de = "Trücklauf Pumpe"
+    assert register_display_name(umlaut, "de") == "Rücklauftemperatur Pumpe"
+
+    new_tww_code = _register("CP360", 0x3426, 1, "Eco TWW temp circuit")
+    assert suggested_object_id(_parent(), _identity(), new_tww_code) == (
+        "zone_1_eco_tww_temp_circuit"
+    )
 
 
 @pytest.mark.parametrize(
@@ -251,7 +366,6 @@ def test_normalized_labels_cover_array_items_without_assigning_unproven_slots(
     ("code", "index", "source_short"),
     [
         ("CP300", 0x3421, "HK, Vorlauf"),
-        ("DP003", 0x3603, "Abs. max. Gebl. TWW"),
         ("HP111", 0x236F, "WP-Abschaltverz."),
     ],
 )
@@ -274,7 +388,7 @@ def test_noncode_and_mismatched_address_do_not_expand_abbreviations() -> None:
 
 
 def test_whole_token_rule_does_not_expand_wp_inside_pwm() -> None:
-    register = _register("HP002", 0x2302, 0, "ignored fallback")
+    register = _register("HP111", 0x236F, 0, "ignored fallback")
     register.name_de = "PWM-Drehzahl"
     assert register_display_name(register, "de") is None
 
