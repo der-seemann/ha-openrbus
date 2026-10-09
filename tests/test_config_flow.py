@@ -38,6 +38,7 @@ from custom_components.openrbus.const import (
     CONF_BACKEND,
     CONF_BLE_DEVICE,
     CONF_BLE_NAME,
+    CONF_CASCADE_ENABLED,
     CONF_COOLING_ENABLED,
     CONF_DIAGNOSTICS_ENABLED,
     CONF_FLOW_ACTION,
@@ -197,6 +198,7 @@ async def test_options_form_reopens_independent_read_and_no_write_levels(
     assert defaults[CONF_READ_ACCESS_LEVEL] == 3
     assert defaults[CONF_WRITE_ACCESS_LEVEL] == 0
     assert defaults[config_flow_module.CONF_COOLING_ENABLED] is False
+    assert defaults[CONF_CASCADE_ENABLED] is False
 
     selectors = {
         marker.schema: validator
@@ -297,6 +299,11 @@ async def test_setup_access_levels_are_discrete_numeric_sliders() -> None:
         CONF_WRITE_ACCESS_LEVEL: 0,
     }
     result = await flow.async_step_access_level()
+    cascade_marker = next(
+        marker
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None) == CONF_CASCADE_ENABLED
+    )
     fields = {
         marker.schema: (marker, validator)
         for marker, validator in result["data_schema"].schema.items()
@@ -306,6 +313,7 @@ async def test_setup_access_levels_are_discrete_numeric_sliders() -> None:
 
     assert fields[CONF_READ_ACCESS_LEVEL][0].default() == 2
     assert fields[CONF_WRITE_ACCESS_LEVEL][0].default() == 0
+    assert cascade_marker.default() is False
     assert fields[CONF_READ_ACCESS_LEVEL][1].config["step"] == 1.0
     assert fields[CONF_WRITE_ACCESS_LEVEL][1].config["step"] == 1.0
 
@@ -533,6 +541,12 @@ async def test_options_form_defaults_screed_drying_to_off_and_preserves_it(
         if getattr(marker, "schema", None) == CONF_SCREED_DRYING_ENABLED
     )
     assert marker.default() is False
+    cascade_marker = next(
+        marker
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None) == CONF_CASCADE_ENABLED
+    )
+    assert cascade_marker.default() is False
 
     entry.options = {CONF_SCREED_DRYING_ENABLED: True}
     result = await OpenRBusOptionsFlowHandler(entry).async_step_init()
@@ -556,6 +570,14 @@ async def test_options_form_defaults_screed_drying_to_off_and_preserves_it(
         if getattr(marker, "schema", None) == CONF_COOLING_ENABLED
     )
     assert cooling_marker.default() is True
+    entry.options[CONF_CASCADE_ENABLED] = True
+    result = await OpenRBusOptionsFlowHandler(entry).async_step_init()
+    cascade_marker = next(
+        marker
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None) == CONF_CASCADE_ENABLED
+    )
+    assert cascade_marker.default() is True
 
 
 @pytest.mark.asyncio

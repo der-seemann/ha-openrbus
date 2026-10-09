@@ -33,6 +33,7 @@ from .const import (
     CONF_BLE_DEVICE,
     CONF_BLE_NAME,
     CONF_BLE_SOURCE,
+    CONF_CASCADE_ENABLED,
     CONF_COOLING_ENABLED,
     CONF_DIAGNOSTICS_ENABLED,
     CONF_ENTITY_OVERRIDES,
@@ -62,6 +63,7 @@ from .const import (
     CONF_WRITE_ACCESS_LEVEL,
     CONF_WRITE_ENABLED,
     CONF_ZONE_OVERRIDES,
+    DEFAULT_CASCADE_ENABLED,
     DEFAULT_COOLING_ENABLED,
     DEFAULT_DIAGNOSTICS_ENABLED,
     DEFAULT_EXPERIMENTAL_WRITES,
@@ -823,6 +825,12 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                                 CONF_COOLING_ENABLED, DEFAULT_COOLING_ENABLED
                             ),
                         ): cv.boolean,
+                        vol.Required(
+                            CONF_CASCADE_ENABLED,
+                            default=pending.get(
+                                CONF_CASCADE_ENABLED, DEFAULT_CASCADE_ENABLED
+                            ),
+                        ): cv.boolean,
                     }
                 ),
             )
@@ -1057,6 +1065,9 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_COOLING_ENABLED: bool(
                         user_input.get(CONF_COOLING_ENABLED, DEFAULT_COOLING_ENABLED)
                     ),
+                    CONF_CASCADE_ENABLED: bool(
+                        user_input.get(CONF_CASCADE_ENABLED, DEFAULT_CASCADE_ENABLED)
+                    ),
                     CONF_POLL_FAST: int(
                         user_input.get(
                             CONF_POLL_FAST, DEFAULT_POLL_INTERVALS[CONF_POLL_FAST]
@@ -1218,6 +1229,9 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             include_cooling=bool(
                 preferences.get(CONF_COOLING_ENABLED, DEFAULT_COOLING_ENABLED)
             ),
+            include_cascade=bool(
+                preferences.get(CONF_CASCADE_ENABLED, DEFAULT_CASCADE_ENABLED)
+            ),
         ):
             if (
                 not allowed
@@ -1291,6 +1305,7 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
         configured = {**self._config_entry.data, **self._config_entry.options}
         configured.update(getattr(self, "_entity_picker_pending", {}) or {})
         cooling = bool(configured.get(CONF_COOLING_ENABLED, DEFAULT_COOLING_ENABLED))
+        cascade = bool(configured.get(CONF_CASCADE_ENABLED, DEFAULT_CASCADE_ENABLED))
         rows = rows_for_parent(
             runtime,
             include_diagnostics=bool(
@@ -1302,6 +1317,7 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                 )
             ),
             include_cooling=cooling,
+            include_cascade=cascade,
         )
         groups: dict[str, dict[str, Any]] = {}
         for identity, register, _poll_group, allowed in rows:
@@ -1435,6 +1451,7 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                 include_diagnostics=True,
                 include_screed_drying=True,
                 include_cooling=True,
+                include_cascade=True,
             )
             if allowed
         }
@@ -1983,6 +2000,10 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             vol.Required(
                 CONF_COOLING_ENABLED,
                 default=current.get(CONF_COOLING_ENABLED, DEFAULT_COOLING_ENABLED),
+            ): cv.boolean,
+            vol.Required(
+                CONF_CASCADE_ENABLED,
+                default=current.get(CONF_CASCADE_ENABLED, DEFAULT_CASCADE_ENABLED),
             ): cv.boolean,
             vol.Required(
                 CONF_BLE_DEVICE,

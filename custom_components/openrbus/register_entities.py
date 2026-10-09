@@ -28,12 +28,14 @@ from openrbus.registry import Registry
 
 from .bridge import GenericRead
 from .const import (
+    CONF_CASCADE_ENABLED,
     CONF_COOLING_ENABLED,
     CONF_DIAGNOSTICS_ENABLED,
     CONF_GROUP_OVERRIDES,
     CONF_NODE_OVERRIDES,
     CONF_SCREED_DRYING_ENABLED,
     CONF_ZONE_OVERRIDES,
+    DEFAULT_CASCADE_ENABLED,
     DEFAULT_COOLING_ENABLED,
     DOMAIN,
 )
@@ -244,12 +246,59 @@ def screed_drying_enabled(parent: OpenRBusCoordinator) -> bool:
     return bool(configured.get(CONF_SCREED_DRYING_ENABLED, False))
 
 
+def cascade_enabled(parent: OpenRBusCoordinator) -> bool:
+    """Return the explicit parent-level cascade projection preference."""
+
+    configured = dict(getattr(parent.config_entry, "data", {}) or {})
+    configured.update(getattr(parent.config_entry, "options", {}) or {})
+    return bool(configured.get(CONF_CASCADE_ENABLED, DEFAULT_CASCADE_ENABLED))
+
+
+def optional_register_memberships(
+    register: RegisterCatalogEntry,
+) -> frozenset[str]:
+    """Resolve exact map membership, including Core-bounded array elements.
+
+    Existing ``:00`` rows retain the exact map behavior. A nonzero subindex
+    inherits the mapped array-head classification only when Core resolves the
+    address to that exact head, confirms a bounded array without a type
+    conflict, and the projected row agrees with Core's head code and wire
+    type/storage. This classifies rows already projected by Core; it never
+    enumerates new rows.
+    """
+
+    address = getattr(register, "address", None)
+    if address is None:
+        return frozenset()
+    exact = OPTIONAL_REGISTER_FILTERS.get(address)
+    if exact is not None:
+        return exact
+    if address.subindex <= 0:
+        return frozenset()
+    definition = CATALOG_REGISTRY.find(address)
+    if definition is None:
+        return frozenset()
+    head = definition.address
+    wire = definition.wire
+    if (
+        head.index != address.index
+        or head.subindex != 0
+        or not wire.is_array
+        or wire.max_items is None
+        or address.subindex > wire.max_items
+        or definition.evidence.type_conflict
+        or getattr(register, "internal_code", None) != definition.code
+        or getattr(register, "datatype", None) != wire.type.value
+        or getattr(register, "storage", None) != wire.storage.value
+    ):
+        return frozenset()
+    return OPTIONAL_REGISTER_FILTERS.get(head, frozenset())
+
+
 def is_screed_drying_register(register: RegisterCatalogEntry) -> bool:
     """Return whether the reviewed exact register map classifies this row."""
 
-    return "screed" in OPTIONAL_REGISTER_FILTERS.get(
-        getattr(register, "address", None), ()
-    )
+    return "screed" in optional_register_memberships(register)
 
 
 def cooling_enabled(parent: OpenRBusCoordinator) -> bool:
@@ -263,9 +312,13 @@ def cooling_enabled(parent: OpenRBusCoordinator) -> bool:
 def is_cooling_register(register: RegisterCatalogEntry) -> bool:
     """Return whether the reviewed exact register map classifies this row."""
 
-    return "cooling" in OPTIONAL_REGISTER_FILTERS.get(
-        getattr(register, "address", None), ()
-    )
+    return "cooling" in optional_register_memberships(register)
+
+
+def is_cascade_register(register: RegisterCatalogEntry) -> bool:
+    """Return whether the exact reviewed map classifies a cascade row."""
+
+    return "cascade" in optional_register_memberships(register)
 
 
 def is_optional_filter_register(
@@ -276,12 +329,7 @@ def is_optional_filter_register(
 ) -> bool:
     """Apply the reviewed exact-address classification."""
 
-    semantic_match = (
-        is_screed_drying_register(register)
-        if filter_name == "screed"
-        else is_cooling_register(register)
-    )
-    return semantic_match
+    return filter_name in optional_register_memberships(register)
 
 
 def rows_for_parent(
@@ -290,6 +338,7 @@ def rows_for_parent(
     include_diagnostics: bool | None = None,
     include_screed_drying: bool | None = None,
     include_cooling: bool | None = None,
+    include_cascade: bool | None = None,
 ) -> tuple[tuple[DeviceIdentity, RegisterCatalogEntry, str, bool], ...]:
     """Project all known rows and their poll eligibility for this entry."""
 
@@ -312,6 +361,8 @@ def rows_for_parent(
         include_screed_drying = screed_drying_enabled(parent)
     if include_cooling is None:
         include_cooling = cooling_enabled(parent)
+    if include_cascade is None:
+        include_cascade = cascade_enabled(parent)
     rows: list[tuple[DeviceIdentity, RegisterCatalogEntry, str, bool]] = []
     for runtime_node in runtime_nodes(parent):
         identity = identity_for_runtime(runtime_node)
@@ -371,6 +422,10 @@ def rows_for_parent(
                 continue
             if not include_cooling and is_optional_filter_register(
                 parent, identity, register, "cooling"
+            ):
+                continue
+            if not include_cascade and is_optional_filter_register(
+                parent, identity, register, "cascade"
             ):
                 continue
             rows.append(
@@ -450,6 +505,7 @@ def _poll_selection_filter_counts(
         "diagnostics_filtered": 0,
         "screed_filtered": 0,
         "cooling_filtered": 0,
+        "cascade_filtered": 0,
         "rows_after_optional_filters": len(rows),
     }
     for _identity, register, _group, _allowed in complete_rows:
@@ -459,6 +515,8 @@ def _poll_selection_filter_counts(
             counts["screed_filtered"] += 1
         if not cooling_enabled(parent) and is_cooling_register(register):
             counts["cooling_filtered"] += 1
+        if not cascade_enabled(parent) and is_cascade_register(register):
+            counts["cascade_filtered"] += 1
     return counts
 
 
@@ -593,6 +651,8 @@ def entity_group_key(
         base = f"node:{node}:optional:screed"
     elif is_optional_filter_register(parent, identity, register, "cooling"):
         base = f"node:{node}:optional:cooling"
+    elif is_optional_filter_register(parent, identity, register, "cascade"):
+        base = f"node:{node}:optional:cascade"
     else:
         slot = zone_subindex(register, identity)
         if slot is not None:
@@ -927,6 +987,7 @@ def async_apply_entity_overrides(
         include_diagnostics=True,
         include_screed_drying=True,
         include_cooling=True,
+        include_cascade=True,
     ):
         uid = entity_unique_id(parent, identity, register)
         rows_by_uid[uid] = (identity, register)
@@ -951,6 +1012,10 @@ def async_apply_entity_overrides(
             and (
                 not is_optional_filter_register(parent, identity, register, "cooling")
                 or cooling_enabled(parent)
+            )
+            and (
+                not is_optional_filter_register(parent, identity, register, "cascade")
+                or cascade_enabled(parent)
             )
         )
         safe[uid] = bool(
@@ -1070,6 +1135,7 @@ def async_apply_diagnostic_visibility(
     diagnostics_visible = diagnostics_enabled(parent)
     screed_drying_visible = screed_drying_enabled(parent)
     cooling_visible = cooling_enabled(parent)
+    cascade_visible = cascade_enabled(parent)
     permitted: dict[str, bool] = {}
     visibility: dict[str, bool] = {}
     row_policies: dict[str, tuple[DeviceIdentity, RegisterCatalogEntry, bool]] = {}
@@ -1092,13 +1158,15 @@ def async_apply_diagnostic_visibility(
         include_diagnostics=True,
         include_screed_drying=True,
         include_cooling=True,
+        include_cascade=True,
     ):
         diagnostic = is_diagnostic_register(register)
         screed_drying = is_optional_filter_register(
             parent, identity, register, "screed"
         )
         cooling = is_optional_filter_register(parent, identity, register, "cooling")
-        if not diagnostic and not screed_drying and not cooling:
+        cascade = is_optional_filter_register(parent, identity, register, "cascade")
+        if not diagnostic and not screed_drying and not cooling and not cascade:
             continue
         unique_id = entity_unique_id(parent, identity, register)
         read_safe = bool(allowed and zone_row_enabled(parent, identity, register))
@@ -1121,6 +1189,7 @@ def async_apply_diagnostic_visibility(
             (not diagnostic or diagnostics_visible)
             and (not screed_drying or screed_drying_visible)
             and (not cooling or cooling_visible)
+            and (not cascade or cascade_visible)
         )
         if structure is not None:
             for field in structure.fields:
@@ -1174,6 +1243,7 @@ def ensure_polling_coordinators(
         include_diagnostics=True,
         include_screed_drying=True,
         include_cooling=True,
+        include_cascade=True,
     )
     rows = rows_for_parent(parent)
     selection_counts = {

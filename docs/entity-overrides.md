@@ -33,14 +33,17 @@ does not prove that a concrete subindex exists.
 
 ## Global optional filters
 
-Estrichtrocknung and Kühlbetrieb are default-off, entry-wide filters. A
-manually reviewed exact-address map classifies each register from its OBD
-function and Core's localized catalogue label. The existing device catalog
-still decides whether a register is available on a specific node; the filter
-does not assign manufacturer navigation categories or invent device names.
-Filtering runs before picker choices, entity construction, and poll-group
-assembly. Turning a filter back on restores its normal projection. Existing
-entity registry rows and user disable choices are retained.
+Estrichtrocknung, Kühlbetrieb, and Kaskadenfunktionen are default-off,
+entry-wide filters. Manually reviewed exact-address maps classify rows using
+their OBD operational meaning and Core catalog definition. The existing
+device catalog still decides whether a register is available on a specific
+node; the filters do not assign manufacturer navigation categories or invent
+device names. Filtering runs before picker choices, entity construction, and
+poll-group assembly. Turning a filter back on restores the normal projection
+with the same unique IDs. Existing entity registry rows are retained;
+integration-disabled rows return when all applicable filters are enabled, and
+`disabled_by: user` remains authoritative. A row with overlapping Cooling and
+Cascade membership requires both preferences.
 
 The implementation is in `optional_register_filters.py`; the evidence,
 positive register lists, functional boundaries, and exclusions are recorded in

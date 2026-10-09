@@ -8,6 +8,7 @@ from openrbus.protocol.canip import ObjectAddress
 from custom_components.openrbus import register_entities
 from custom_components.openrbus.bridge import GenericRead
 from custom_components.openrbus.const import (
+    CONF_CASCADE_ENABLED,
     CONF_COOLING_ENABLED,
     CONF_DIAGNOSTICS_ENABLED,
     CONF_GROUP_OVERRIDES,
@@ -790,6 +791,7 @@ def test_poll_selection_counts_report_aggregate_filter_reason(monkeypatch) -> No
         include_diagnostics=True,
         include_screed_drying=True,
         include_cooling=True,
+        include_cascade=True,
     )
     selected = register_entities.rows_for_parent(parent)
     counts = register_entities._poll_selection_filter_counts(parent, complete, selected)
@@ -1314,7 +1316,10 @@ def test_reviewed_filter_map_covers_examples_across_device_families(
     ]
 
     picker_rows = register_entities.rows_for_parent(
-        parent, include_cooling=True, include_screed_drying=True
+        parent,
+        include_cooling=True,
+        include_screed_drying=True,
+        include_cascade=True,
     )
     cooling_group = register_entities.entity_group_key(parent, identity, mk3_production)
     assert [row[1].address for row in picker_rows] == [
@@ -1429,6 +1434,73 @@ def test_screed_visibility_preserves_user_disable(monkeypatch) -> None:
     register_entities.async_apply_diagnostic_visibility(object(), parent)
     assert screed.disabled_by is None
     assert user_disabled.disabled_by == "user"
+
+
+def test_cascade_visibility_cleanup_and_user_disable_are_preserved(monkeypatch) -> None:
+    entity = SimpleNamespace(
+        platform=DOMAIN,
+        config_entry_id="entry",
+        unique_id="cascade-row-stable-id",
+        entity_id="sensor.cascade_row",
+        disabled_by=None,
+    )
+
+    class Registry:
+        def __init__(self):
+            self.entities = {entity.entity_id: entity}
+
+        def async_update_entity(self, entity_id, **changes):
+            assert entity_id == entity.entity_id
+            if changes.get("disabled_by") is not None:
+                assert (
+                    changes["disabled_by"]
+                    is register_entities.er.RegistryEntryDisabler.INTEGRATION
+                )
+            entity.disabled_by = changes["disabled_by"]
+
+    registry = Registry()
+    monkeypatch.setattr(register_entities.er, "async_get", lambda _hass: registry)
+    monkeypatch.setattr(
+        register_entities, "entity_unique_id", lambda *_args: entity.unique_id
+    )
+    row = _register("5724:00", levels=("User",))
+    row.node = 1
+    row.writable = False
+    monkeypatch.setattr(register_entities, "catalog_for_node", lambda *_args: (row,))
+    parent = SimpleNamespace(
+        config_entry=SimpleNamespace(
+            entry_id="entry",
+            data={"ble_device": "00:11:22:33:44:55"},
+            options={CONF_COOLING_ENABLED: True, CONF_CASCADE_ENABLED: False},
+        ),
+        inventories=(SimpleNamespace(identity=SimpleNamespace(node=1)),),
+        devices=(),
+        language="en",
+        effective_access_levels={1: 1},
+        configured_access_level=1,
+        write_enabled=False,
+    )
+
+    # The shared cooling/cascade object stays out of projection and polling
+    # until both independent opt-ins are on.
+    assert register_entities.rows_for_parent(parent) == ()
+    register_entities.async_apply_diagnostic_visibility(object(), parent)
+    assert entity.disabled_by == "integration"
+
+    parent.config_entry.options[CONF_CASCADE_ENABLED] = True
+    assert len(register_entities.rows_for_parent(parent)) == 1
+    register_entities.async_apply_diagnostic_visibility(object(), parent)
+    assert entity.disabled_by is None
+    assert entity.unique_id == "cascade-row-stable-id"
+
+    entity.disabled_by = "user"
+    parent.config_entry.options[CONF_CASCADE_ENABLED] = False
+    assert register_entities.rows_for_parent(parent) == ()
+    register_entities.async_apply_diagnostic_visibility(object(), parent)
+    assert entity.disabled_by == "user"
+    parent.config_entry.options[CONF_CASCADE_ENABLED] = True
+    register_entities.async_apply_diagnostic_visibility(object(), parent)
+    assert entity.disabled_by == "user"
 
 
 def test_generic_override_only_changes_integration_owned_safe_rows(monkeypatch) -> None:
