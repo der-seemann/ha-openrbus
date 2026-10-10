@@ -1690,6 +1690,13 @@ def cleanup_legacy_sensor_entities(
         metadata = pending.setdefault(unique_id, {})
         for field in _MIGRATED_REGISTRY_FIELDS:
             value = getattr(entity, field, None)
+            if field == "disabled_by" and value is None:
+                # HA persists ``None`` as a deliberate user enable. Preserve
+                # that choice across a typed→sensor replacement; otherwise
+                # the new platform's conservative default can silently hide
+                # a previously active measurement.
+                metadata.setdefault(field, None)
+                continue
             if field in {"disabled_by", "hidden_by"} and not _is_user_registry_value(
                 value
             ):
