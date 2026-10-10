@@ -19,6 +19,7 @@ from custom_components.openrbus.zones import (
     zone_enabled,
     zone_function_label,
     zone_function_slots,
+    zone_function_supports_object,
     zone_subindex,
 )
 
@@ -40,6 +41,27 @@ def test_zone_function_classification_is_from_documented_enum_values() -> None:
     assert ZoneProfile(4, 0, 9).kind is ZoneKind.OTHER
     assert ZoneProfile(4, 0, 250).kind is ZoneKind.UNKNOWN
     assert not ZoneProfile(4, 0, 250).active
+
+
+def test_specialized_zone_registers_follow_exact_cp020_membership() -> None:
+    mixer = ZoneProfile(4, 0, 2)
+    dhw = ZoneProfile(4, 0, 6)
+    pool = ZoneProfile(4, 0, 3)
+    process = ZoneProfile(4, 0, 9)
+    unknown = ZoneProfile(4, 0, None)
+
+    # The same address gate backs projected entities, picker catalog and poll
+    # selection through zone_row_enabled.
+    for address in (0x3456, 0x363D, 0x5433, 0x5450, 0x561E):
+        assert not zone_function_supports_object(mixer, address)
+        assert zone_function_supports_object(dhw, address)
+        assert not zone_function_supports_object(unknown, address)
+    assert zone_function_supports_object(pool, 0x3454)
+    assert not zone_function_supports_object(mixer, 0x3454)
+    assert zone_function_supports_object(process, 0x345B)
+    assert not zone_function_supports_object(mixer, 0x345B)
+    # Shared heating values aren't hidden from an active mixer circuit.
+    assert zone_function_supports_object(mixer, 0x3402)
 
 
 def test_zone_function_slot_range_comes_from_catalog_array_bound() -> None:

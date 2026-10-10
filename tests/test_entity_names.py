@@ -50,6 +50,7 @@ from custom_components.openrbus.zones import (
     ZoneProfile,
     zone_association,
     zone_device_name,
+    zone_subdevice_model,
     zone_subdevice_name,
     zone_subindex,
 )
@@ -923,12 +924,15 @@ def test_unzoned_register_ids_include_node_model_and_exact_address():
 
 def test_zone_subdevice_name_uses_register_designation_model_node_and_slot():
     profile = ZoneProfile(4, 1, 1, short_name="SCB HK1", node_name="SCB-10")
-    assert zone_subdevice_name(profile) == "SCB HK1 (SCB-10 (N4) - Zone 1)"
+    assert zone_subdevice_name(profile) == "SCB HK1"
+    assert zone_subdevice_model(profile) == "SCB-10 (Node 4, Zone 1)"
 
 
-def test_non_heating_subdevice_keeps_the_selected_language():
+def test_all_active_zone_subdevices_use_only_the_register_designation():
     profile = ZoneProfile(4, 1, 6, short_name="TWW")
-    assert zone_subdevice_name(profile, "en") == zone_device_name(profile, "en")
+    assert zone_subdevice_name(profile, "en") == "TWW"
+    process_heat = ZoneProfile(4, 2, 9, short_name="Prozess")
+    assert zone_subdevice_name(process_heat, "en") == "Prozess"
 
 
 @pytest.mark.parametrize(

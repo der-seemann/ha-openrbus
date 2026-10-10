@@ -61,6 +61,7 @@ from .zones import (
     zone_is_active,
     zone_projection_exists,
     zone_read_state,
+    zone_subdevice_model,
     zone_subdevice_name,
     zone_subindex,
 )
@@ -670,7 +671,8 @@ class OpenRBusRegisterSensor(
                 name=zone_subdevice_name(profile, self._parent.language),
                 manufacturer=getattr(self._identity, "manufacturer", None)
                 or "OpenRBus",
-                model=getattr(self._identity, "model", None)
+                model=zone_subdevice_model(profile)
+                or getattr(self._identity, "model", None)
                 or getattr(self._identity, "family", None),
                 via_device=("openrbus", node_identifier),
             )

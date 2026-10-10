@@ -688,6 +688,22 @@ def test_categories_follow_cp020_heating_dhw_and_disabled_profiles() -> None:
     assert register_entities.entity_category(parent, identity, row) == "unclassified"
 
 
+def test_exact_cp020_function_relevance_gates_zone_rows() -> None:
+    identity = SimpleNamespace(node=3, family="SCB-10")
+    parent = SimpleNamespace(
+        zone_profiles={(3, 1): ZoneProfile(3, 1, 2)},
+        zone_overrides={},
+    )
+    dhw_row = _register("3456:01", levels=("User",))
+    shared_row = _register("3402:01", levels=("User",))
+
+    assert not register_entities.zone_row_enabled(parent, identity, dhw_row)
+    assert register_entities.zone_row_enabled(parent, identity, shared_row)
+
+    parent.zone_profiles[(3, 1)] = ZoneProfile(3, 1, 6)
+    assert register_entities.zone_row_enabled(parent, identity, dhw_row)
+
+
 def test_select_maps_polled_raw_enum_without_write_authorization() -> None:
     address = ObjectAddress(0x346A, 0x04)
     entity = OpenRBusSelect.__new__(OpenRBusSelect)
@@ -803,6 +819,8 @@ def test_poll_selection_counts_report_aggregate_filter_reason(monkeypatch) -> No
         "diagnostics_filtered": 0,
         "screed_filtered": 0,
         "cooling_filtered": 1,
+        "cascade_filtered": 0,
+        "holiday_filtered": 0,
         "rows_after_optional_filters": 1,
     }
 

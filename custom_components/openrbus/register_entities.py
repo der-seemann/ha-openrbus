@@ -63,11 +63,13 @@ from .zones import (
     profile_for,
     zone_association,
     zone_enabled,
+    zone_function_supports_object,
     zone_is_active,
     zone_is_confirmed_disabled,
     zone_projection_exists,
     zone_projection_record,
     zone_read_state,
+    zone_subdevice_model,
     zone_subdevice_name,
     zone_subindex,
 )
@@ -683,8 +685,12 @@ def zone_row_enabled(
     if association is not ZoneAssociation.ZONE_SLOT:
         return True
     slot = register.address.subindex
-    return zone_is_active(parent, identity.node, slot) and zone_enabled(
-        parent, identity.node, slot
+    profile = profile_for(parent, identity.node, slot, identity)
+    return (
+        profile is not None
+        and zone_is_active(parent, identity.node, slot)
+        and zone_enabled(parent, identity.node, slot)
+        and zone_function_supports_object(profile, register.address.index)
     )
 
 
@@ -2399,7 +2405,8 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
                 name=zone_subdevice_name(profile, self._parent.language),
                 manufacturer=getattr(self._identity, "manufacturer", None)
                 or "OpenRBus",
-                model=getattr(self._identity, "model", None)
+                model=zone_subdevice_model(profile)
+                or getattr(self._identity, "model", None)
                 or getattr(self._identity, "family", None),
                 via_device=("openrbus", node_identifier),
             )

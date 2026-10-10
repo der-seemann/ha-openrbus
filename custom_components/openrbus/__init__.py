@@ -658,11 +658,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     entry.async_on_unload(lambda: _cancel_task(first_refresh))
-    entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
     if isinstance(migration, Mapping):
         # Remove old-route material only after the full candidate setup
-        # succeeded.  The update listener performs one harmless clean reload;
-        # later restarts consequently use the committed route directly.
+        # succeeded. The active coordinator already uses the committed route,
+        # so dropping this marker does not need a second reload.
         committed_options = dict(entry.options)
         committed_options.pop(CONF_TRANSPORT_MIGRATION, None)
         hass.config_entries.async_update_entry(entry, options=committed_options)
@@ -729,8 +728,3 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     if isinstance(coordinator, OpenRBusCoordinator):
         await coordinator.async_shutdown()
         coordinator.detach_startup_lifecycle()
-
-
-async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload OpenRBus after options change."""
-    await hass.config_entries.async_reload(entry.entry_id)
