@@ -65,6 +65,9 @@ The basic set is enabled by default. Less common or noisy catalog rows are prese
 
 The integration polls readable rows independently of write permission. Batch responses are correlated by node and object address. Unsupported or partial items use a bounded single-object fallback, so one malformed response does not hide otherwise healthy entities. Reconnects and reloads close the old coordinator before new platform listeners are created.
 
+Register presentation rules for cumulative energy, measured temperatures, and
+status values are documented in [`docs/register-projection-semantics.md`](docs/register-projection-semantics.md).
+
 ## Services
 
 The integration registers these response-capable services:

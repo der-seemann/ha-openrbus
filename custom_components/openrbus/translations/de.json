@@ -306,5 +306,17 @@
         "back": "Zurück zu Gruppen"
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "register_status": {
+        "state": {
+          "reset_limit_wait_one_hour": "Rücksetzlimit erreicht – eine Stunde warten (Substatus 255)",
+          "unknown_status_code": "Unbekannter Statuscode",
+          "unknown_error_code": "Unbekannter Fehlercode",
+          "unknown_code": "Unbekannter Code"
+        }
+      }
+    }
   }
 }

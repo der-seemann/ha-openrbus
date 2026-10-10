@@ -306,5 +306,17 @@
         "back": "Back to groups"
       }
     }
+  },
+  "entity": {
+    "sensor": {
+      "register_status": {
+        "state": {
+          "reset_limit_wait_one_hour": "Reset limit reached; wait one hour (substatus 255)",
+          "unknown_status_code": "Unknown status code",
+          "unknown_error_code": "Unknown error code",
+          "unknown_code": "Unknown code"
+        }
+      }
+    }
   }
 }

@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import re
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from homeassistant.components.sensor import SensorEntity
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorStateClass,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
@@ -38,10 +44,14 @@ from .register_entities import (
     entity_unique_id,
     entity_zone_label,
     enum_options,
+    is_cumulative_energy_counter,
+    is_temperature_measurement,
+    is_undecoded_status_address,
     register_name,
     restore_migrated_sensor_entities,
     rows_for_parent,
     should_project_as_control,
+    undecoded_status_kind,
 )
 from .zones import (
     function_selector_name,
@@ -55,6 +65,32 @@ from .zones import (
 )
 
 _CATALOG_REGISTRY = Registry.load_default()
+
+
+def _within_register_bounds(register, value: Any) -> bool:
+    """Check decoded numeric value against the exact integer wire range."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
+        return False
+    match = re.fullmatch(r"(U?)INT(8|16|32)", str(register.storage))
+    if match is None:
+        return False
+    unsigned, width = match.groups()
+    bits = int(width)
+    raw_min, raw_max = (
+        (0, (1 << bits) - 1)
+        if unsigned
+        else (-(1 << (bits - 1)), (1 << (bits - 1)) - 1)
+    )
+    try:
+        numeric = Decimal(str(value))
+        scale = Decimal(str(register.scale or 1))
+        return (
+            scale > 0
+            and Decimal(raw_min) * scale <= numeric <= Decimal(raw_max) * scale
+        )
+    except (InvalidOperation, ValueError):
+        return False
 
 
 def _enum_sensor_options(register, language: str) -> dict[int, str]:
@@ -436,6 +472,13 @@ class OpenRBusRegisterSensor(
         self._attr_entity_registry_enabled_default = enabled_by_default
         self._language = language
         self._effective_access_level = effective_access_level
+        if undecoded_status_kind(register) is not None or (
+            register.datatype == "ENUMERATION"
+            and _enum_sensor_options(register, language)
+        ):
+            # Set this before entity registration even when the initial poll
+            # has no value; HA caches the entity's translation contract.
+            self._attr_translation_key = "register_status"
         self._attr_name = register_name(register, language)
         if selector_name := function_selector_name(self._attr_name, register):
             # Selector coordinates identify the parent-device slot even if
@@ -454,6 +497,12 @@ class OpenRBusRegisterSensor(
             self._attr_native_unit_of_measurement = None
         else:
             self._attr_native_unit_of_measurement = register.unit
+        if is_cumulative_energy_counter(register):
+            self._attr_device_class = SensorDeviceClass.ENERGY
+            self._attr_state_class = SensorStateClass.TOTAL_INCREASING
+        elif is_temperature_measurement(register):
+            self._attr_device_class = SensorDeviceClass.TEMPERATURE
+            self._attr_state_class = SensorStateClass.MEASUREMENT
         address = register.address
         # Node number is a stable protocol identity.  Include the concrete
         # object address, never a localized/display name, in the unique ID.
@@ -466,10 +515,90 @@ class OpenRBusRegisterSensor(
         result = self._result
         if not isinstance(result, GenericRead):
             return None
+        is_energy = is_cumulative_energy_counter(self._register)
+        is_temperature = is_temperature_measurement(self._register)
+        if is_energy or is_temperature:
+            if not _within_register_bounds(self._register, result.value):
+                return None
+            if is_energy and Decimal(str(result.value)) < 0:
+                return None
         if isinstance(result.value, CanOpenTimeOfDay):
             return _time_of_day_native_value(result.value)
         if is_clock_hours_minutes(self._register):
             return hours_minutes_to_text(result.value)
+        status_kind = undecoded_status_kind(self._register)
+        if status_kind:
+            if not _within_register_bounds(self._register, result.value):
+                return None
+            return (
+                "unknown_status_code"
+                if status_kind == "status"
+                else "unknown_error_code"
+            )
+        if (
+            is_undecoded_status_address(self._register)
+            and self._register.datatype != "ENUMERATION"
+            and isinstance(result.value, (int, float, Decimal))
+        ):
+            return None
+        if type(result.value) is int:
+            definition = _CATALOG_REGISTRY.find(self._register.address)
+            wire = getattr(definition, "wire", None)
+            wire_type = getattr(getattr(wire, "type", None), "value", None)
+            if self._register.datatype == "ENUMERATION" or wire_type == "ENUMERATION":
+                if (
+                    wire is not None
+                    and wire.is_array
+                    and self._register.address == definition.address
+                ):
+                    return (
+                        result.value
+                        if type(result.value) is int
+                        and 0 <= result.value <= (wire.max_items or 0)
+                        else None
+                    )
+                if (
+                    definition is None
+                    or wire is None
+                    or self._register.datatype != "ENUMERATION"
+                    or definition.code != self._register.internal_code
+                    or wire_type != "ENUMERATION"
+                    or wire.storage.value != self._register.storage
+                    or self._register.unit is not None
+                    or wire.unit is not None
+                    or getattr(
+                        getattr(definition, "evidence", None), "type_conflict", False
+                    )
+                    or not _within_register_bounds(self._register, result.value)
+                ):
+                    return None
+                address = self._register.address
+                if wire.is_array:
+                    if (
+                        definition.address.index != address.index
+                        or definition.address.subindex != 0
+                        or not 1 <= address.subindex <= (wire.max_items or 0)
+                    ):
+                        return None
+                elif definition.address != address:
+                    return None
+                options = _enum_sensor_options(self._register, self._language)
+            else:
+                options = {}
+            if options:
+                english_labels = dict(enum_options(self._register, "en"))
+                if (
+                    self._register.internal_code == "AM014"
+                    and result.value == 255
+                    and english_labels.get(255) == "SuOutOfResetsWait1Hr"
+                ):
+                    return "reset_limit_wait_one_hour"
+                if result.value not in options:
+                    return (
+                        "unknown_status_code"
+                        if self._register.internal_code in {"AM012", "AM014"}
+                        else "unknown_code"
+                    )
         return _enum_sensor_native_value(self._register, result.value, self._language)
 
     @property
@@ -553,6 +682,30 @@ class OpenRBusRegisterSensor(
     @property
     def extra_state_attributes(self) -> dict[str, object]:
         register = self._register
+        numeric_value = (
+            self._result.value
+            if isinstance(self._result, GenericRead)
+            and _within_register_bounds(register, self._result.value)
+            else None
+        )
+        status_kind = undecoded_status_kind(register)
+        enum_labels = (
+            _enum_sensor_options(register, self._language)
+            if register.datatype == "ENUMERATION"
+            else {}
+        )
+        source_enum_label = (
+            enum_labels.get(self._result.value)
+            if isinstance(self._result, GenericRead) and type(self._result.value) is int
+            else None
+        )
+        decoder_label_known = (
+            source_enum_label is not None
+            if register.datatype == "ENUMERATION"
+            else False
+            if status_kind
+            else None
+        )
         return {
             "node": register.node,
             "index": register.index,
@@ -573,9 +726,14 @@ class OpenRBusRegisterSensor(
             "raw_value": self._result.raw_value.hex()
             if isinstance(self._result, GenericRead)
             else "",
-            "raw_numeric_value": self._result.value
-            if isinstance(self._result, GenericRead) and type(self._result.value) is int
-            else None,
+            "raw_numeric_value": numeric_value,
+            "unknown_decoder": bool(
+                isinstance(self._result, GenericRead)
+                and numeric_value is not None
+                and (status_kind or decoder_label_known is False)
+            ),
+            "decoder_label_known": decoder_label_known,
+            "decoder_source_label": source_enum_label,
             "formatted_time": hours_minutes_to_text(self._result.value)
             if isinstance(self._result, GenericRead)
             and is_clock_hours_minutes(register)

@@ -236,3 +236,82 @@ def test_legacy_sensor_cleanup_for_current_typed_projection_is_preserved(monkeyp
 
     assert register_entities.cleanup_legacy_sensor_entities(object(), parent) == 1
     assert not registry.entities
+
+
+def test_energy_sensor_policy_migrates_existing_number_and_keeps_user_choices(
+    monkeypatch,
+):
+    parent = _parent("energy")
+    row = _row("5044:00")
+    identity = SimpleNamespace(node=4)
+    unique_id = register_entities.entity_unique_id(parent, identity, row)
+    legacy = _entity(
+        "number.my_energy_counter",
+        domain="number",
+        platform="openrbus",
+        unique_id=unique_id,
+        entry_id="energy",
+        name="My heating counter",
+        disabled_by="user",
+        area_id="utility_room",
+    )
+    registry = _Registry([legacy])
+    monkeypatch.setattr(register_entities.er, "async_get", lambda _hass: registry)
+    monkeypatch.setattr(
+        register_entities,
+        "rows_for_parent",
+        lambda _parent: ((identity, row, "standard", True),),
+    )
+    monkeypatch.setattr(register_entities, "control_kind", lambda *_args: "number")
+    monkeypatch.setattr(
+        register_entities, "is_cumulative_energy_counter", lambda _r: True
+    )
+    monkeypatch.setattr(register_entities, "write_access_allowed", lambda *_args: True)
+
+    assert register_entities.cleanup_legacy_sensor_entities(object(), parent) == 1
+    assert not registry.entities
+    assert parent._openrbus_sensor_migrations[unique_id]["name"] == "My heating counter"
+    assert parent._openrbus_sensor_migrations[unique_id]["disabled_by"] == "user"
+    assert parent._openrbus_sensor_migrations[unique_id]["area_id"] == "utility_room"
+
+
+def test_temperature_measurement_never_cleans_up_its_sensor_projection(monkeypatch):
+    parent = _parent("temperature")
+    row = _row("4301:00")
+    identity = SimpleNamespace(node=4)
+    unique_id = register_entities.entity_unique_id(parent, identity, row)
+    number = _entity(
+        "number.old_temperature",
+        domain="number",
+        platform="openrbus",
+        unique_id=unique_id,
+        entry_id="temperature",
+        name="Outdoor temperature",
+        disabled_by="user",
+    )
+    sensor = _entity(
+        "sensor.outdoor_temperature",
+        domain="sensor",
+        platform="openrbus",
+        unique_id=unique_id,
+        entry_id="temperature",
+    )
+    registry = _Registry([number, sensor])
+    monkeypatch.setattr(register_entities.er, "async_get", lambda _hass: registry)
+    monkeypatch.setattr(
+        register_entities,
+        "rows_for_parent",
+        lambda _parent: ((identity, row, "standard", True),),
+    )
+    monkeypatch.setattr(register_entities, "control_kind", lambda *_args: "number")
+    monkeypatch.setattr(
+        register_entities, "is_temperature_measurement", lambda _r: True
+    )
+    monkeypatch.setattr(register_entities, "write_access_allowed", lambda *_args: True)
+
+    assert register_entities.cleanup_legacy_sensor_entities(object(), parent) == 1
+    assert set(registry.entities) == {"sensor.outdoor_temperature"}
+    assert (
+        parent._openrbus_sensor_migrations[unique_id]["name"] == "Outdoor temperature"
+    )
+    assert parent._openrbus_sensor_migrations[unique_id]["disabled_by"] == "user"

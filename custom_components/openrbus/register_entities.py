@@ -75,6 +75,214 @@ from .zones import (
 CATALOG_REGISTRY = Registry.load_default()
 
 
+# These exact OBD objects are monotonically accumulated energy counters in the
+# reviewed controller catalog.  This is an HA presentation policy only: some
+# source rows declare writes, and those Core declarations remain untouched.
+# Array count headers are deliberately excluded; only concrete elements are
+# sensor candidates.
+_CUMULATIVE_ENERGY_ADDRESSES = {
+    (0x5044, 0),
+    (0x5045, 0),
+    (0x5085, 0),
+    (0x5086, 0),
+    (0x5088, 0),
+    (0x5089, 0),
+    (0x50DA, 0),
+    (0x50F7, 0),
+    (0x50F8, 0),
+    (0x512C, None),
+    (0x512D, None),
+    (0x512F, None),
+    (0x5130, None),
+    (0x5131, None),
+    (0x5133, None),
+    (0x5139, None),
+    (0x513B, None),
+    (0x513C, None),
+    (0x513D, None),
+    (0x513E, None),
+    (0x513F, None),
+    (0x5140, None),
+    (0x5141, None),
+    (0x5144, 0),
+}
+
+_TEMPERATURE_MEASUREMENT_CODES = frozenset(
+    {
+        "HM001",
+        "HM002",
+        "HM019",
+        "HM034",
+        "HM035",
+        "HM036",
+        "HM087",
+        "HM094",
+        "HM098",
+        "HM102",
+        "HM111",
+        "HM112",
+        "HM128",
+        "HM185",
+        "HM186",
+        "AM016",
+        "AM027",
+        "AM046",
+        "AM170",
+        "AM175",
+        "BM000",
+        "BM001",
+        "DM001",
+        "DM006",
+        "DM008",
+        "DM062",
+        "DM114",
+    }
+)
+
+# Exact rows from the 2026-10-10 status-detail audit that still lack an
+# enum/bitfield decoder.  Each entry pins Core's code, wire/storage type,
+# gain, unit and scalar/array shape to the audited EHC-16 family.
+_UNDECODED_STATUS_LAYOUTS = {
+    (0x4326, 0): ("HM038", "UINT8", "UINT8", "1", "status"),
+    (0x4356, 0): (None, "UINT8", "UINT8", "1", "status"),
+    (0x437E, 0): ("HM092", "UINT8", "UINT8", "1", "status"),
+    (0x4395, 1): ("HM144", "UINT16", "UINT16", "1", "error"),
+    (0x4397, 0): ("HM119", "UINT8", "UINT8", "1", "status"),
+    (0x4399, 0): ("HM122", "UINT8", "UINT8", "1", "status"),
+    (0x439E, 0): ("HM126", "UINT8", "UINT8", "1", "status"),
+    (0x439F, 0): ("HM127", "UINT8", "UINT8", "1", "status"),
+    (0x43A2, 0): ("HM130", "UINT8", "UINT8", "1", "status"),
+    (0x43B6, 1): ("HM162", "UINT16", "UINT16", "0.01", "error"),
+    (0x43C6, 0): ("HM189", "UINT16", "UINT16", "1", "error"),
+    (0x434C, 0): (None, "INT16", "INT16", "1", "error"),
+    (0x50B3, 1): (None, "UINT8", "UINT8", "1", "status"),
+    (0x517C, 0): ("AM191", "UINT8", "UINT8", "1", "error"),
+}
+
+
+def is_undecoded_status_address(register: RegisterCatalogEntry) -> bool:
+    """Check whether an address is in the audited status fallback scope."""
+
+    return (
+        register.address.index,
+        register.address.subindex,
+    ) in _UNDECODED_STATUS_LAYOUTS
+
+
+def undecoded_status_kind(register: RegisterCatalogEntry) -> str | None:
+    """Return a status fallback only while the full audited Core shape matches."""
+
+    address = register.address
+    layout = _UNDECODED_STATUS_LAYOUTS.get((address.index, address.subindex))
+    if layout is None:
+        return None
+    code, datatype, storage, scale, kind = layout
+    definition = CATALOG_REGISTRY.find(address)
+    wire = getattr(definition, "wire", None)
+    if (
+        definition is None
+        or wire is None
+        or getattr(getattr(definition, "evidence", None), "type_conflict", False)
+        or register.internal_code != code
+        or definition.code != code
+        or register.datatype != datatype
+        or register.storage != storage
+        or wire.type.value != datatype
+        or wire.storage.value != storage
+        or Decimal(str(register.scale or 1)) != Decimal(scale)
+        or Decimal(str(wire.gain or 1)) != Decimal(scale)
+        or register.unit is not None
+        or wire.unit is not None
+        or "ehc-16" not in {str(family).casefold() for family in register.provenance}
+        or "ehc-16"
+        not in {
+            str(getattr(item, "family", item)).casefold()
+            for item in definition.evidence.device_families
+        }
+    ):
+        return None
+    if wire.is_array:
+        if address.subindex == 0 or address.subindex > (wire.max_items or 0):
+            return None
+        if (
+            definition.address.index != address.index
+            or definition.address.subindex != 0
+        ):
+            return None
+    elif address.subindex != 0 or definition.address != address:
+        return None
+    return kind
+
+
+def is_temperature_measurement(register: RegisterCatalogEntry) -> bool:
+    """Recognize catalogued temperature measurements, not temperature settings."""
+
+    definition = CATALOG_REGISTRY.find(register.address)
+    wire = getattr(definition, "wire", None)
+    return (
+        definition is not None
+        and wire is not None
+        and not getattr(getattr(definition, "evidence", None), "type_conflict", False)
+        and getattr(register, "readable", False)
+        and getattr(register, "unit", None) == "°C"
+        and getattr(register, "datatype", None) in {"INT16", "UINT16"}
+        and getattr(register, "storage", None) in {"INT16", "UINT16"}
+        and getattr(register, "internal_code", None) in _TEMPERATURE_MEASUREMENT_CODES
+        and definition.code == getattr(register, "internal_code", None)
+        and wire.type.value == getattr(register, "datatype", None)
+        and wire.storage.value == getattr(register, "storage", None)
+        and wire.unit == "°C"
+        and Decimal(str(getattr(register, "scale", None) or 1))
+        == Decimal(str(wire.gain or 1))
+        and not wire.is_array
+        and definition.address == register.address
+    )
+
+
+def is_cumulative_energy_counter(register: RegisterCatalogEntry) -> bool:
+    """Recognize reviewed kWh counters without treating unit as semantics."""
+
+    address = register.address
+    allowed_subindex = next(
+        (
+            subindex
+            for index, subindex in _CUMULATIVE_ENERGY_ADDRESSES
+            if index == address.index
+        ),
+        -1,
+    )
+    if allowed_subindex == -1:
+        return False
+    definition = CATALOG_REGISTRY.find(address)
+    wire = getattr(definition, "wire", None)
+    if (
+        definition is None
+        or wire is None
+        or getattr(getattr(definition, "evidence", None), "type_conflict", False)
+    ):
+        return False
+    if allowed_subindex is not None:
+        if address.subindex != allowed_subindex or wire.is_array:
+            return False
+    elif (
+        not wire.is_array
+        or address.subindex == 0
+        or address.subindex > (wire.max_items or 0)
+    ):
+        return False
+    return (
+        register.readable
+        and register.unit == "kWh"
+        and register.datatype in {"UINT16", "UINT32"}
+        and register.storage in {"UINT16", "UINT32"}
+        and register.internal_code == definition.code
+        and register.datatype == wire.type.value
+        and register.storage == wire.storage.value
+        and wire.unit == "kWh"
+        and Decimal(str(register.scale or 1)) == Decimal(str(wire.gain or 1))
+    )
+
+
 def register_name(register: RegisterCatalogEntry, language: str) -> str:
     """Return a Core locale label while supporting the previous catalog API."""
 
@@ -1453,12 +1661,10 @@ def cleanup_legacy_sensor_entities(
         effective = parent.effective_access_levels.get(identity.node)
         if effective is None and parent.configured_access_level == 1:
             effective = 1
-        if control_kind(register, parent.language) is None or not write_access_allowed(
-            parent, register, effective
-        ):
-            downgrade_rows.add(unique_id)
-        else:
+        if should_project_as_control(parent, register, effective):
             typed_rows.add(unique_id)
+        else:
+            downgrade_rows.add(unique_id)
     removed = 0
     for entity in registry_entries:
         if (
@@ -1971,6 +2177,12 @@ def should_project_as_control(
 ) -> bool:
     """Use a typed HA control only when both policy and Core evidence allow writes."""
 
+    if is_cumulative_energy_counter(register):
+        return False
+    if is_temperature_measurement(register):
+        return False
+    if undecoded_status_kind(register) is not None:
+        return False
     return control_kind(register, parent.language) is not None and write_access_allowed(
         parent, register, effective_access_level
     )
@@ -2320,12 +2532,16 @@ __all__ = [
     "entity_unique_id",
     "enum_for",
     "enum_options",
+    "is_cumulative_energy_counter",
+    "is_temperature_measurement",
+    "is_undecoded_status_address",
     "number_bounds",
     "poll_group",
     "recommended_addresses",
     "restore_migrated_sensor_entities",
     "rows_for_parent",
     "runtime_nodes",
+    "undecoded_status_kind",
     "write_access_allowed",
     "zone_row_enabled",
 ]
