@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -91,6 +92,28 @@ def _within_register_bounds(register, value: Any) -> bool:
         )
     except (InvalidOperation, ValueError):
         return False
+
+
+def _json_safe_numeric_value(register, value: Any) -> int | float | None:
+    """Return a bounded numeric attribute using JSON-native scalar types."""
+
+    if not _within_register_bounds(register, value):
+        return None
+    if type(value) is int:
+        return value
+    if type(value) is float:
+        return value if math.isfinite(value) else None
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            return None
+        if value == value.to_integral_value():
+            return int(value)
+        try:
+            converted = float(value)
+        except (OverflowError, ValueError):
+            return None
+        return converted if math.isfinite(converted) else None
+    return None
 
 
 def _enum_sensor_options(register, language: str) -> dict[int, str]:
@@ -683,9 +706,8 @@ class OpenRBusRegisterSensor(
     def extra_state_attributes(self) -> dict[str, object]:
         register = self._register
         numeric_value = (
-            self._result.value
+            _json_safe_numeric_value(register, self._result.value)
             if isinstance(self._result, GenericRead)
-            and _within_register_bounds(register, self._result.value)
             else None
         )
         status_kind = undecoded_status_kind(register)

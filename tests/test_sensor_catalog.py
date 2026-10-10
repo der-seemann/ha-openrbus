@@ -144,8 +144,12 @@ def test_unproven_statuses_are_explicit_unknown_text_with_raw_attributes() -> No
     assert protection.extra_state_attributes["unknown_decoder"] is True
     assert protection.extra_state_attributes["decoder_label_known"] is False
     assert error.native_value == "unknown_error_code"
-    assert error.extra_state_attributes["raw_numeric_value"] == Decimal("655.35")
+    assert error.extra_state_attributes["raw_numeric_value"] == 655.35
     assert error.extra_state_attributes["unknown_decoder"] is True
+    assert (
+        json.loads(json.dumps(error.extra_state_attributes))["raw_numeric_value"]
+        == 655.35
+    )
 
 
 def test_unknown_enum_code_is_text_and_keeps_raw_value() -> None:
@@ -191,6 +195,8 @@ def test_energy_counters_are_sensor_only_with_total_increasing_semantics() -> No
     assert child_sensor.state_class.value == "total_increasing"
     assert scalar_sensor.native_value == 0
     assert child_sensor.native_value == Decimal("2413.6")
+    assert child_sensor.extra_state_attributes["raw_numeric_value"] == 2413.6
+    json.dumps(child_sensor.extra_state_attributes)
     assert _register_sensor(identity, scalar, Decimal(-1)).native_value is None
     assert _register_sensor(identity, scalar, True).native_value is None
     assert _register_sensor(identity, scalar, float("inf")).native_value is None
@@ -210,6 +216,15 @@ def test_temperature_class_only_marks_source_coded_measurements() -> None:
     sensor = _register_sensor(identity, measured, 36)
     assert sensor.device_class.value == "temperature"
     assert sensor.state_class.value == "measurement"
+    decimal_sensor = _register_sensor(identity, measured, Decimal("36.125"))
+    assert decimal_sensor.extra_state_attributes["raw_numeric_value"] == 36.125
+    json.dumps(decimal_sensor.extra_state_attributes)
+    overflow_scale = replace(measured, scale=Decimal("1e310"))
+    overflow_sensor = _register_sensor(
+        identity, overflow_scale, Decimal("1" + "0" * 309 + ".5")
+    )
+    assert overflow_sensor.extra_state_attributes["raw_numeric_value"] is None
+    json.dumps(overflow_sensor.extra_state_attributes)
     assert _register_sensor(identity, measured, float("nan")).native_value is None
     assert _register_sensor(identity, setpoint, 40).device_class is None
 
