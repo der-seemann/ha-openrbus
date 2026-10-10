@@ -551,13 +551,7 @@ class OpenRBusRegisterSensor(
             return hours_minutes_to_text(result.value)
         status_kind = undecoded_status_kind(self._register)
         if status_kind:
-            if not _within_register_bounds(self._register, result.value):
-                return None
-            return (
-                "unknown_status_code"
-                if status_kind == "status"
-                else "unknown_error_code"
-            )
+            return _json_safe_numeric_value(self._register, result.value)
         if (
             is_undecoded_status_address(self._register)
             and self._register.datatype != "ENUMERATION"
@@ -617,11 +611,7 @@ class OpenRBusRegisterSensor(
                 ):
                     return "reset_limit_wait_one_hour"
                 if result.value not in options:
-                    return (
-                        "unknown_status_code"
-                        if self._register.internal_code in {"AM012", "AM014"}
-                        else "unknown_code"
-                    )
+                    return _json_safe_numeric_value(self._register, result.value)
         return _enum_sensor_native_value(self._register, result.value, self._language)
 
     @property

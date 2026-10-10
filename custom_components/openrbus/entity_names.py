@@ -155,6 +155,15 @@ _REGISTER_NAMES_DE_BY_ADDRESS = {
         None,
         False,
     ),
+    "434b:00": (
+        None,
+        "Modulationsgrad AE",
+        "Modulationsgrad der Wärmepumpen-Außeneinheit",
+        "UINT8",
+        "UINT8",
+        None,
+        False,
+    ),
 }
 
 _REGISTER_ARRAY_NAMES_DE = {

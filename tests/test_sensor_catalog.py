@@ -15,6 +15,8 @@ from openrbus.value_codec import CanOpenTimeOfDay
 from custom_components.openrbus import register_entities as register_entities_module
 from custom_components.openrbus import sensor as sensor_module
 from custom_components.openrbus.bridge import GenericRead
+from custom_components.openrbus.entity_names import suggested_object_id
+from custom_components.openrbus.identity import stable_object_id
 from custom_components.openrbus.register_entities import (
     control_kind,
     entity_unique_id,
@@ -134,39 +136,63 @@ def test_status_and_substatus_sensors_show_catalogued_german_labels() -> None:
     assert reset_limit.translation_key == "register_status"
 
 
-def test_unproven_statuses_are_explicit_unknown_text_with_raw_attributes() -> None:
+def test_unproven_statuses_keep_numeric_values_with_raw_attributes() -> None:
     protection = _status_sensor("4356:00", 11)
     error = _status_sensor("43b6:01", Decimal("655.35"))
 
-    assert protection.native_value == "unknown_status_code"
+    assert protection.native_value == 11
     assert protection.translation_key == "register_status"
     assert protection.extra_state_attributes["raw_numeric_value"] == 11
     assert protection.extra_state_attributes["unknown_decoder"] is True
     assert protection.extra_state_attributes["decoder_label_known"] is False
-    assert error.native_value == "unknown_error_code"
+    assert error.native_value == 655.35
     assert error.extra_state_attributes["raw_numeric_value"] == 655.35
     assert error.extra_state_attributes["unknown_decoder"] is True
-    assert (
-        json.loads(json.dumps(error.extra_state_attributes))["raw_numeric_value"]
-        == 655.35
+    encoded = json.loads(
+        json.dumps({"state": error.native_value, **error.extra_state_attributes})
     )
+    assert encoded["state"] == encoded["raw_numeric_value"] == 655.35
 
 
-def test_unknown_enum_code_is_text_and_keeps_raw_value() -> None:
+def test_unknown_enum_code_is_numeric_and_keeps_raw_value() -> None:
     unknown = _status_sensor("500f:00", 255)
-    assert unknown.native_value == "unknown_status_code"
+    assert unknown.native_value == 255
     assert unknown.extra_state_attributes["raw_numeric_value"] == 255
     assert unknown.extra_state_attributes["unknown_decoder"] is True
+    assert (
+        json.loads(json.dumps(unknown.extra_state_attributes))["raw_numeric_value"]
+        == 255
+    )
 
 
 def test_enum_sensor_keeps_unknown_values_and_existing_text_unchanged() -> None:
     unknown = _status_sensor("500f:00", 253)
     text_value = _status_sensor("5011:00", "vendor text")
 
-    assert unknown.native_value == "unknown_status_code"
+    assert unknown.native_value == 253
     assert unknown.extra_state_attributes["raw_numeric_value"] == 253
     assert text_value.native_value == "vendor text"
     assert text_value.extra_state_attributes["raw_numeric_value"] is None
+
+
+def test_odu_modulation_level_has_source_backed_name_and_no_percent_semantics() -> None:
+    identity = resolve_device_identity(
+        DeviceIdentity(1, None, None, "EHC-16", family="Ehc-16")
+    )
+    register = next(
+        row
+        for row in catalog_for_node(identity)
+        if row.address == ObjectAddress.parse("434b:00")
+    )
+    entity = _register_sensor(identity, register, 120)
+    assert entity.name == "Modulationsgrad der Wärmepumpen-Außeneinheit"
+    assert entity.native_unit_of_measurement is None
+    assert entity.device_class is None
+    assert entity.state_class is None
+    assert suggested_object_id(
+        SimpleNamespace(language="de"), identity, register
+    ).endswith("odu_modulation_level")
+    assert entity.unique_id == stable_object_id(entity._parent, 1, 0x434B, 0)
 
 
 def test_enum_sensor_does_not_treat_boolean_as_numeric_enum() -> None:
@@ -289,17 +315,8 @@ def test_status_translation_contract_is_static_and_uses_ha_state_translation(
         ]
     )
     unknown = _status_sensor("500f:00", 255)
-    assert (
-        ha_translation.async_translate_state(
-            hass,
-            unknown.native_value,
-            "sensor",
-            "openrbus",
-            unknown.translation_key,
-            None,
-        )
-        == "Unbekannter Statuscode"
-    )
+    assert unknown.native_value == 255
+    assert unknown.translation_key == "register_status"
     no_read = _status_sensor("5011:00", None)
     assert no_read.native_value is None
     assert no_read.translation_key == "register_status"

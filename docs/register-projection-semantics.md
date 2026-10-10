@@ -32,14 +32,14 @@ The 14 unresolved status/error objects are classified only when their exact
 address, EHC-16 provenance, Core definition/code, numeric wire and storage
 types, scale, no-unit declaration, and scalar/array bounds match the layout
 allowlist in `register_entities.py`. They are sensors and carry no unit or
-statistics class. An undecoded value maps to a fixed HA state key
-(`unknown_status_code` or `unknown_error_code`); the numeric value and raw wire
-bytes remain in state attributes. This keeps the translation key stable and
-avoids claiming that an unexplained integer has a physical meaning. Unknown
-values of fully catalogued enumerations use `unknown_status_code` for the two
-status enums, or `unknown_code` for other enumerations; invalid wire values are
-unavailable. Existing enum option values and control write encodings are not
-changed.
+statistics class. An undecoded numeric value remains the bounded, JSON-safe
+numeric HA state; attributes retain the scaled numeric value, raw wire bytes,
+and `decoder_label_known=false`. Unknown numeric values of catalogued
+enumerations also remain numeric states when Core has no label for them. Known
+enum values continue to use their existing labels, including the AM014
+`5011:00=255` reset-wait translation. Invalid wire values are unavailable.
+This avoids assigning unexplained integers a fabricated meaning. Existing enum
+option values and control write encodings are not changed.
 
 The exact 14 source rows reviewed are `4326:00` (HM038), `4356:00`, `437e:00`
 (HM092), `4395:01` (HM144), `4397:00` (HM119), `4399:00` (HM122), `439e:00`
@@ -53,12 +53,25 @@ code means. A bounded Core and source search found no usable decoder for these
 For the catalogued `DeviceSubStatus` enum at `5011:00`, Core's English value
 255 is `SuOutOfResetsWait1Hr`; the integration uses the neutral user-facing
 translation “Reset limit reached; wait one hour (substatus 255)” without
-expanding the unexplained `Su` prefix. Other enum machine values are retained
-as returned by Core. Translation keys are assigned from the static source
+expanding the unexplained `Su` prefix. Other known enum values retain the
+existing catalog labels. Translation keys are assigned from the static source
 classification during entity construction, including before the first read;
-the API state itself is a stable machine key, while Home Assistant's translated
-state is the user-facing phrase. Raw code, source enum label, and wire bytes are
-available as attributes. Friendly names and stable unique IDs are unaffected.
+the AM014 `255` machine key remains available for Home Assistant translation.
+Unknown numeric codes remain numeric and keep the static translation contract;
+raw code, source enum label, and wire bytes are available as attributes.
+Friendly names and stable unique IDs are unaffected.
+
+## Outdoor-unit modulation level
+
+The EHC-16 Core entry `434b:00` is `UINT8`, gain 1, and unitless. The targeted
+manufacturer OBD 1.47 definition describes the outdoor-unit modulation level
+as an encoded control level mapped to compressor speeds; it does not define a
+percent unit or a physical output/capacity scale. The related `438a:00`
+accurate modulation level is also unitless, while the separate `438b:00`
+relative fan-speed entry explicitly has `%`. HA therefore names `434b:00`
+“Modulationsgrad der Wärmepumpen-Außeneinheit” and publishes the encoded value
+without a percent unit, device class, or state class. The encoded endpoints are
+not treated as physical minimum/maximum or as a power measurement.
 
 ## Evidence limits
 
