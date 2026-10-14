@@ -1,6 +1,7 @@
 """Focused config-flow contract tests."""
 
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, call
@@ -1017,6 +1018,36 @@ def test_warning_translation_files_have_matching_fragments_and_placeholder() -> 
     assert "{warning}" in german["config"]["step"]["access_warning"]["description"]
     assert "{warning}" in source["options"]["step"]["access_warning"]["description"]
     assert "{warning}" in german["options"]["step"]["access_warning"]["description"]
+
+
+def test_options_translations_match_flow_schema_and_placeholders() -> None:
+    root = Path(__file__).parents[1] / "custom_components" / "openrbus" / "translations"
+    english = json.loads((root / "en.json").read_text())["options"]["step"]
+    german = json.loads((root / "de.json").read_text())["options"]["step"]
+
+    def leaves(value, prefix=""):
+        result = {}
+        if isinstance(value, dict):
+            for key, item in value.items():
+                result.update(leaves(item, f"{prefix}/{key}"))
+        elif isinstance(value, str):
+            result[prefix] = value
+        return result
+
+    english_leaves = leaves(english)
+    german_leaves = leaves(german)
+    assert set(german_leaves) == set(english_leaves)
+    for key, english_value in english_leaves.items():
+        english_placeholders = set(re.findall(r"{([^{}]+)}", english_value))
+        german_placeholders = set(re.findall(r"{([^{}]+)}", german_leaves[key]))
+        assert german_placeholders == english_placeholders, key
+    assert set(german["init"]["menu_options"]) == {
+        "connection",
+        "access",
+        "features",
+        "polling",
+        "save",
+    }
 
 
 @pytest.mark.asyncio
