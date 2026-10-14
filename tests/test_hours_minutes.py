@@ -26,6 +26,7 @@ from custom_components.openrbus.register_entities import (
 )
 from custom_components.openrbus.sensor import OpenRBusRegisterSensor
 from custom_components.openrbus.time import OpenRBusTime, _enabled_number_row
+from custom_components.openrbus.zones import ZoneProfile, ZoneReadState
 
 
 def _row(family: str, address: str):
@@ -160,6 +161,14 @@ class _FakeEntityRegistry:
         )
         return entity.entity_id if entity else None
 
+    def async_update_entity(self, entity_id, **changes):
+        for entity in self.entities.values():
+            if entity.entity_id == entity_id:
+                for key, value in changes.items():
+                    setattr(entity, key, value)
+                return entity
+        raise AssertionError("unknown entity registry row")
+
 
 @pytest.mark.parametrize("disabled_by", [None, "user", "integration"])
 def test_time_companion_follows_the_existing_number_enabled_state(
@@ -213,6 +222,7 @@ async def test_time_setup_adds_companion_only_for_enabled_number(
     )
     monkeypatch.setattr(time_module, "catalog_visible", lambda *_args: True)
     monkeypatch.setattr(time_module, "should_project_as_control", lambda *_args: True)
+    monkeypatch.setattr(time_module, "zone_row_enabled", lambda *_args: True)
     monkeypatch.setattr(time_module, "number_bounds", lambda _register: (0, 143, 1))
 
     await time_module.async_setup_entry(
@@ -265,6 +275,7 @@ async def test_enabled_time_companion_survives_disabled_legacy_number(monkeypatc
     )
     monkeypatch.setattr(time_module, "catalog_visible", lambda *_args: True)
     monkeypatch.setattr(time_module, "should_project_as_control", lambda *_args: True)
+    monkeypatch.setattr(time_module, "zone_row_enabled", lambda *_args: True)
     monkeypatch.setattr(time_module, "number_bounds", lambda _register: (0, 143, 1))
 
     await time_module.async_setup_entry(
@@ -273,6 +284,74 @@ async def test_enabled_time_companion_survives_disabled_legacy_number(monkeypatc
 
     assert len(added) == 1
     assert added[0].unique_id == existing_time.unique_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("function", "initial_disabled_by", "expected_count", "expected_disabled_by"),
+    [
+        (2, None, 0, "integration"),
+        (2, "user", 0, "user"),
+        (6, "integration", 1, None),
+    ],
+)
+async def test_antilegionella_time_companion_follows_zone_function(
+    monkeypatch,
+    function: int,
+    initial_disabled_by: str | None,
+    expected_count: int,
+    expected_disabled_by: str | None,
+) -> None:
+    identity, register = _row("SCB-10", "3429:01")
+    parent = _parent()
+    parent.effective_access_levels = {identity.node: 2}
+    parent.configured_access_level = 2
+    parent.zone_profiles = {(identity.node, 1): ZoneProfile(identity.node, 1, function)}
+    parent.zone_profile_states = {(identity.node, 1): ZoneReadState.CONFIRMED_ACTIVE}
+    parent.zone_overrides = {}
+    parent._zone_confirmed_active_slots = {(identity.node, 1)}
+    entry = SimpleNamespace(runtime_data=parent)
+    number = SimpleNamespace(
+        entity_id="number.cp390",
+        domain="number",
+        unique_id=entity_unique_id(parent, identity, register),
+        disabled_by=None,
+    )
+    existing_time = SimpleNamespace(
+        entity_id="time.cp390_time",
+        domain="time",
+        unique_id=f"{number.unique_id}:time",
+        disabled_by=initial_disabled_by,
+    )
+    registry = _FakeEntityRegistry(number, existing_time)
+    coordinator = SimpleNamespace()
+    added = []
+    monkeypatch.setattr(time_module.er, "async_get", lambda _hass: registry)
+    monkeypatch.setattr(
+        time_module, "async_apply_diagnostic_visibility", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        time_module,
+        "ensure_polling_coordinators",
+        lambda *_args: {"standard": coordinator},
+    )
+    monkeypatch.setattr(
+        time_module,
+        "rows_for_parent",
+        lambda *_args: ((identity, register, "standard", True),),
+    )
+    monkeypatch.setattr(time_module, "catalog_visible", lambda *_args: True)
+    monkeypatch.setattr(time_module, "should_project_as_control", lambda *_args: True)
+    monkeypatch.setattr(time_module, "number_bounds", lambda _register: (0, 143, 1))
+
+    await time_module.async_setup_entry(
+        SimpleNamespace(), entry, lambda entities: added.extend(entities)
+    )
+
+    assert len(added) == expected_count
+    assert existing_time.disabled_by == expected_disabled_by
+    if expected_count:
+        assert added[0].unique_id == existing_time.unique_id
 
 
 def test_time_entity_reads_native_time_and_keeps_raw_values() -> None:

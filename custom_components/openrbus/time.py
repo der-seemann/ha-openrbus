@@ -29,6 +29,7 @@ from .register_entities import (
     number_bounds,
     rows_for_parent,
     should_project_as_control,
+    zone_row_enabled,
 )
 
 
@@ -56,6 +57,15 @@ def _enabled_existing_time_row(registry, unique_id: str):
     return entity
 
 
+def _existing_time_row(registry, unique_id: str):
+    """Find the persisted time companion regardless of its enabled state."""
+
+    entity_id = registry.async_get_entity_id("time", DOMAIN, f"{unique_id}:time")
+    if entity_id is None:
+        return None
+    return registry.entities.get(entity_id)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -71,6 +81,18 @@ async def async_setup_entry(
     for identity, register, group, _poll_allowed in rows_for_parent(parent):
         if not register.readable or not is_clock_hours_minutes(register):
             continue
+        base_unique_id = entity_unique_id(parent, identity, register)
+        time_entry = _existing_time_row(registry, base_unique_id)
+        if not zone_row_enabled(parent, identity, register):
+            if (
+                time_entry is not None
+                and getattr(time_entry, "disabled_by", None) is None
+            ):
+                registry.async_update_entity(
+                    time_entry.entity_id,
+                    disabled_by=er.RegistryEntryDisabler.INTEGRATION,
+                )
+            continue
         effective = parent.effective_access_levels.get(identity.node)
         if effective is None and parent.configured_access_level == 1:
             effective = 1
@@ -81,7 +103,6 @@ async def async_setup_entry(
         ):
             continue
 
-        base_unique_id = entity_unique_id(parent, identity, register)
         number_entry = _enabled_number_row(registry, base_unique_id)
         existing_time_entry = _enabled_existing_time_row(registry, base_unique_id)
         # Keep the time picker inside the existing user's selected read/write
@@ -92,6 +113,12 @@ async def async_setup_entry(
         bounds = number_bounds(register)
         if bounds is None or bounds != (0, 143, 1):
             continue
+        if (
+            number_entry is not None
+            and time_entry is not None
+            and getattr(time_entry, "disabled_by", None) == "integration"
+        ):
+            registry.async_update_entity(time_entry.entity_id, disabled_by=None)
         entities.append(
             OpenRBusTime(
                 parent,
