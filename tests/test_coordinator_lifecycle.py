@@ -45,7 +45,11 @@ from custom_components.openrbus.coordinator import (
     schedule_first_refresh_in_background,
 )
 from custom_components.openrbus.identity import stable_object_id
-from custom_components.openrbus.transport import ThinRpcCapability, select_backend_mode
+from custom_components.openrbus.transport import (
+    ThinRpcBackend,
+    ThinRpcCapability,
+    select_backend_mode,
+)
 from custom_components.openrbus.zone_projection_storage import (
     async_load_zone_projection,
 )
@@ -247,6 +251,52 @@ async def test_cleanup_failure_keeps_thin_owner_fenced(monkeypatch) -> None:
 
     assert coordinator._startup_cleanup_failed
     assert backend._owns_controller is True
+
+
+@pytest.mark.asyncio
+async def test_startup_cancel_bounds_hung_disconnect_diagnostics_and_keeps_owner(
+    monkeypatch,
+) -> None:
+    """Unload after pending startup stays bounded and fenced when ESPHome stalls."""
+    monkeypatch.setattr(
+        "custom_components.openrbus.transport._THIN_DISCONNECT_TIMEOUT", 0.02
+    )
+
+    class _Channel:
+        async def diagnostics(self, *, timeout=None):
+            assert timeout is not None and 0 < timeout <= 0.02
+            await asyncio.wait_for(asyncio.Event().wait(), timeout=timeout)
+
+    class _Link:
+        is_connected = True
+
+        async def disconnect(self, *, timeout):
+            assert timeout > 0
+            self.is_connected = False
+
+    backend = ThinRpcBackend(
+        _hass(), controller_id="startup-cancel", channel=_Channel()
+    )
+    backend.link = _Link()
+    backend.session = object()
+    backend._owns_controller = True
+    backend._owner_generation = 1
+    backend._controller_owner_generations[backend.controller_id] = 1
+    backend._started = True
+    never_finishes = asyncio.Event()
+    coordinator = _StartupHarness(
+        hass=_startup_hass(), backend=backend, start=never_finishes.wait
+    )
+    coordinator._startup_task = asyncio.create_task(never_finishes.wait())
+
+    with pytest.raises(HomeAssistantError, match="cleanup did not prove disconnect"):
+        await asyncio.wait_for(coordinator.async_cancel_initial_startup(), timeout=0.2)
+
+    assert coordinator._startup_task.cancelled()
+    assert coordinator._startup_cleanup_failed
+    assert backend._owns_controller is True
+    assert backend._started is True
+    assert backend.session is not None
 
 
 @pytest.mark.asyncio

@@ -115,7 +115,7 @@ Remove the OpenRBus config entry from **Settings → Devices & services**, then 
 
 ## Development and release validation
 
-The current release candidate is version `0.4.6`. The HA integration and the `openrbus` protocol core are versioned independently, and the HA manifest pins the compatible Core release exactly. Run the test suite in a Home Assistant development environment with the pinned dependencies in `requirements-test.txt`:
+The latest published HA release is `0.4.7`; this branch prepares candidate `0.4.8`. The HA integration and the `openrbus` protocol core are versioned independently, and the HA manifest pins the compatible Core release exactly. Run the test suite in a Home Assistant development environment with the pinned dependencies in `requirements-test.txt`:
 
 ```console
 python -m pip install -r requirements-test.txt

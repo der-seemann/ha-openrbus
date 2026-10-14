@@ -84,6 +84,7 @@ _FUNCTION_ONLY_OBJECTS: Mapping[int, frozenset[int]] = MappingProxyType(
                 0x3427,
                 0x3428,
                 0x3429,
+                0x342A,
                 0x342C,
                 0x342D,
                 0x342E,

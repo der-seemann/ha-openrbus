@@ -704,6 +704,69 @@ def test_exact_cp020_function_relevance_gates_zone_rows() -> None:
     assert register_entities.zone_row_enabled(parent, identity, dhw_row)
 
 
+def test_antilegionella_duration_registry_tracks_cp020_and_preserves_user_disable(
+    monkeypatch,
+) -> None:
+    identity = SimpleNamespace(node=3, family="SCB-10")
+    row = _register("342a:01", levels=("User",))
+    entity = SimpleNamespace(
+        platform=DOMAIN,
+        config_entry_id="entry",
+        unique_id="zone-cp400",
+        entity_id="sensor.zone_cp400",
+        disabled_by=None,
+    )
+
+    class Registry:
+        def __init__(self):
+            self.entities = {entity.entity_id: entity}
+
+        def async_update_entity(self, entity_id, **changes):
+            self.entities[entity_id].disabled_by = changes["disabled_by"]
+
+    registry = Registry()
+    parent = SimpleNamespace(
+        config_entry=SimpleNamespace(entry_id="entry", data={}, options={}),
+        entity_overrides={"zone-cp400": True},
+        effective_access_levels={},
+        language="en",
+        configured_access_level=1,
+        write_enabled=False,
+        zone_profiles={(3, 1): ZoneProfile(3, 1, 2)},
+        zone_profile_states={(3, 1): ZoneReadState.CONFIRMED_ACTIVE},
+        _zone_confirmed_active_slots={(3, 1)},
+        zone_overrides={},
+    )
+    row.writable = False
+    row.write_declared = False
+    monkeypatch.setattr(register_entities.er, "async_get", lambda _hass: registry)
+    monkeypatch.setattr(
+        register_entities,
+        "rows_for_parent",
+        lambda *_args, **_kwargs: ((identity, row, "standard", True),),
+    )
+    monkeypatch.setattr(
+        register_entities, "entity_unique_id", lambda *_args: "zone-cp400"
+    )
+
+    # CP400 is a DHW duration. A mixer zone is integration-disabled, then
+    # positively re-enabled when the same CP020 slot becomes DHW.
+    register_entities.async_apply_entity_overrides(object(), parent)
+    assert entity.disabled_by == "integration"
+    parent.zone_profiles[(3, 1)] = ZoneProfile(3, 1, 6)
+    register_entities.async_apply_entity_overrides(object(), parent)
+    assert entity.disabled_by is None
+
+    # An explicit HA user disable remains authoritative across a later
+    # function transition and reconciliation.
+    entity.disabled_by = "user"
+    parent.zone_profiles[(3, 1)] = ZoneProfile(3, 1, 2)
+    register_entities.async_apply_entity_overrides(object(), parent)
+    parent.zone_profiles[(3, 1)] = ZoneProfile(3, 1, 6)
+    register_entities.async_apply_entity_overrides(object(), parent)
+    assert entity.disabled_by == "user"
+
+
 def test_select_maps_polled_raw_enum_without_write_authorization() -> None:
     address = ObjectAddress(0x346A, 0x04)
     entity = OpenRBusSelect.__new__(OpenRBusSelect)

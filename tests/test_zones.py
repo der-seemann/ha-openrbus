@@ -50,9 +50,33 @@ def test_specialized_zone_registers_follow_exact_cp020_membership() -> None:
     process = ZoneProfile(4, 0, 9)
     unknown = ZoneProfile(4, 0, None)
 
-    # The same address gate backs projected entities, picker catalog and poll
-    # selection through zone_row_enabled.
-    for address in (0x3456, 0x363D, 0x5433, 0x5450, 0x561E):
+    # The exact source-backed anti-Legionella set includes duration,
+    # schedule, setpoint, error, status and timestamp objects. The same
+    # address gate backs entities, picker catalog and polling through
+    # zone_row_enabled.
+    anti_legionella_addresses = (
+        0x3428,
+        0x3429,
+        0x342A,
+        0x3456,
+        0x345E,
+        0x348F,
+        0x3490,
+        0x3491,
+        0x365D,
+        0x3680,
+        0x3681,
+        0x3686,
+        0x3687,
+        0x36AA,
+        0x36AB,
+        0x5450,
+        0x5451,
+        0x5452,
+        0x561E,
+        0x561F,
+    )
+    for address in anti_legionella_addresses:
         assert not zone_function_supports_object(mixer, address)
         assert zone_function_supports_object(dhw, address)
         assert not zone_function_supports_object(unknown, address)
