@@ -771,12 +771,12 @@ async def test_transport_recovery_records_disconnect_exception_class() -> None:
 @pytest.mark.asyncio
 async def test_wait_for_physical_disconnect_times_out(monkeypatch) -> None:
     class _Channel:
-        async def diagnostics(self):
+        async def diagnostics(self, *, timeout=None):
             return {"link_active": True, "parent_connected": True}
 
     backend = ThinRpcBackend(_hass(), controller_id="controller", channel=_Channel())
     monkeypatch.setattr(
-        "custom_components.openrbus.transport._THIN_DISCONNECT_TIMEOUT", 0
+        "custom_components.openrbus.transport._THIN_DISCONNECT_TIMEOUT", 0.02
     )
 
     with pytest.raises(HomeAssistantError, match="physical disconnect"):
@@ -801,7 +801,7 @@ async def test_wait_for_physical_disconnect_requires_both_live_states_down(
                 {"link_active": False, "parent_connected": False, "epoch": 7},
             ]
 
-        async def diagnostics(self):
+        async def diagnostics(self, *, timeout=None):
             return self.snapshots.pop(0)
 
     channel = _Channel()
@@ -813,6 +813,36 @@ async def test_wait_for_physical_disconnect_requires_both_live_states_down(
     await backend._wait_for_physical_disconnect()
 
     assert channel.snapshots == []
+
+
+@pytest.mark.asyncio
+async def test_disconnect_diagnostics_wait_is_bounded_and_keeps_owner(
+    monkeypatch,
+) -> None:
+    """A stuck ESPHome diagnostics call cannot hang startup cleanup or free ownership."""
+    monkeypatch.setattr(
+        "custom_components.openrbus.transport._THIN_DISCONNECT_TIMEOUT", 0.02
+    )
+
+    class _Channel:
+        async def diagnostics(self, *, timeout=None):
+            assert timeout is not None and 0 < timeout <= 0.02
+            await asyncio.wait_for(asyncio.Event().wait(), timeout=timeout)
+
+    backend = ThinRpcBackend(_hass(), controller_id="controller", channel=_Channel())
+    backend._owns_controller = True
+    backend._owner_generation = 1
+    backend._controller_owner_generations["controller"] = 1
+    backend._started = True
+    backend.session = object()
+    backend.link = SimpleNamespace(is_connected=True)
+
+    with pytest.raises(HomeAssistantError, match="could not be observed"):
+        await asyncio.wait_for(backend.async_stop(), timeout=0.2)
+
+    assert backend._owns_controller is True
+    assert backend._started is True
+    assert backend.session is not None
 
 
 @pytest.mark.asyncio
@@ -899,7 +929,7 @@ async def test_single_read_capture_tags_frames_and_brackets_proxy_counters() -> 
         ]
     )
 
-    async def diagnostics():
+    async def diagnostics(*, timeout=None):
         return next(snapshots)
 
     channel.diagnostics = diagnostics
@@ -1167,7 +1197,7 @@ async def test_batch_failure_trace_falls_back_to_same_window_proxy_request_id() 
     backend.frame_trace = []
 
     class _Channel:
-        async def diagnostics(self):
+        async def diagnostics(self, *, timeout=None):
             return {"epoch": 8, "last_rpc_request_id": 1141}
 
     backend.channel = _Channel()
@@ -1224,7 +1254,7 @@ async def test_failed_thin_reprepare_releases_backend_lifecycle_for_next_poll() 
     backend.session = SimpleNamespace(connected=False, identity=None, epoch=0)
     backend.link = object()
     backend.channel = SimpleNamespace(
-        diagnostics=lambda: asyncio.sleep(
+        diagnostics=lambda *, timeout=None: asyncio.sleep(
             0, result={"link_active": False, "parent_connected": False}
         )
     )
@@ -1583,7 +1613,7 @@ async def test_matching_connect_seq_one_is_valid_for_fresh_or_attach_baseline() 
             del timeout
             return self.frames.pop(0) if self.frames else None
 
-        async def diagnostics(self):
+        async def diagnostics(self, *, timeout=None):
             return {}
 
     assert await ThinGattSession(_Frames(), poll_timeout=0.01).prepare(
@@ -1636,7 +1666,7 @@ async def test_backend_uses_fresh_baseline_when_liveness_is_not_active() -> None
             del timeout
             return self.frames.pop(0) if self.frames else None
 
-        async def diagnostics(self):
+        async def diagnostics(self, *, timeout=None):
             return {
                 "rpc_schema_version": 3,
                 "pair_contract": "pair_terminal_v3",
@@ -1691,7 +1721,7 @@ async def test_thin_setup_arms_existing_pairing_wrapper_before_rpc_pair() -> Non
             ({"link_active": True}, {"link_active": False, "parent_connected": False})
         )
 
-        async def diagnostics(self):
+        async def diagnostics(self, *, timeout=None):
             return next(self.samples)
 
     hass = SimpleNamespace(
@@ -1723,7 +1753,7 @@ async def test_thin_setup_does_not_accept_stale_already_secure_terminal(
             calls.append((service, data))
 
     class _Channel:
-        async def diagnostics(self):
+        async def diagnostics(self, *, timeout=None):
             return {
                 "pair_terminal_status": "already_secure_success",
                 "link_active": True,
@@ -1769,7 +1799,7 @@ async def test_thin_pair_arm_resets_stale_state_once_and_rearms(monkeypatch) -> 
             )
         )
 
-        async def diagnostics(self):
+        async def diagnostics(self, *, timeout=None):
             return next(self.samples)
 
     hass = SimpleNamespace(
@@ -1784,7 +1814,7 @@ async def test_thin_pair_arm_resets_stale_state_once_and_rearms(monkeypatch) -> 
     )
     backend._drain_stale_frames = _async_noop
     monkeypatch.setattr(
-        "custom_components.openrbus.transport._THIN_DISCONNECT_TIMEOUT", 0
+        "custom_components.openrbus.transport._THIN_DISCONNECT_TIMEOUT", 0.02
     )
 
     await backend._arm_pairing_if_configured()
@@ -1819,7 +1849,7 @@ async def test_thin_pair_arm_stale_state_retry_is_bounded(monkeypatch) -> None:
             )
         )
 
-        async def diagnostics(self):
+        async def diagnostics(self, *, timeout=None):
             return next(self.samples)
 
     hass = SimpleNamespace(
@@ -1834,7 +1864,7 @@ async def test_thin_pair_arm_stale_state_retry_is_bounded(monkeypatch) -> None:
     )
     backend._drain_stale_frames = _async_noop
     monkeypatch.setattr(
-        "custom_components.openrbus.transport._THIN_DISCONNECT_TIMEOUT", 0
+        "custom_components.openrbus.transport._THIN_DISCONNECT_TIMEOUT", 0.02
     )
 
     with pytest.raises(HomeAssistantError, match="stale pairing reset/rearm failed"):
@@ -1867,7 +1897,7 @@ async def test_thin_pair_arm_disconnect_action_failure_does_not_rearm(
                 raise RuntimeError("raw service detail")
 
     class _Channel:
-        async def diagnostics(self):
+        async def diagnostics(self, *, timeout=None):
             return {"link_active": True, "parent_connected": True}
 
     hass = SimpleNamespace(
@@ -1970,7 +2000,7 @@ async def test_secure_link_deadline_exceeds_firmware_pair_watchdog() -> None:
                 },
             ]
 
-        async def diagnostics(self):
+        async def diagnostics(self, *, timeout=None):
             return {
                 "parent_connected": False,
                 "link_active": False,
@@ -2358,7 +2388,7 @@ async def test_stop_waits_for_physical_disconnect_before_releasing_controller() 
                 {"link_active": False, "parent_connected": False},
             ]
 
-        async def diagnostics(self):
+        async def diagnostics(self, *, timeout=None):
             return self.snapshots.pop(0)
 
     channel = _Channel()
@@ -2470,7 +2500,7 @@ async def test_start_failure_retains_controller_until_safe_stop_then_allows_setu
     class _Channel:
         disconnected = False
 
-        async def diagnostics(self):
+        async def diagnostics(self, *, timeout=None):
             return {
                 "link_active": not self.disconnected,
                 "parent_connected": not self.disconnected,
@@ -2551,7 +2581,7 @@ async def test_same_thin_owner_can_retry_start_without_releasing_claim(
     controller_id = "test-thin-same-owner-retry"
 
     class _Channel:
-        async def diagnostics(self):
+        async def diagnostics(self, *, timeout=None):
             return {"link_active": False, "parent_connected": False}
 
     backend = ThinRpcBackend(
@@ -2584,7 +2614,7 @@ async def test_cancelled_thin_start_releases_claim_after_idle_proof(
     entered = asyncio.Event()
 
     class _Channel:
-        async def diagnostics(self):
+        async def diagnostics(self, *, timeout=None):
             return {"link_active": False, "parent_connected": False}
 
     backend = ThinRpcBackend(

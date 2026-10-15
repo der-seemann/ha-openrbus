@@ -1,6 +1,7 @@
 """Focused config-flow contract tests."""
 
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, call
@@ -38,9 +39,11 @@ from custom_components.openrbus.const import (
     CONF_BACKEND,
     CONF_BLE_DEVICE,
     CONF_BLE_NAME,
+    CONF_CASCADE_ENABLED,
     CONF_COOLING_ENABLED,
     CONF_DIAGNOSTICS_ENABLED,
     CONF_FLOW_ACTION,
+    CONF_HOLIDAY_ENABLED,
     CONF_PASSKEY,
     CONF_READ_ACCESS_LEVEL,
     CONF_SCREED_DRYING_ENABLED,
@@ -159,7 +162,7 @@ async def test_options_form_uses_normalized_current_access_level_default(
         "_ble_target_choices",
         staticmethod(lambda hass, include_thin=True: {}),
     )
-    result = await flow.async_step_init()
+    result = await flow.async_step_access()
     access_marker = next(
         marker
         for marker in result["data_schema"].schema
@@ -188,7 +191,7 @@ async def test_options_form_reopens_independent_read_and_no_write_levels(
     )
     monkeypatch.setattr(OpenRBusOptionsFlowHandler, "_zone_choices", lambda self: {})
 
-    result = await flow.async_step_init()
+    result = await flow.async_step_access()
     defaults = {
         marker.schema: marker.default()
         for marker in result["data_schema"].schema
@@ -196,8 +199,6 @@ async def test_options_form_reopens_independent_read_and_no_write_levels(
     }
     assert defaults[CONF_READ_ACCESS_LEVEL] == 3
     assert defaults[CONF_WRITE_ACCESS_LEVEL] == 0
-    assert defaults[config_flow_module.CONF_COOLING_ENABLED] is False
-
     selectors = {
         marker.schema: validator
         for marker, validator in result["data_schema"].schema.items()
@@ -255,7 +256,7 @@ async def test_access_level_change_saves_and_reopens_without_policy_drift(
     )
     monkeypatch.setattr(config_flow_module, "async_save_access_profile", AsyncMock())
 
-    opened = await flow.async_step_init()
+    opened = await flow.async_step_access()
     submitted = {
         marker.schema: marker.default()
         for marker in opened["data_schema"].schema
@@ -267,6 +268,7 @@ async def test_access_level_change_saves_and_reopens_without_policy_drift(
             CONF_WRITE_ACCESS_LEVEL: 0,
             CONF_ACCESS_ACK: True,
             CONF_AUTH_KEY: "abcdef12",
+            CONF_HOLIDAY_ENABLED: True,
         }
     )
     monkeypatch.setattr(
@@ -277,9 +279,10 @@ async def test_access_level_change_saves_and_reopens_without_policy_drift(
     saved = await flow.async_step_init(submitted)
     assert saved["data"][CONF_READ_ACCESS_LEVEL] == 3
     assert saved["data"][CONF_WRITE_ACCESS_LEVEL] == 0
+    assert saved["data"][CONF_HOLIDAY_ENABLED] is True
 
     entry.options.update(saved["data"])
-    reopened = await OpenRBusOptionsFlowHandler(entry).async_step_init()
+    reopened = await OpenRBusOptionsFlowHandler(entry).async_step_access()
     defaults = {
         marker.schema: marker.default()
         for marker in reopened["data_schema"].schema
@@ -287,6 +290,13 @@ async def test_access_level_change_saves_and_reopens_without_policy_drift(
         in {CONF_READ_ACCESS_LEVEL, CONF_WRITE_ACCESS_LEVEL}
     }
     assert defaults == {CONF_READ_ACCESS_LEVEL: 3, CONF_WRITE_ACCESS_LEVEL: 0}
+    reopened_features = await OpenRBusOptionsFlowHandler(entry).async_step_features()
+    holiday_marker = next(
+        marker
+        for marker in reopened_features["data_schema"].schema
+        if getattr(marker, "schema", None) == CONF_HOLIDAY_ENABLED
+    )
+    assert holiday_marker.default() is True
 
 
 @pytest.mark.asyncio
@@ -297,6 +307,16 @@ async def test_setup_access_levels_are_discrete_numeric_sliders() -> None:
         CONF_WRITE_ACCESS_LEVEL: 0,
     }
     result = await flow.async_step_access_level()
+    cascade_marker = next(
+        marker
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None) == CONF_CASCADE_ENABLED
+    )
+    holiday_marker = next(
+        marker
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None) == CONF_HOLIDAY_ENABLED
+    )
     fields = {
         marker.schema: (marker, validator)
         for marker, validator in result["data_schema"].schema.items()
@@ -306,6 +326,8 @@ async def test_setup_access_levels_are_discrete_numeric_sliders() -> None:
 
     assert fields[CONF_READ_ACCESS_LEVEL][0].default() == 2
     assert fields[CONF_WRITE_ACCESS_LEVEL][0].default() == 0
+    assert cascade_marker.default() is False
+    assert holiday_marker.default() is False
     assert fields[CONF_READ_ACCESS_LEVEL][1].config["step"] == 1.0
     assert fields[CONF_WRITE_ACCESS_LEVEL][1].config["step"] == 1.0
 
@@ -330,7 +352,7 @@ async def test_options_form_does_not_replace_saved_read_policy_with_observed_lev
     )
     monkeypatch.setattr(OpenRBusOptionsFlowHandler, "_zone_choices", lambda self: {})
 
-    result = await flow.async_step_init()
+    result = await flow.async_step_access()
     defaults = {
         marker.schema: marker.default()
         for marker in result["data_schema"].schema
@@ -378,11 +400,10 @@ async def test_entity_picker_applies_node_and_group_overrides_in_stages() -> Non
     flow._entity_picker_overrides = {}
     flow._entity_picker_node_overrides = {}
     flow._entity_picker_group_overrides = {}
-    result = await flow.async_step_entity_nodes(
+    result = await flow.async_step_entity_node_select(
         {
             config_flow_module._CONF_ENTITY_NODES: ["1"],
             config_flow_module._CONF_ENTITY_NODE_PRESET: "all",
-            CONF_FLOW_ACTION: "next",
         }
     )
     assert result["step_id"] == "entity_groups"
@@ -392,16 +413,34 @@ async def test_entity_picker_applies_node_and_group_overrides_in_stages() -> Non
         {
             config_flow_module._CONF_ENTITY_GROUPS: ["node:1:object:2001"],
             config_flow_module._CONF_ENTITY_GROUP_PRESET: "none",
-            config_flow_module._CONF_ENTITY_GROUP_EDIT: "node:1:object:2001",
-            config_flow_module._CONF_ENTITY_GROUP_ACTION: "edit",
-            CONF_FLOW_ACTION: "next",
         }
     )
-    assert result["step_id"] == "entity_items"
+    assert result["step_id"] == "entity_group_menu"
     assert flow._entity_picker_group_overrides == {"node:1:object:2001": False}
+
+    result = await flow.async_step_entity_group_edit(
+        {config_flow_module._CONF_ENTITY_GROUP_EDIT: "node:1:object:2001"}
+    )
+    assert result["step_id"] == "entity_items"
 
     fields = {marker.schema: marker for marker in result["data_schema"].schema}
     assert config_flow_module._CONF_ENTITY_ITEMS in fields
+
+    result = await flow.async_step_entity_items(
+        {
+            config_flow_module._CONF_ENTITY_SEARCH: "mode",
+            config_flow_module._CONF_ENTITY_PRESET: "custom",
+            config_flow_module._CONF_ENTITY_ITEMS: ["uid-b"],
+        }
+    )
+    assert "entity_items" in result["menu_options"]
+    result = await flow.async_step_entity_items()
+    fields = {marker.schema: marker for marker in result["data_schema"].schema}
+    assert fields[config_flow_module._CONF_ENTITY_SEARCH].default() == "mode"
+    assert fields[config_flow_module._CONF_ENTITY_ITEMS].default() == ["uid-b"]
+    result = await flow.async_step_entity_nodes()
+    assert result["type"].value == "form"
+    assert result["step_id"] == "entity_nodes"
 
 
 @pytest.mark.asyncio
@@ -415,7 +454,7 @@ async def test_options_form_prefers_options_over_entry_data_without_saving(
         "_ble_target_choices",
         staticmethod(lambda hass, include_thin=True: {}),
     )
-    result = await flow.async_step_init()
+    result = await flow.async_step_access()
     access_marker = next(
         marker
         for marker in result["data_schema"].schema
@@ -423,6 +462,114 @@ async def test_options_form_prefers_options_over_entry_data_without_saving(
     )
     assert access_marker.default() == 3
     assert result["type"].value == "form"
+
+
+@pytest.mark.asyncio
+async def test_options_section_is_a_draft_until_overview_save(monkeypatch) -> None:
+    entry = SimpleNamespace(data={}, options={CONF_HOLIDAY_ENABLED: False})
+    flow = OpenRBusOptionsFlowHandler(entry)
+    monkeypatch.setattr(
+        OpenRBusConfigFlow,
+        "_ble_target_choices",
+        staticmethod(lambda hass, include_thin=True: {}),
+    )
+    monkeypatch.setattr(OpenRBusOptionsFlowHandler, "_entity_choices", lambda *_: {})
+    opened = await flow.async_step_features()
+    submitted = {
+        marker.schema: marker.default()
+        for marker in opened["data_schema"].schema
+        if hasattr(marker, "default")
+    }
+    submitted[CONF_HOLIDAY_ENABLED] = True
+
+    result = await flow.async_step_features(submitted)
+
+    assert result["step_id"] == "init"
+    assert flow._options_draft[CONF_HOLIDAY_ENABLED] is True
+    assert entry.options[CONF_HOLIDAY_ENABLED] is False
+
+
+@pytest.mark.asyncio
+async def test_options_reload_is_scheduled_once_after_changed_flow_finishes() -> None:
+    from homeassistant.config_entries import OptionsFlowManager
+    from homeassistant.data_entry_flow import FlowResultType
+
+    entry = SimpleNamespace(
+        entry_id="entry-1", options={"enabled": False}, update_listeners=set()
+    )
+    scheduled: list[str] = []
+
+    class ConfigEntries:
+        def async_get_known_entry(self, _entry_id):
+            return entry
+
+        def async_update_entry(self, target, *, options):
+            changed = target.options != options
+            target.options = dict(options)
+            return changed
+
+        def async_schedule_reload(self, entry_id):
+            scheduled.append(entry_id)
+
+    manager = object.__new__(OptionsFlowManager)
+    manager.hass = SimpleNamespace(config_entries=ConfigEntries())
+    flow = OpenRBusOptionsFlowHandler(entry)
+    flow.handler = "entry-1"
+
+    changed = await manager.async_finish_flow(
+        flow, {"type": FlowResultType.CREATE_ENTRY, "data": {"enabled": True}}
+    )
+    unchanged = await manager.async_finish_flow(
+        flow, {"type": FlowResultType.CREATE_ENTRY, "data": {"enabled": True}}
+    )
+    await manager.async_finish_flow(
+        flow, {"type": FlowResultType.ABORT, "reason": "user_canceled"}
+    )
+
+    assert changed["type"] == unchanged["type"]
+    assert flow.automatic_reload is True
+    assert not entry.update_listeners
+    assert scheduled == ["entry-1"]
+
+
+@pytest.mark.asyncio
+async def test_overview_save_without_visiting_sections_preserves_existing_options(
+    monkeypatch,
+) -> None:
+    entry = SimpleNamespace(
+        entry_id="entry-1",
+        data={
+            CONF_BACKEND: BACKEND_NATIVE,
+            CONF_BLE_DEVICE: "AA:BB:CC:DD:EE:FF",
+            CONF_ACCESS_LEVEL: 1,
+            CONF_PASSKEY: "123456",
+        },
+        options={"user_specific_unknown_option": "keep-me"},
+    )
+    flow = OpenRBusOptionsFlowHandler(entry)
+    monkeypatch.setattr(flow, "_zone_choices", dict)
+    monkeypatch.setattr(flow, "_entity_choices", lambda *_args: {})
+    monkeypatch.setattr(flow, "_remember_native_source", lambda _data: None)
+    monkeypatch.setattr(config_flow_module, "_async_apply_mac_profile", AsyncMock())
+    monkeypatch.setattr(config_flow_module, "_native_ble_source_map", lambda _hass: {})
+    monkeypatch.setattr(
+        config_flow_module, "_remember_ble_name", lambda *_a, **_k: None
+    )
+    monkeypatch.setattr(config_flow_module, "async_save_access_profile", AsyncMock())
+    saved = {}
+    monkeypatch.setattr(
+        flow,
+        "async_create_entry",
+        lambda *, title, data: saved.update(data) or {"type": "create_entry"},
+    )
+
+    overview = await flow.async_step_init()
+    assert overview["step_id"] == "init"
+    result = await flow.async_step_save()
+
+    assert result["type"] == "create_entry"
+    assert saved["user_specific_unknown_option"] == "keep-me"
+    assert saved[CONF_BLE_DEVICE] == entry.data[CONF_BLE_DEVICE]
 
 
 @pytest.mark.asyncio
@@ -443,7 +590,7 @@ async def test_options_form_keeps_read_and_write_policies_independent(
         "custom_components.openrbus.config_flow.async_load_access_profile",
         AsyncMock(return_value={}),
     )
-    result = await flow.async_step_init()
+    result = await flow.async_step_access()
     defaults = {
         marker.schema: marker.default()
         for marker in result["data_schema"].schema
@@ -465,7 +612,7 @@ async def test_options_form_defaults_diagnostics_to_off_and_preserves_it(
         staticmethod(lambda hass, include_thin=True: {}),
     )
 
-    result = await flow.async_step_init()
+    result = await flow.async_step_features()
     marker = next(
         marker
         for marker in result["data_schema"].schema
@@ -474,7 +621,7 @@ async def test_options_form_defaults_diagnostics_to_off_and_preserves_it(
     assert marker.default() is False
 
     entry.options = {CONF_DIAGNOSTICS_ENABLED: True}
-    result = await OpenRBusOptionsFlowHandler(entry).async_step_init()
+    result = await OpenRBusOptionsFlowHandler(entry).async_step_features()
     marker = next(
         marker
         for marker in result["data_schema"].schema
@@ -526,22 +673,42 @@ async def test_options_form_defaults_screed_drying_to_off_and_preserves_it(
         staticmethod(lambda hass, include_thin=True: {}),
     )
 
-    result = await OpenRBusOptionsFlowHandler(entry).async_step_init()
+    result = await OpenRBusOptionsFlowHandler(entry).async_step_features()
     marker = next(
         marker
         for marker in result["data_schema"].schema
         if getattr(marker, "schema", None) == CONF_SCREED_DRYING_ENABLED
     )
     assert marker.default() is False
+    cascade_marker = next(
+        marker
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None) == CONF_CASCADE_ENABLED
+    )
+    assert cascade_marker.default() is False
+    holiday_marker = next(
+        marker
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None) == CONF_HOLIDAY_ENABLED
+    )
+    assert holiday_marker.default() is False
 
     entry.options = {CONF_SCREED_DRYING_ENABLED: True}
-    result = await OpenRBusOptionsFlowHandler(entry).async_step_init()
+    result = await OpenRBusOptionsFlowHandler(entry).async_step_features()
     marker = next(
         marker
         for marker in result["data_schema"].schema
         if getattr(marker, "schema", None) == CONF_SCREED_DRYING_ENABLED
     )
     assert marker.default() is True
+    entry.options[CONF_HOLIDAY_ENABLED] = True
+    result = await OpenRBusOptionsFlowHandler(entry).async_step_features()
+    holiday_marker = next(
+        marker
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None) == CONF_HOLIDAY_ENABLED
+    )
+    assert holiday_marker.default() is True
     cooling_marker = next(
         marker
         for marker in result["data_schema"].schema
@@ -549,13 +716,21 @@ async def test_options_form_defaults_screed_drying_to_off_and_preserves_it(
     )
     assert cooling_marker.default() is False
     entry.options[CONF_COOLING_ENABLED] = True
-    result = await OpenRBusOptionsFlowHandler(entry).async_step_init()
+    result = await OpenRBusOptionsFlowHandler(entry).async_step_features()
     cooling_marker = next(
         marker
         for marker in result["data_schema"].schema
         if getattr(marker, "schema", None) == CONF_COOLING_ENABLED
     )
     assert cooling_marker.default() is True
+    entry.options[CONF_CASCADE_ENABLED] = True
+    result = await OpenRBusOptionsFlowHandler(entry).async_step_features()
+    cascade_marker = next(
+        marker
+        for marker in result["data_schema"].schema
+        if getattr(marker, "schema", None) == CONF_CASCADE_ENABLED
+    )
+    assert cascade_marker.default() is True
 
 
 @pytest.mark.asyncio
@@ -845,6 +1020,36 @@ def test_warning_translation_files_have_matching_fragments_and_placeholder() -> 
     assert "{warning}" in german["options"]["step"]["access_warning"]["description"]
 
 
+def test_options_translations_match_flow_schema_and_placeholders() -> None:
+    root = Path(__file__).parents[1] / "custom_components" / "openrbus" / "translations"
+    english = json.loads((root / "en.json").read_text())["options"]["step"]
+    german = json.loads((root / "de.json").read_text())["options"]["step"]
+
+    def leaves(value, prefix=""):
+        result = {}
+        if isinstance(value, dict):
+            for key, item in value.items():
+                result.update(leaves(item, f"{prefix}/{key}"))
+        elif isinstance(value, str):
+            result[prefix] = value
+        return result
+
+    english_leaves = leaves(english)
+    german_leaves = leaves(german)
+    assert set(german_leaves) == set(english_leaves)
+    for key, english_value in english_leaves.items():
+        english_placeholders = set(re.findall(r"{([^{}]+)}", english_value))
+        german_placeholders = set(re.findall(r"{([^{}]+)}", german_leaves[key]))
+        assert german_placeholders == english_placeholders, key
+    assert set(german["init"]["menu_options"]) == {
+        "connection",
+        "access",
+        "features",
+        "polling",
+        "save",
+    }
+
+
 @pytest.mark.asyncio
 async def test_config_warning_back_clears_ack_and_returns_to_access_step() -> None:
     flow = OpenRBusConfigFlow()
@@ -895,7 +1100,7 @@ async def test_config_credentials_back_preserves_values_and_reopens_warning(
 
 
 @pytest.mark.asyncio
-async def test_options_warning_back_does_not_create_entry(monkeypatch) -> None:
+async def test_options_warning_ack_form_has_no_direction_selector(monkeypatch) -> None:
     entry = SimpleNamespace(data={CONF_ACCESS_LEVEL: 1}, options={})
     flow = OpenRBusOptionsFlowHandler(entry)
     monkeypatch.setattr(
@@ -909,13 +1114,11 @@ async def test_options_warning_back_does_not_create_entry(monkeypatch) -> None:
         CONF_ACCESS_ACK: True,
     }
 
-    result = await flow.async_step_access_warning(
-        {CONF_ACCESS_ACK: True, CONF_FLOW_ACTION: FLOW_ACTION_BACK}
-    )
+    result = await flow.async_step_access_warning({CONF_ACCESS_ACK: False})
 
-    assert result["step_id"] == "init"
-    assert CONF_ACCESS_ACK not in flow._pending_options_input
-    assert result["type"].value == "form"
+    assert result["step_id"] == "access_warning"
+    keys = {marker.schema for marker in result["data_schema"].schema}
+    assert keys == {CONF_ACCESS_ACK}
 
 
 @pytest.mark.asyncio

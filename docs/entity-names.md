@@ -1,36 +1,56 @@
 # Entity names and suggested IDs
 
 Home Assistant entity names use Core's localized register label unless the
-German label is an abbreviated manufacturer short name. A code-keyed glossary
-then uses a concise, normalized German expansion grounded in the original
-ProfiTool OBD 1.47 German medium descriptions. It does not expand abbreviations
-with global text replacement.
+German label has an exact, reviewed code-keyed override. These overrides use a
+concise, normalized German expansion grounded in ProfiTool OBD 1.47. They do
+not expand abbreviations with global text replacement.
+
+The 2026-10-09 follow-up resolves the reported `Gem.PuSpTemp` label for BM001
+(`5501:00`) as **Gemessene Pufferspeichertemperatur**. The exact OBD 1.47
+`varBufferTankTemperature` row has German medium description
+`Pufferspeichertemperatur` and long description
+`Gemessene Pufferspeichertemperatur`; the longer form preserves that this is a
+measured value. The English label is **Measured buffer tank temperature**.
+HA validates the exact code/address pair before applying either override.
 
 ## Source-audited German labels
 
 Every row below was joined by exact object address and `FriendlyName` in OBD
 1.47. The HA label is a concise normalized rendering of the German source
 meaning, not a copied translation paragraph. The glossary is a manually
-reviewed subset of 49 codes selected for common short forms resolved by the
-per-register German medium description. It does not replace every vendor
-short label.
+reviewed subset of 53 codes selected for common short forms resolved by the
+per-register German medium or long description. It does not replace every
+vendor short label.
 
 For remaining labels, HA expands only three exact-token abbreviations through
-reviewed code whitelists: `HK` becomes *Heizkreis* for 49 codes, `TWW` becomes
-*Trinkwarmwasser* for 14 codes, and `WP` becomes *Wärmepumpe* for 133 codes.
+reviewed code whitelists: `HK` becomes *Heizkreis* for 52 codes, `TWW` becomes
+*Trinkwarmwasser* for 53 codes, and `WP` becomes *Wärmepumpe* for 134 codes.
 Each whitelist code has a matching OBD register code/address and a German
-medium description spelling out the corresponding term. The same code sets
+medium or long description spelling out the corresponding term. The same code sets
 support concise English ID labels (`heating_circuit`, `domestic_hot_water`,
 `heat_pump`). Substrings such as `PWM` do not match `WP`. If a medium
 description only repeats an abbreviation, the automatic expansion is not
-allowed; the 49 direct glossary entries above still take precedence.
+allowed; the direct glossary entries above still take precedence.
+
+The display-only whole-token map also expands source-verified short forms such
+as `Hzg`, `Temp.`, `Vorlauftemp.`, `Rücklauftemp.`, `Außentemp.`, `Sollw.`,
+`Abt.`, `Konf.`, `Betr.`, `TWWSp`, `TVorlauf`, `Trücklauf`, `Drehz`, `Ges.`,
+`Gel.`, and `Energieverbr.` for exact catalog codes. English slug expansion
+continues to use the earlier frozen code lists; these display changes do not
+change the existing suggested-ID helper or existing entity IDs. The separate
+compact-ID candidate sets exact IDs at platform registration time for future
+registry entries; its schema, collision audit, and migration boundary are
+documented in [the dated candidate note](compact-entity-ids-2026-10-09.md).
 
 | Code | Address | HA German label |
 | --- | --- | --- |
+| AP004 | `3004:00` | Verzögerungszeit bis zur Öffnung des Hydraulikventils |
+| BM001 | `5501:00` | Gemessene Pufferspeichertemperatur |
 | CM030 | `5404:00` | Heizkreis-Raumtemperatur |
 | CM210 | `542e:00` | Außentemperatur des Heizkreises |
 | CM220 | `542f:00` | Kurzzeitmittel der Außentemperatur des Heizkreises |
 | CM230 | `5430:00` | Langzeitmittel der Außentemperatur des Heizkreises |
+| CM380 | `5411:00` | Status des Heizkreis-Sicherheitstemperaturbegrenzers |
 | CP000 | `3401:00` | Maximaler Vorlauftemperatur-Sollwertbereich |
 | CP010 | `3402:00` | Vorlauftemperatur-Sollwert ohne Außensensor |
 | CP020 | `3404:00` | Funktion des Heizkreises |
@@ -42,6 +62,7 @@ allowed; the 49 direct glossary entries above still take precedence.
 | CP080 | `340c:00` | Raumsollwert der Heizkreisaktivität |
 | CP130 | `340e:00` | Außentemperaturfühler für den Heizkreis |
 | CP140 | `3412:00` | Raumsollwert der Heizkreisaktivität im Kühlbetrieb |
+| CP190 | `342b:00` | Heizkreis-Sicherheitstemperaturbegrenzer aktiviert |
 | CP200 | `3413:00` | Raumtemperatur-Sollwert im Heizkreis-Kühlbetrieb |
 | CP210 | `3414:00` | Komfort-Startwert des Heizkreises |
 | CP220 | `3415:00` | Nacht-Startwert des Heizkreises |
@@ -83,9 +104,13 @@ items use the positive source-mapped zone slot dimension. CP140 is readable by
 name but its array dimension is unresolved: neither its item ordinal nor its
 `:00` head is treated as a heating-circuit slot. CP080 has the same unresolved
 slot association. Array headers at `:00` are never emitted as zone slots.
-CP020 function selectors remain parent-device entities, and no inactive zone
-is created by label normalization. Existing user-assigned entity names and
-stable unique IDs are preserved.
+CP190 and CM380 share a manufacturer short label but have distinct exact-code
+meanings: the setting enables the circuit safety thermostat check; the status
+register reports its current state. CP020 selectors remain parent-device
+entities. Their item names include `Zone N` to identify the selector slot,
+including when its state is inactive, unknown, or unavailable; the label does
+not claim the zone is active. Existing user-assigned entity names and stable
+unique IDs are preserved.
 
 ## Suggested entity IDs
 
@@ -116,3 +141,42 @@ duplicate heading. Other wording stays intact.
 
 The suggestion does not change an existing entity ID. The registry `unique_id`
 generation, config-entry options, and user overrides remain unchanged.
+
+## Live abbreviated-name follow-up — 2026-10-09
+
+A second read-only authenticated Test-HA scan found 945 OpenRBus registry rows
+and 580 rows with a current HA state. A broad token scan flagged 245 distinct
+labels across 277 registrations for possible abbreviations. This is a review
+set, not a count of confirmed defects: it deliberately catches mixed cases
+such as the valid domain terms `HK` and `TWW`, and manufacturer labels can be
+abbreviated even when the token scan misses them. The previously audited 43
+repeated state-name groups and 153 repeated registry-name groups are a
+different, duplicate-based census.
+
+This follow-up adds source-backed corrections including `Gem.PuSpTemp` →
+`Gemessene Pufferspeichertemperatur` (`BM001`, `5501`) and `Hydr. Ventil Verz.`
+→ `Verzögerungszeit bis zur Öffnung des Hydraulikventils` (`AP004`, `3004`).
+The code-scoped families cover many live heating-circuit, domestic-hot-water,
+temperature, setpoint, defrost, and pump labels. They use exact German medium
+or long-description evidence and whole-token matching; they do not infer from
+substrings such as `PWM` or apply to another register with similar wording.
+The earlier English slug whitelists stay frozen at 49/14/133 codes, so the
+German display expansions do not alter the existing ID suggestion behavior.
+
+The token scan is a review aid: its 245 candidates are not 245 confirmed defects.
+Source-backed direct names now cover the reviewed `Max.`/`Min.` cases where
+parameter codes and German long descriptions distinguish the measure and its
+condition (including the separate start/stop thresholds HP070–HP073). The
+remaining candidates could not be given a safe expansion from the available
+exact Core code/address join and OBD German medium/long description; those need
+that source evidence before a precise label can be written. This is the explicit
+coverage boundary, not a claim that every disabled or unlabelled catalog entry
+has been exhaustively source-audited. The earlier 43 repeated-state / 153
+repeated-registry duplicate audit is a separate census. CP020 selector-slot
+behavior remains unchanged.
+
+Provenance: authenticated config-entry, state, and entity-registry read APIs
+on the isolated Test-HA; Core catalog address/code joins; and the exact German
+ProfiTool OBD 1.47 BM001 translation fields. No register values, credentials,
+user overrides, or entity-ID/unique-ID mappings were changed. Test-HA was not
+mutated or installed from this source candidate.

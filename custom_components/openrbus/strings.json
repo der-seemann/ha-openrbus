@@ -52,7 +52,9 @@
           "diagnostics_enabled": "Enable diagnostic data",
           "flow_action": "Navigation",
           "cooling_enabled": "Enable cooling functions",
-          "experimental_writes": "Expose OBD-declared writable registers without qualifying RW source evidence as experimental controls. Requires write access to be enabled."
+          "experimental_writes": "Expose OBD-declared writable registers without qualifying RW source evidence as experimental controls. Requires write access to be enabled.",
+          "cascade_enabled": "Enable cascade functions",
+          "holiday_enabled": "Show holiday functions"
         },
         "data_description": {
           "read_access_level": "Choose the highest register level whose values should be exposed.",
@@ -61,7 +63,9 @@
           "diagnostics_enabled": "Add diagnostic entities with transport and communication status for troubleshooting.",
           "screed_drying_enabled": "Add entities for the screed-drying program when the controller provides them.",
           "cooling_enabled": "Include registers in the reviewed cooling-function map. When disabled, those exact registers are excluded before entity selection and creation.",
-          "experimental_writes": "Expose OBD-declared writable registers without qualifying RW source evidence as experimental controls. Requires write access to be enabled."
+          "experimental_writes": "Expose OBD-declared writable registers without qualifying RW source evidence as experimental controls. Requires write access to be enabled.",
+          "cascade_enabled": "Show additional settings and status values for installations with multiple heat producers controlled together. To show cascade cooling functions, also enable cooling.",
+          "holiday_enabled": "Show holiday schedule and temperature settings when the controller provides them."
         },
         "description": "Choose independent read and write access policies. A higher read policy does not enable writes."
       },
@@ -149,7 +153,9 @@
           "poll_interval_slow": "Slow polling interval (seconds)",
           "cooling_enabled": "Enable cooling functions",
           "_openrbus_entity_picker": "Configure entity selection",
-          "experimental_writes": "Expose OBD-declared writable registers without qualifying RW source evidence as experimental controls. Requires write access to be enabled."
+          "experimental_writes": "Expose OBD-declared writable registers without qualifying RW source evidence as experimental controls. Requires write access to be enabled.",
+          "cascade_enabled": "Enable cascade functions",
+          "holiday_enabled": "Show holiday functions"
         },
         "data_description": {
           "language": "Choose the language used for entity names and descriptions.",
@@ -169,15 +175,24 @@
           "passkey": "PIN used to pair with the gateway over Bluetooth.",
           "cooling_enabled": "Include registers in the reviewed cooling-function map. When disabled, those exact registers are excluded before entity selection and creation.",
           "_openrbus_entity_picker": "Open the three-step selector: Device, Category, then Entities. Existing entity identities and saved choices are retained.",
-          "experimental_writes": "Expose OBD-declared writable registers without qualifying RW source evidence as experimental controls. Requires write access to be enabled."
+          "experimental_writes": "Expose OBD-declared writable registers without qualifying RW source evidence as experimental controls. Requires write access to be enabled.",
+          "cascade_enabled": "Show additional settings and status values for installations with multiple heat producers controlled together. To show cascade cooling functions, also enable cooling.",
+          "holiday_enabled": "Show holiday schedule and temperature settings when the controller provides them."
+        },
+        "description": "Bearbeite die Einstellungen in einzelnen Bereichen. Änderungen bleiben ein Entwurf, bis du Speichern auswählst.",
+        "menu_options": {
+          "connection": "Verbindung",
+          "access": "Zugriff und Berechtigungen",
+          "features": "Entitäten und Funktionen",
+          "polling": "Abfrage und Anzeige",
+          "save": "Änderungen speichern"
         }
       },
       "access_warning": {
         "title": "Review access and write permissions",
         "description": "{warning}",
         "data": {
-          "access_level_acknowledged": "I understand the possible consequences and want to enable these permissions.",
-          "flow_action": "Navigation"
+          "access_level_acknowledged": "I understand the possible consequences and want to enable these permissions."
         },
         "data_description": {
           "access_level_acknowledged": "Confirm that you understand the access and write settings shown above."
@@ -186,8 +201,7 @@
       "credentials": {
         "title": "Secure connection",
         "data": {
-          "auth_encryption_key": "Encryption key",
-          "flow_action": "Navigation"
+          "auth_encryption_key": "Encryption key"
         },
         "data_description": {
           "auth_encryption_key": "Eight-digit hexadecimal key used to authenticate and encrypt the connection."
@@ -196,8 +210,7 @@
       "thin_controller": {
         "title": "Select Thin-RPC controller",
         "data": {
-          "thin_rpc_controller": "Controller",
-          "flow_action": "Navigation"
+          "thin_rpc_controller": "Controller"
         },
         "data_description": {
           "thin_rpc_controller": "Choose the ESPHome controller that provides the matching request, poll, and diagnostics services."
@@ -206,8 +219,7 @@
       "thin_scan": {
         "title": "Select BLE device behind ESP proxy",
         "data": {
-          "ble_device": "BLE device",
-          "flow_action": "Navigation"
+          "ble_device": "BLE device"
         },
         "data_description": {
           "ble_device": "Choose the heating gateway found by scanning through the selected ESPHome proxy."
@@ -218,44 +230,152 @@
         "description": "Choose discovered devices to manage. Known models are labeled when identified; other discovered devices remain available.",
         "data": {
           "_openrbus_entity_nodes": "Devices",
-          "_openrbus_entity_node_preset": "Bulk action",
-          "flow_action": "Navigation"
+          "_openrbus_entity_node_preset": "Bulk action"
+        },
+        "data_description": {
+          "_openrbus_entity_nodes": "Choose the nodes to apply a bulk action to. Node selections are expanded into stable per-entity overrides.",
+          "_openrbus_entity_node_preset": "Set selected nodes to all, none, or their automatic defaults."
+        },
+        "menu_options": {
+          "entity_node_select": "Geräte auswählen",
+          "entity_picker_cancel": "Zurück zu den Optionen"
+        }
+      },
+      "entity_groups": {
+        "title": "Kategorien auswählen",
+        "description": "Choose a category for a bulk action or open it to select individual entities.",
+        "data": {
+          "_openrbus_entity_groups": "Categories",
+          "_openrbus_entity_group_preset": "Bulk action"
+        },
+        "data_description": {
+          "_openrbus_entity_groups": "Choose one or more groups for a bulk action, or open one group to edit its entities.",
+          "_openrbus_entity_group_preset": "Apply all, none, or defaults to selected groups."
+        }
+      },
+      "entity_items": {
+        "title": "Entitäten der Kategorie",
+        "description": "Search by name, object/register ID, device, zone, or category.",
+        "data": {
+          "_openrbus_entity_search": "Search",
+          "_openrbus_entity_preset": "Selection mode",
+          "_openrbus_entity_items": "Enabled entities"
+        },
+        "data_description": {
+          "_openrbus_entity_search": "Search by entity name, object/register ID, node, zone, or group. Search results are scoped to this group.",
+          "_openrbus_entity_preset": "Use a bulk preset or edit individual checkboxes.",
+          "_openrbus_entity_items": "Search by entity name, object/register ID, node, zone, or group. Search results are scoped to this group."
+        }
+      },
+      "connection": {
+        "title": "Verbindung",
+        "description": "Transport und Gateway",
+        "data": {
+          "backend": "Transport backend",
+          "ble_device": "BLE gateway",
+          "passkey": "Bluetooth pairing PIN"
+        },
+        "data_description": {
+          "backend": "Select how Home Assistant connects to the heating system.",
+          "ble_device": "Select or enter the Bluetooth address of the heating gateway.",
+          "passkey": "PIN used to pair with the gateway over Bluetooth."
+        }
+      },
+      "access": {
+        "title": "Zugriff und Berechtigungen",
+        "description": "Lese- und Schreibrechte",
+        "data": {
+          "read_access_level": "Read access level",
+          "write_access_level": "Write access level",
+          "write_enabled": "Enable write access",
+          "experimental_writes": "Expose OBD-declared writable registers without qualifying RW source evidence as experimental controls. Requires write access to be enabled."
+        },
+        "data_description": {
+          "read_access_level": "Choose the highest register level whose values should be exposed.",
+          "write_access_level": "Choose the highest register level that may be written. This does not enable writes by itself.",
+          "write_enabled": "Allow supported controls to send changes to the heating system.",
+          "experimental_writes": "Expose OBD-declared writable registers without qualifying RW source evidence as experimental controls. Requires write access to be enabled."
+        }
+      },
+      "features": {
+        "title": "Entitäten und Funktionen",
+        "description": "Entitäts- und Funktionsauswahl",
+        "data": {
+          "diagnostics_enabled": "Enable diagnostic data",
+          "screed_drying_enabled": "Enable screed drying",
+          "cooling_enabled": "Enable cooling functions",
+          "cascade_enabled": "Enable cascade functions",
+          "holiday_enabled": "Show holiday functions",
+          "zone_overrides": "Active zones",
+          "_openrbus_entity_picker": "Configure entity selection"
+        },
+        "data_description": {
+          "diagnostics_enabled": "Add diagnostic entities with transport and communication status for troubleshooting.",
+          "screed_drying_enabled": "Add entities for the screed-drying program when the controller provides them.",
+          "cooling_enabled": "Include registers in the reviewed cooling-function map. When disabled, those exact registers are excluded before entity selection and creation.",
+          "cascade_enabled": "Show additional settings and status values for installations with multiple heat producers controlled together. To show cascade cooling functions, also enable cooling.",
+          "holiday_enabled": "Show holiday schedule and temperature settings when the controller provides them.",
+          "zone_overrides": "Shows the owning node and detected manufacturer function; only zones enabled by the device can be selected.",
+          "_openrbus_entity_picker": "Open the three-step selector: Device, Category, then Entities. Existing entity identities and saved choices are retained."
+        }
+      },
+      "polling": {
+        "title": "Abfrage und Anzeige",
+        "description": "Abfrageintervalle und Namen",
+        "data": {
+          "language": "Entity language",
+          "poll_interval_fast": "Fast polling interval (seconds)",
+          "poll_interval_standard": "Standard polling interval (seconds)",
+          "poll_interval_slow": "Slow polling interval (seconds)",
+          "invalid_value_disable_after": "Disable entity after invalid values (minutes)"
+        },
+        "data_description": {
+          "language": "Choose the language used for entity names and descriptions.",
+          "poll_interval_fast": "Time between frequent reads, in seconds. A longer interval reduces Bluetooth traffic.",
+          "poll_interval_standard": "Time between regular reads, in seconds.",
+          "poll_interval_slow": "Time between infrequent reads, in seconds.",
+          "invalid_value_disable_after": "Disable an entity after its value has remained invalid for this many minutes."
+        }
+      },
+      "entity_node_select": {
+        "title": "Geräteauswahl",
+        "description": "Choose discovered devices to manage. Known models are labeled when identified; other discovered devices remain available.",
+        "data": {
+          "_openrbus_entity_nodes": "Devices",
+          "_openrbus_entity_node_preset": "Bulk action"
         },
         "data_description": {
           "_openrbus_entity_nodes": "Choose the nodes to apply a bulk action to. Node selections are expanded into stable per-entity overrides.",
           "_openrbus_entity_node_preset": "Set selected nodes to all, none, or their automatic defaults."
         }
       },
-      "entity_groups": {
-        "title": "Category selection",
-        "description": "Choose a category for a bulk action or open it to select individual entities.",
-        "data": {
-          "_openrbus_entity_groups": "Categories",
-          "_openrbus_entity_group_preset": "Bulk action",
-          "_openrbus_entity_group_edit": "Group to edit",
-          "_openrbus_entity_group_action": "Next action",
-          "flow_action": "Navigation"
-        },
-        "data_description": {
-          "_openrbus_entity_groups": "Choose one or more groups for a bulk action, or open one group to edit its entities.",
-          "_openrbus_entity_group_preset": "Apply all, none, or defaults to selected groups.",
-          "_openrbus_entity_group_edit": "Choose one group for individual entity selection.",
-          "_openrbus_entity_group_action": "Edit the chosen group or finish the selection."
+      "entity_group_menu": {
+        "title": "Entitätsauswahl fortsetzen",
+        "menu_options": {
+          "entity_group_edit": "Kategorie bearbeiten",
+          "entity_items": "Entitäten suchen/bearbeiten",
+          "entity_selection_done": "Zurück zu den Optionen",
+          "entity_nodes": "Zurück zu den Geräten"
         }
       },
-      "entity_items": {
-        "title": "Entities in category",
-        "description": "Search by name, object/register ID, device, zone, or category.",
+      "entity_group_edit": {
+        "title": "Kategorie zum Bearbeiten wählen",
         "data": {
-          "_openrbus_entity_search": "Search",
-          "_openrbus_entity_preset": "Selection mode",
-          "_openrbus_entity_items": "Enabled entities",
-          "_openrbus_entity_item_nav": "Action"
-        },
-        "data_description": {
-          "_openrbus_entity_search": "Search by entity name, object/register ID, node, zone, or group. Search results are scoped to this group.",
-          "_openrbus_entity_preset": "Use a bulk preset or edit individual checkboxes.",
-          "_openrbus_entity_items": "Search by entity name, object/register ID, node, zone, or group. Search results are scoped to this group."
+          "_openrbus_entity_group_edit": "Kategorie"
+        }
+      },
+      "thin_controller_menu": {
+        "title": "Proxy auswählen",
+        "menu_options": {
+          "thin_controller": "Controller auswählen",
+          "thin_controller_back": "Zurück zur Verbindung"
+        }
+      },
+      "thin_scan_menu": {
+        "title": "Gateway auswählen",
+        "menu_options": {
+          "thin_scan": "Gateway auswählen",
+          "thin_scan_back": "Zurück zur Proxy-Auswahl"
         }
       }
     }
@@ -295,6 +415,18 @@
         "next": "Save and return to groups",
         "done": "Finish selection",
         "back": "Back to groups"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "register_status": {
+        "state": {
+          "reset_limit_wait_one_hour": "Reset limit reached; wait one hour (substatus 255)",
+          "unknown_status_code": "Unknown status code",
+          "unknown_error_code": "Unknown error code",
+          "unknown_code": "Unknown code"
+        }
       }
     }
   }

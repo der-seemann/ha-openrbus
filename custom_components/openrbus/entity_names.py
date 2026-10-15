@@ -10,8 +10,10 @@ from openrbus.discovery import DeviceIdentity
 from openrbus.registry import Registry
 
 from .zones import (
+    ZoneAssociation,
     ZoneKind,
     profile_for,
+    zone_association,
     zone_device_name,
     zone_enabled,
     zone_subindex,
@@ -22,10 +24,67 @@ from .zones import (
 # FriendlyName and object address; see docs/entity-names.md. Keep these keyed
 # by exact codes because abbreviations are context-dependent.
 _REGISTER_NAMES_DE = {
+    # BM001 is the measured buffer-tank temperature. Its manufacturer short
+    # form "Gem.PuSpTemp" is expanded from the exact 5501 OBD translation.
+    "BM001": "Gemessene Pufferspeichertemperatur",
     "CM030": "Heizkreis-Raumtemperatur",
     "CM210": "Außentemperatur des Heizkreises",
     "CM220": "Kurzzeitmittel der Außentemperatur des Heizkreises",
     "CM230": "Langzeitmittel der Außentemperatur des Heizkreises",
+    "CM380": "Status des Heizkreis-Sicherheitstemperaturbegrenzers",
+    "AP004": "Verzögerungszeit bis zur Öffnung des Hydraulikventils",
+    "CM320": "Geschätzte Zeit bis zum Start der elektrischen Zusatzheizung für den Trinkwarmwasserspeicher",
+    "CP360": "Trinkwarmwasser-Sollwert des Kreises im Eco-Betrieb",
+    "CP430": "Optimierung der Trinkwarmwasser-Speicherladung",
+    "HP002": "Maximale Vorlauftemperatur der Wärmepumpe ohne Zusatzerzeuger",
+    "HP071": "Minimale Rücklauftemperatur der Wärmepumpe, unterhalb der das Abtauen abgebrochen wird",
+    "HP072": "Minimale Vorlauftemperatur der Wärmepumpe, unterhalb der der Zusatzerzeuger beim Abtauen startet",
+    "HP094": "Startzeit des leisen Betriebs der Wärmepumpe",
+    "HP095": "Endzeit des leisen Betriebs der Wärmepumpe",
+    "HP155": "Mindeststillstandszeit des Wärmepumpenverdichters",
+    "HP010": "Mindestdurchflussmenge",
+    "HP045": "Maximale Schaltdifferenz zum Ausschalten der Wärmepumpe",
+    "HP046": "Minimale Schaltdifferenz zum Ausschalten der Wärmepumpe",
+    "HP070": "Minimale Rücklauftemperatur der Wärmepumpe, unterhalb der der Zusatzerzeuger beim Abtauen startet",
+    "HP073": "Minimale Vorlauftemperatur der Wärmepumpe, unterhalb der das Abtauen gestoppt wird",
+    "HP074": "Minimale Schaltdifferenz der Wärmepumpe",
+    "HP090": "Maximale Fehlerverstärkung für Meldungen an den hydraulischen Zusatzerzeuger",
+    "HP143": "Maximale Trinkwarmwassertemperatur für den Wärmepumpenbetrieb",
+    "HP161": "Mindestbetriebszeit des Verdichters der Wärmepumpe",
+    "HP164": "Minimale Vorlauftemperatur, bei der der Verdichter arbeiten darf",
+    "HP165": "Minimale Vorlauftemperatur vor dem Neustart des Verdichters",
+    "HP206": "Maximale Außentemperatur, die die Außeneinheit während des intelligenten Zuordnungsalgorithmus absenkt",
+    "HP208": "Maximale Vorlauftemperatur der Außeneinheit während des intelligenten Zuordnungsalgorithmus",
+    "AP006": "Mindestwasserdruck für die Meldung eines niedrigen Wasserdrucks",
+    "AP007": "Vorlauftemperaturgrenze, deren Überschreitung das Gerät für zehn Minuten sperrt",
+    "AP077": "Höchste darstellbare Ebene für Parameter und Signale",
+    "AP080": "Außentemperaturgrenze zur Aktivierung des Frostschutzes",
+    "AP092": "Sollwert für die maximale Heizleistung",
+    "PP016": "Maximale Pumpendrehzahl im Heizbetrieb",
+    "DP011": "Maximale Temperatur zum Abschalten des Wärmeerzeugers für die Trinkwarmwasserbereitung",
+    "DP037": "Minimale Drehzahl der Trinkwarmwasser-Ladepumpe",
+    "DP038": "Maximale Drehzahl der Trinkwarmwasser-Ladepumpe",
+    "DP476": "Mindestlaufzeit der Trinkwarmwasser-Pumpe",
+    "HM129": "Maximale Frequenzbegrenzung im leisen Betrieb",
+    "HP047": "Minimale Startverzögerung des Zusatzerzeugers bei Erreichen seiner minimalen Außentemperatur",
+    "HP048": "Maximale Startverzögerung des Zusatzerzeugers bei Erreichen seiner maximalen Außentemperatur",
+    "HP049": "Minimale Außentemperatur für die Startverzögerung des Zusatzerzeugers",
+    "HP050": "Maximale Außentemperatur für die Startverzögerung des Zusatzerzeugers",
+    "HP051": "Minimale Außentemperatur für den Betrieb der Wärmepumpe",
+    "HP178": "Maximale Strombegrenzung der Außeneinheit",
+    "AP063": "Maximaler Vorlauftemperatur-Sollwert für Heizung",
+    "AP084": "Maximal verfügbare Leistung für die Trinkwarmwasserbereitung",
+    "AP061": "Maximale Korrektur der Systemtemperatur bei vorhandener Anlagentemperatur",
+    "PP018": "Minimale Pumpendrehzahl im Heizbetrieb",
+    "DP003": "Maximale Gebläsedrehzahl bei Trinkwarmwasserbereitung",
+    "DP048": "Minimale Heizdauer zwischen Trinkwarmwasserbereitungsperioden",
+    "BP015": "Minimale Nachlaufzeit der Pufferladepumpe",
+    "EP030": "Minimaler Temperatursollwert für die 0–10-Volt-Anforderung",
+    "EP031": "Maximaler Temperatursollwert für die 0–10-Volt-Anforderung",
+    "EP032": "Minimaler Leistungssollwert für die 0–10-Volt-Anforderung",
+    "EP033": "Maximaler Leistungssollwert für die 0–10-Volt-Anforderung",
+    "EP034": "Minimaler Spannungssollwert für die 0–10-Volt-Anforderung",
+    "EP035": "Maximaler Spannungssollwert für die 0–10-Volt-Anforderung",
     "CP000": "Maximaler Vorlauftemperatur-Sollwertbereich",
     "CP010": "Vorlauftemperatur-Sollwert ohne Außensensor",
     "CP020": "Funktion des Heizkreises",
@@ -37,6 +96,7 @@ _REGISTER_NAMES_DE = {
     "CP080": "Raumsollwert der Heizkreisaktivität",
     "CP130": "Außentemperaturfühler für den Heizkreis",
     "CP140": "Raumsollwert der Heizkreisaktivität im Kühlbetrieb",
+    "CP190": "Heizkreis-Sicherheitstemperaturbegrenzer aktiviert",
     "CP200": "Raumtemperatur-Sollwert im Heizkreis-Kühlbetrieb",
     "CP210": "Komfort-Startwert des Heizkreises",
     "CP220": "Nacht-Startwert des Heizkreises",
@@ -71,6 +131,51 @@ _REGISTER_NAMES_DE = {
     "DP047": "Maximale Dauer der Trinkwarmwasserbereitung",
     "HP003": "Minimale Vorlauftemperatur der Wärmepumpe im Kühlbetrieb",
     "HP180": "Externer Drucksensor",
+}
+
+# Exact-address expansions for manufacturer entries with no parameter code or
+# with an abbreviated German short label. The expected source label prevents
+# stale catalog rows from receiving an unrelated override.
+_REGISTER_NAMES_DE_BY_ADDRESS = {
+    "2001:0d": (
+        None,
+        "Konfig. Tabellenver.",
+        "Version der Gerätekonfigurationstabelle",
+        "UINT16",
+        "UINT16",
+        None,
+        False,
+    ),
+    "4356:00": (
+        None,
+        "AE-Schutzfunktionen",
+        "Schutzfunktionen der Außeneinheit der Wärmepumpe",
+        "UINT8",
+        "UINT8",
+        None,
+        False,
+    ),
+    "434b:00": (
+        None,
+        "Modulationsgrad AE",
+        "Modulationsgrad der Wärmepumpen-Außeneinheit",
+        "UINT8",
+        "UINT8",
+        None,
+        False,
+    ),
+}
+
+_REGISTER_ARRAY_NAMES_DE = {
+    0x3811: (
+        "EP046",
+        "Fktauswahl dig. Eing",
+        "Auswahl der Funktion des Digitaleingangs",
+        "ENUMERATION",
+        "UINT8",
+        "InputDigitalConfiguration",
+        10,
+    ),
 }
 
 # Concise English slugs for the same reviewed code/address set. These expand
@@ -122,10 +227,73 @@ _REGISTER_NAMES_EN = {
     "HP180": "external pressure sensor",
 }
 
+# These two exact, per-zone objects share the same manufacturer short label.
+# Their normalized meanings come from their distinct OBD medium descriptions:
+# the CP190 setting enables the safety thermostat check; CM380 reports status.
+_REGISTER_NAMES_EN_DISPLAY = {
+    "BM001": "Measured buffer tank temperature",
+    "AP004": "Time until the hydraulic valve opens",
+    "CM320": "Estimated time until the electric auxiliary heater for the hot water tank starts",
+    "CP360": "Domestic hot water circuit setpoint in eco mode",
+    "CP430": "Domestic hot water tank charging optimization",
+    "HP002": "Maximum heat pump flow temperature without auxiliary heat source",
+    "HP072": "Minimum flow temperature for auxiliary heat source start during defrost",
+    "HP071": "Minimum heat-pump return temperature below which defrost is aborted",
+    "HP094": "Heat pump quiet operation start time",
+    "HP095": "Heat pump quiet operation end time",
+    "HP155": "Heat pump compressor minimum off time",
+    "HP010": "Minimum flow rate",
+    "HP045": "Maximum heat pump switch-off differential",
+    "HP046": "Minimum heat pump switch-off differential",
+    "HP070": "Minimum heat-pump return temperature for auxiliary heat source start during defrost",
+    "HP073": "Minimum heat-pump flow temperature at which defrost stops",
+    "HP074": "Minimum heat pump switching differential",
+    "HP090": "Maximum error gain for hydraulic auxiliary heat source reporting",
+    "HP143": "Maximum domestic hot water temperature for heat pump operation",
+    "HP161": "Minimum heat pump compressor run time",
+    "HP164": "Minimum flow temperature at which the compressor may run",
+    "HP165": "Minimum flow temperature before compressor restart",
+    "HP206": "Maximum outdoor unit temperature during its intelligent assignment algorithm",
+    "HP208": "Maximum outdoor unit flow temperature during its intelligent assignment algorithm",
+    "AP006": "Minimum water pressure for low-pressure notification",
+    "AP007": "Flow temperature limit that locks the unit for ten minutes when exceeded",
+    "AP077": "Highest displayable parameter and signal level",
+    "AP080": "Outdoor temperature limit for frost protection activation",
+    "AP092": "Setpoint for maximum heating output",
+    "PP016": "Maximum pump speed in heating mode",
+    "DP011": "Maximum temperature for stopping the heat generator during domestic hot water production",
+    "DP037": "Minimum domestic hot water charging pump speed",
+    "DP038": "Maximum domestic hot water charging pump speed",
+    "DP476": "Minimum domestic hot water pump run time",
+    "HM129": "Maximum frequency limit in quiet operation",
+    "HP047": "Minimum auxiliary heat source start delay at its minimum outdoor temperature",
+    "HP048": "Maximum auxiliary heat source start delay at its maximum outdoor temperature",
+    "HP049": "Minimum outdoor temperature for the auxiliary heat source start delay",
+    "HP050": "Maximum outdoor temperature for the auxiliary heat source start delay",
+    "HP051": "Minimum outdoor temperature for heat pump operation",
+    "HP178": "Maximum outdoor unit current limit",
+    "AP063": "Maximum heating flow temperature setpoint",
+    "AP084": "Maximum available output for domestic hot water production",
+    "AP061": "Maximum system temperature correction when a system temperature is available",
+    "PP018": "Minimum pump speed in heating mode",
+    "DP003": "Maximum fan speed during domestic hot water operation",
+    "DP048": "Minimum heating duration between domestic hot water periods",
+    "BP015": "Minimum buffer pump overrun time",
+    "EP030": "Minimum temperature setpoint for the 0 to 10 volt request",
+    "EP031": "Maximum temperature setpoint for the 0 to 10 volt request",
+    "EP032": "Minimum output setpoint for the 0 to 10 volt request",
+    "EP033": "Maximum output setpoint for the 0 to 10 volt request",
+    "EP034": "Minimum voltage setpoint for the 0 to 10 volt request",
+    "EP035": "Maximum voltage setpoint for the 0 to 10 volt request",
+    "CP190": "Heating circuit safety thermostat enabled",
+    "CM380": "Heating circuit safety thermostat status",
+}
+
 # These static code whitelists were generated from exact Core address/code ↔
 # OBD 1.47 `FriendlyName` joins and manually checked against each matching
-# German `MediumDescription`. Only whole-token short-label replacements are
-# allowed. Unconfirmed abbreviations stay as published by Core.
+# German `MediumDescription` or `LongDescription`. Only whole-token
+# short-label replacements are allowed. Unconfirmed abbreviations stay as
+# published by Core.
 _HK_CODES = frozenset(
     [
         "BP018",
@@ -136,6 +304,7 @@ _HK_CODES = frozenset(
         "CM070",
         "CM080",
         "CM090",
+        "CM110",
         "CM120",
         "CM130",
         "CM190",
@@ -155,6 +324,7 @@ _HK_CODES = frozenset(
         "CP050",
         "CP060",
         "CP070",
+        "CP080",
         "CP130",
         "CP210",
         "CP220",
@@ -163,6 +333,7 @@ _HK_CODES = frozenset(
         "CP260",
         "CP290",
         "CP320",
+        "CP340",
         "CP530",
         "CP550",
         "CP570",
@@ -192,6 +363,45 @@ _TWW_CODES = frozenset(
         "CP700",
         "CP790",
         "CP900",
+        "AC009",
+        "AC056",
+        "AC057",
+        "CM340",
+        "CP360",
+        "CP710",
+        "CP810",
+        "CP910",
+        "CP920",
+        "DC004",
+        "DC005",
+        "DM007",
+        "DM008",
+        "DM019",
+        "DM029",
+        "DP003",
+        "DP008",
+        "DP010",
+        "DP030",
+        "DP033",
+        "DP047",
+        "DP048",
+        "DP060",
+        "DP080",
+        "DP120",
+        "DP130",
+        "DP334",
+        "DP337",
+        "DP467",
+        "DP468",
+        "DP469",
+        "EC001",
+        "EP148",
+        "EP149",
+        "GP068",
+        "HP143",
+        "HP144",
+        "HP154",
+        "SM069",
         "DP070",
         "DP140",
         "DP200",
@@ -316,6 +526,7 @@ _WP_CODES = frozenset(
         "HP140",
         "HP143",
         "HP146",
+        "HP155",
         "HP156",
         "HP157",
         "HP158",
@@ -334,18 +545,214 @@ _WP_CODES = frozenset(
         "PP022",
     ]
 )
+# Preserve the pre-existing English slug behavior while German display-name
+# coverage grows. Suggested IDs are a separate, explicitly frozen concern.
+_HK_ID_CODES = _HK_CODES - {"CM110", "CP080", "CP340"}
+_TWW_ID_CODES = _TWW_CODES - {
+    "AC009",
+    "AC056",
+    "AC057",
+    "CM340",
+    "CP360",
+    "CP710",
+    "CP810",
+    "CP910",
+    "CP920",
+    "DC004",
+    "DC005",
+    "DM007",
+    "DM008",
+    "DM019",
+    "DM029",
+    "DP003",
+    "DP008",
+    "DP010",
+    "DP030",
+    "DP033",
+    "DP047",
+    "DP048",
+    "DP060",
+    "DP080",
+    "DP120",
+    "DP130",
+    "DP334",
+    "DP337",
+    "DP467",
+    "DP468",
+    "DP469",
+    "EC001",
+    "EP148",
+    "EP149",
+    "GP068",
+    "HP143",
+    "HP144",
+    "HP154",
+    "SM069",
+}
+_WP_ID_CODES = _WP_CODES - {"HP155"}
 _SOURCE_TERMS_DE = {
     "HK": (_HK_CODES, "Heizkreis"),
     "TWW": (_TWW_CODES, "Trinkwarmwasser"),
     "WP": (_WP_CODES, "Wärmepumpe"),
+    "Hzg": (
+        frozenset(
+            {
+                "AC008",
+                "AC024",
+                "AC039",
+                "AC055",
+                "AC098",
+                "AP063",
+                "CP810",
+                "EC000",
+                "EP146",
+                "EP147",
+                "GP088",
+                "NC000",
+                "NP227",
+                "NP228",
+                "PM002",
+                "PP002",
+                "PP004",
+                "PP006",
+                "PP009",
+                "PP010",
+                "PP016",
+                "PP018",
+                "PP023",
+                "SC068",
+                "SM022",
+                "SM034",
+                "SM070",
+            }
+        ),
+        "Heizung",
+    ),
+    "Temp.": (
+        frozenset(
+            {
+                "AP184",
+                "AP185",
+                "CP260",
+                "DP001",
+                "DP011",
+                "DP044",
+                "DP512",
+                "EM098",
+                "FM037",
+                "FM038",
+                "FM039",
+                "FM040",
+                "FM041",
+                "FM042",
+                "FM043",
+                "FM044",
+                "FM046",
+                "FM047",
+                "FM048",
+                "FM049",
+                "HM073",
+                "HM094",
+                "HP039",
+                "HP040",
+                "HP160",
+                "HP207",
+                "IM022",
+                "NM001",
+                "NP289",
+                "NP327",
+                "SM023",
+                "SM034",
+                "SM070",
+                "SM131",
+                "SM133",
+                "SP055",
+                "SP056",
+                "SP182",
+                "SP285",
+                "SP286",
+                "SP290",
+            }
+        ),
+        "Temperatur",
+    ),
+    "Vorlauftemp.": (
+        frozenset({"AP154", "EM012", "HM185", "HP002", "NM164"}),
+        "Vorlauftemperatur",
+    ),
+    "Rücklauftemp.": (
+        frozenset({"EM013", "EM148", "GM014", "HM186", "NM165"}),
+        "Rücklauftemperatur",
+    ),
+    "Außentemp.": (
+        frozenset({"AM046", "HP013", "HP051", "HP052", "NM027"}),
+        "Außentemperatur",
+    ),
+    "Speichertemp.": (frozenset({"DM062"}), "Speichertemperatur"),
+    "Sollw.": (
+        frozenset(
+            {
+                "AP063",
+                "CM070",
+                "CM080",
+                "CM110",
+                "CP350",
+                "CP370",
+                "CP600",
+                "DP008",
+                "DP377",
+            }
+        ),
+        "Sollwert",
+    ),
+    "Abt.": (frozenset({"HP070", "HP071", "HP072", "HP073"}), "Abtauen"),
+    "Konf.": (frozenset({"AP055", "HP059", "HP076"}), "Konfiguration"),
+    "Betr.": (frozenset({"DP050", "HP094"}), "Betrieb"),
+    "Zusatzhzg": (frozenset({"CM320"}), "Zusatzheizung"),
+    "TWWSp": (frozenset({"DM001", "DM006"}), "Trinkwarmwasserspeicher"),
+    "TVorlauf": (
+        frozenset({"AM016", "CM040", "EM269", "HP012", "HP060", "HP072", "HP073"}),
+        "Vorlauftemperatur",
+    ),
+    "Trücklauf": (
+        frozenset({"AM018", "EM270", "HP070", "HP071"}),
+        "Rücklauftemperatur",
+    ),
+    "Drehz": (
+        frozenset(
+            {
+                "CP530",
+                "DP453",
+                "DP454",
+                "GP007",
+                "GP042",
+                "HM023",
+                "HM069",
+                "NM169",
+                "NP295",
+                "NP296",
+                "PP016",
+                "PP018",
+                "SM036",
+                "SM047",
+                "SP162",
+                "SP172",
+            }
+        ),
+        "Drehzahl",
+    ),
+    "Stab.grad": (frozenset({"DP030"}), "Stabilisierungsgradient"),
+    "Ges.": (frozenset({"AC103", "EM178", "FC004", "FC005", "PC002"}), "Gesamt"),
+    "Energieverbr.": (frozenset({"AC093", "DC001"}), "Energieverbrauch"),
+    "Gel.": (frozenset({"AC009", "AC010", "AC070", "AC075"}), "Gelieferte"),
 }
 _SOURCE_TERMS_EN = {
-    "HK": (_HK_CODES, "heating circuit"),
-    "TWW": (_TWW_CODES, "domestic hot water"),
-    "WP": (_WP_CODES, "heat pump"),
+    "HK": (_HK_ID_CODES, "heating circuit"),
+    "TWW": (_TWW_ID_CODES, "domestic hot water"),
+    "WP": (_WP_ID_CODES, "heat pump"),
 }
 _SOURCE_TERM_PATTERNS = {
-    token: re.compile(rf"(?<![A-Za-z]){token}(?![A-Za-z])", re.IGNORECASE)
+    token: re.compile(rf"(?<![A-Za-z]){re.escape(token)}(?![A-Za-z])", re.IGNORECASE)
     for token in _SOURCE_TERMS_DE
 }
 
@@ -426,6 +833,71 @@ def register_display_name(register: Any, language: str) -> str | None:
 
     code = getattr(register, "internal_code", None)
     address = getattr(register, "address", None)
+    if language == "de" and address is not None:
+        array_name = _REGISTER_ARRAY_NAMES_DE.get(address.index)
+        if array_name is not None and 1 <= address.subindex:
+            (
+                expected_code,
+                source_label,
+                reviewed,
+                expected_type,
+                expected_storage,
+                expected_enum,
+                expected_max_items,
+            ) = array_name
+            definition = _REGISTRY.find(address)
+            wire = getattr(definition, "wire", None)
+            wire_type = getattr(wire, "type", None)
+            storage = getattr(wire, "storage", None)
+            if (
+                definition is not None
+                and definition.address.index == address.index
+                and definition.address.subindex == 0
+                and definition.code == expected_code
+                and code == expected_code
+                and getattr(register, "name_de", None) == source_label
+                and getattr(register, "datatype", None) == expected_type
+                and str(getattr(wire_type, "value", wire_type)) == expected_type
+                and getattr(register, "storage", None) == expected_storage
+                and str(getattr(storage, "value", storage)) == expected_storage
+                and getattr(wire, "enum_name", None) == expected_enum
+                and getattr(wire, "is_array", None) is True
+                and getattr(wire, "max_items", None) == expected_max_items
+                and address.subindex <= expected_max_items
+            ):
+                return reviewed
+        if array_name is not None and address.subindex == 0:
+            # CANopen :00 is the array count object, not a concrete selector.
+            return None
+
+        reviewed_at_address = _REGISTER_NAMES_DE_BY_ADDRESS.get(str(address))
+        if reviewed_at_address is not None:
+            (
+                expected_code,
+                source_label,
+                reviewed,
+                expected_type,
+                expected_storage,
+                expected_enum,
+                expected_array,
+            ) = reviewed_at_address
+            definition = _REGISTRY.find(address)
+            wire = getattr(definition, "wire", None)
+            wire_type = getattr(wire, "type", None)
+            storage = getattr(wire, "storage", None)
+            if (
+                definition is not None
+                and definition.code == expected_code
+                and code == expected_code
+                and getattr(register, "name_de", None) == source_label
+                and getattr(register, "datatype", None) == expected_type
+                and str(getattr(wire_type, "value", wire_type)) == expected_type
+                and getattr(register, "storage", None) == expected_storage
+                and str(getattr(storage, "value", storage)) == expected_storage
+                and getattr(wire, "enum_name", None) == expected_enum
+                and getattr(wire, "is_array", None) is expected_array
+            ):
+                return reviewed
     if not isinstance(code, str) or address is None:
         return None
     definition = _REGISTRY.find(address)
@@ -439,6 +911,8 @@ def register_display_name(register: Any, language: str) -> str | None:
         return _expand_source_terms(
             getattr(register, "name_de", None), code, _SOURCE_TERMS_DE
         )
+    if language == "en":
+        return _REGISTER_NAMES_EN_DISPLAY.get(code)
     return None
 
 
@@ -561,6 +1035,91 @@ def suggested_object_id(
     return "_".join(parts)
 
 
+def compact_entity_object_id(
+    parent: Any,
+    identity: DeviceIdentity,
+    register: Any,
+    *,
+    english_name: str | None = None,
+) -> str | None:
+    """Build the full, deterministic ID for a register-backed entity."""
+
+    model = getattr(identity, "model", None) or getattr(identity, "family", None)
+    parts = [f"n{identity.node}"]
+    if model:
+        parts.append(_slug(model))
+
+    slot = zone_subindex(register, identity)
+    association = zone_association(register, identity)
+    address = getattr(register, "address", None)
+    if slot is None and association is ZoneAssociation.FUNCTION_SELECTOR:
+        slot = getattr(address, "subindex", None)
+    if isinstance(slot, int) and slot > 0:
+        parts.append(f"z{slot}")
+        profile = profile_for(parent, identity.node, slot, identity)
+        if profile is not None:
+            designation = (profile.friendly_name or profile.short_name or "").strip()
+            if designation:
+                parts.append(_slug(designation))
+
+    code = parameter_code_for(register, identity)
+    definition = _REGISTRY.find(address) if address is not None else None
+    if slot is None and definition is not None and definition.wire.is_array:
+        code = None
+    if code:
+        parts.append(_slug(code))
+    elif address is not None:
+        # Unknown or wider array dimensions keep their exact address in the ID
+        # instead of relying on Home Assistant's collision suffixes.
+        parts.append(f"obj_{address.index:04x}_{address.subindex:02x}")
+    label = (
+        english_name
+        or (_REGISTER_NAMES_EN.get(code) if code is not None else None)
+        or _expand_source_terms(
+            getattr(register, "name_en", None), code, _SOURCE_TERMS_EN
+        )
+        or getattr(register, "name_en", None)
+        or code
+        or "register"
+    )
+    parts.append(_slug(label) or "register")
+    return "_".join(part for part in parts if part)
+
+
+def assign_compact_entity_id(entity: Any, domain: str) -> None:
+    """Assign a full HA entity ID after a register entity is fully built."""
+
+    parent = getattr(entity, "_parent", None)
+    identity = getattr(entity, "_identity", None)
+    register = getattr(entity, "_register", None)
+    if parent is None or identity is None or register is None:
+        return
+    object_id = compact_entity_object_id(
+        parent,
+        identity,
+        register,
+        english_name=getattr(entity, "_openrbus_english_name", None),
+    )
+    if object_id:
+        entity.entity_id = f"{domain}.{object_id}"
+
+
+def assign_compact_identity_entity_id(entity: Any, domain: str) -> None:
+    """Assign the node-scoped ID for one identity diagnostic after construction."""
+
+    identity = getattr(entity, "_identity", None)
+    field_name = getattr(entity, "_field", None)
+    if identity is None or field_name not in {"device_code", "parameter_number"}:
+        return
+    suffix = "device_type" if field_name == "device_code" else "parameter_number"
+    parts = [f"n{identity.node}"]
+    model = getattr(identity, "model", None) or getattr(identity, "family", None)
+    if model:
+        parts.append(_slug(model))
+    parts.append(suffix)
+    entity.entity_id = f"{domain}.{'_'.join(parts)}"
+
+
 def _expand_source_terms(value: object, code: str | None, terms: dict) -> str | None:
     """Expand only source-audited whole tokens for this exact code."""
 
@@ -586,6 +1145,9 @@ def _slug(value: object) -> str:
 
 
 __all__ = [
+    "assign_compact_entity_id",
+    "assign_compact_identity_entity_id",
+    "compact_entity_object_id",
     "parameter_code_for",
     "register_display_name",
     "suggested_object_id",

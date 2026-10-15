@@ -11,5 +11,5 @@
   "loggers": ["openrbus"],
   "quality_scale": "bronze",
   "requirements": ["openrbus==0.4.7"],
-  "version": "0.4.7"
+  "version": "0.4.8"
 }

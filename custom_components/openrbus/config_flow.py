@@ -8,7 +8,11 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant.components import bluetooth
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.config_entries import (
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlowWithReload,
+)
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import selector, translation
 
@@ -33,12 +37,14 @@ from .const import (
     CONF_BLE_DEVICE,
     CONF_BLE_NAME,
     CONF_BLE_SOURCE,
+    CONF_CASCADE_ENABLED,
     CONF_COOLING_ENABLED,
     CONF_DIAGNOSTICS_ENABLED,
     CONF_ENTITY_OVERRIDES,
     CONF_EXPERIMENTAL_WRITES,
     CONF_FLOW_ACTION,
     CONF_GROUP_OVERRIDES,
+    CONF_HOLIDAY_ENABLED,
     CONF_INVALID_VALUE_DISABLE_AFTER,
     CONF_LANGUAGE,
     CONF_NODE_OVERRIDES,
@@ -62,9 +68,11 @@ from .const import (
     CONF_WRITE_ACCESS_LEVEL,
     CONF_WRITE_ENABLED,
     CONF_ZONE_OVERRIDES,
+    DEFAULT_CASCADE_ENABLED,
     DEFAULT_COOLING_ENABLED,
     DEFAULT_DIAGNOSTICS_ENABLED,
     DEFAULT_EXPERIMENTAL_WRITES,
+    DEFAULT_HOLIDAY_ENABLED,
     DEFAULT_INVALID_VALUE_DISABLE_AFTER,
     DEFAULT_LANGUAGE,
     DEFAULT_POLL_INTERVALS,
@@ -107,12 +115,9 @@ _CONF_ENTITY_NODE_PRESET = "_openrbus_entity_node_preset"
 _CONF_ENTITY_GROUPS = "_openrbus_entity_groups"
 _CONF_ENTITY_GROUP_PRESET = "_openrbus_entity_group_preset"
 _CONF_ENTITY_GROUP_EDIT = "_openrbus_entity_group_edit"
-_CONF_ENTITY_GROUP_ACTION = "_openrbus_entity_group_action"
 _CONF_ENTITY_ITEMS = "_openrbus_entity_items"
 _CONF_ENTITY_SEARCH = "_openrbus_entity_search"
 _CONF_ENTITY_PRESET = "_openrbus_entity_preset"
-_CONF_ENTITY_ITEM_NAV = "_openrbus_entity_item_nav"
-_ENTITY_PICKER_ACTIONS = ("edit", "done")
 _ENTITY_PRESETS = ("keep", "default", "all", "none")
 
 _WARNING_TRANSLATION_PREFIX = f"component.{DOMAIN}.common."
@@ -823,6 +828,18 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                                 CONF_COOLING_ENABLED, DEFAULT_COOLING_ENABLED
                             ),
                         ): cv.boolean,
+                        vol.Required(
+                            CONF_CASCADE_ENABLED,
+                            default=pending.get(
+                                CONF_CASCADE_ENABLED, DEFAULT_CASCADE_ENABLED
+                            ),
+                        ): cv.boolean,
+                        vol.Required(
+                            CONF_HOLIDAY_ENABLED,
+                            default=pending.get(
+                                CONF_HOLIDAY_ENABLED, DEFAULT_HOLIDAY_ENABLED
+                            ),
+                        ): cv.boolean,
                     }
                 ),
             )
@@ -1057,6 +1074,12 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
                     CONF_COOLING_ENABLED: bool(
                         user_input.get(CONF_COOLING_ENABLED, DEFAULT_COOLING_ENABLED)
                     ),
+                    CONF_CASCADE_ENABLED: bool(
+                        user_input.get(CONF_CASCADE_ENABLED, DEFAULT_CASCADE_ENABLED)
+                    ),
+                    CONF_HOLIDAY_ENABLED: bool(
+                        user_input.get(CONF_HOLIDAY_ENABLED, DEFAULT_HOLIDAY_ENABLED)
+                    ),
                     CONF_POLL_FAST: int(
                         user_input.get(
                             CONF_POLL_FAST, DEFAULT_POLL_INTERVALS[CONF_POLL_FAST]
@@ -1142,7 +1165,7 @@ class OpenRBusConfigFlow(ConfigFlow, domain=DOMAIN):
         return await self.async_step_ble_target()
 
 
-class OpenRBusOptionsFlowHandler(OptionsFlow):
+class OpenRBusOptionsFlowHandler(OptionsFlowWithReload):
     """Explicitly opt existing entries into a different backend."""
 
     def __init__(self, config_entry) -> None:
@@ -1218,6 +1241,12 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             include_cooling=bool(
                 preferences.get(CONF_COOLING_ENABLED, DEFAULT_COOLING_ENABLED)
             ),
+            include_cascade=bool(
+                preferences.get(CONF_CASCADE_ENABLED, DEFAULT_CASCADE_ENABLED)
+            ),
+            include_holiday=bool(
+                preferences.get(CONF_HOLIDAY_ENABLED, DEFAULT_HOLIDAY_ENABLED)
+            ),
         ):
             if (
                 not allowed
@@ -1291,6 +1320,8 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
         configured = {**self._config_entry.data, **self._config_entry.options}
         configured.update(getattr(self, "_entity_picker_pending", {}) or {})
         cooling = bool(configured.get(CONF_COOLING_ENABLED, DEFAULT_COOLING_ENABLED))
+        cascade = bool(configured.get(CONF_CASCADE_ENABLED, DEFAULT_CASCADE_ENABLED))
+        holiday = bool(configured.get(CONF_HOLIDAY_ENABLED, DEFAULT_HOLIDAY_ENABLED))
         rows = rows_for_parent(
             runtime,
             include_diagnostics=bool(
@@ -1302,6 +1333,8 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                 )
             ),
             include_cooling=cooling,
+            include_cascade=cascade,
+            include_holiday=holiday,
         )
         groups: dict[str, dict[str, Any]] = {}
         for identity, register, _poll_group, allowed in rows:
@@ -1399,6 +1432,7 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
         if isinstance(overrides, dict):
             return overrides
         current = {**self._config_entry.data, **self._config_entry.options}
+        current.update(getattr(self, "_options_draft", {}) or {})
         stored = current.get(CONF_ENTITY_OVERRIDES, {})
         return dict(stored) if isinstance(stored, Mapping) else {}
 
@@ -1407,6 +1441,7 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
         if isinstance(overrides, dict):
             return overrides
         current = {**self._config_entry.data, **self._config_entry.options}
+        current.update(getattr(self, "_options_draft", {}) or {})
         stored = current.get(CONF_NODE_OVERRIDES, {})
         return dict(stored) if isinstance(stored, Mapping) else {}
 
@@ -1415,6 +1450,7 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
         if isinstance(overrides, dict):
             return overrides
         current = {**self._config_entry.data, **self._config_entry.options}
+        current.update(getattr(self, "_options_draft", {}) or {})
         stored = current.get(CONF_GROUP_OVERRIDES, {})
         return dict(stored) if isinstance(stored, Mapping) else {}
 
@@ -1435,6 +1471,8 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                 include_diagnostics=True,
                 include_screed_drying=True,
                 include_cooling=True,
+                include_cascade=True,
+                include_holiday=True,
             )
             if allowed
         }
@@ -1490,6 +1528,16 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
         return self.async_show_form(step_id=step, data_schema=vol.Schema(fields))
 
     async def async_step_entity_nodes(self, user_input=None):
+        if user_input is None:
+            if getattr(self, "_entity_picker_nodes", None) is not None:
+                return await self.async_step_entity_node_select()
+            return self.async_show_menu(
+                step_id="entity_nodes",
+                menu_options=["entity_node_select", "entity_picker_cancel"],
+            )
+        return await self.async_step_entity_node_select(user_input)
+
+    async def async_step_entity_node_select(self, user_input=None):
         groups = self._entity_selection_catalog()
         nodes = sorted({group["node"] for group in groups.values()})
         node_labels = {
@@ -1502,20 +1550,6 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             for node in nodes
         }
         if user_input is not None:
-            self._entity_picker_pending = dict(
-                getattr(self, "_entity_picker_pending", {}) or {}
-            )
-            if _flow_action(user_input) == FLOW_ACTION_BACK:
-                pending = dict(self._entity_picker_pending)
-                pending[CONF_ENTITY_OVERRIDES] = self._picker_overrides()
-                pending[CONF_NODE_OVERRIDES] = self._picker_node_overrides()
-                pending[CONF_GROUP_OVERRIDES] = self._picker_group_overrides()
-                self._pending_options_input = pending
-                self._entity_picker_pending = None
-                self._entity_picker_overrides = None
-                self._entity_picker_node_overrides = None
-                self._entity_picker_group_overrides = None
-                return await self.async_step_init()
             selected_nodes = {
                 int(value) for value in user_input.get(_CONF_ENTITY_NODES, ())
             }
@@ -1556,7 +1590,6 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                         translation_key="entity_selection_action",
                     )
                 ),
-                **dict([_navigation_field()]),
             },
         )
 
@@ -1569,8 +1602,6 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             if group["node"] in selected_nodes
         }
         if user_input is not None:
-            if _flow_action(user_input) == FLOW_ACTION_BACK:
-                return await self.async_step_entity_nodes()
             overrides = self._picker_group_overrides()
             selected_groups = set(user_input.get(_CONF_ENTITY_GROUPS, ()))
             self._apply_picker_preset(
@@ -1579,18 +1610,16 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                 str(user_input.get(_CONF_ENTITY_GROUP_PRESET, "keep")),
             )
             self._entity_picker_group_overrides = overrides
-            action = str(user_input.get(_CONF_ENTITY_GROUP_ACTION, "done"))
-            if action == "done":
-                return await self.async_step_entity_selection_done()
-            group_key = str(user_input.get(_CONF_ENTITY_GROUP_EDIT, ""))
-            if group_key not in eligible:
-                return self._entity_picker_form(
-                    "entity_groups",
-                    self._entity_group_schema(eligible, selected_groups, error=True),
-                )
-            self._entity_picker_group = group_key
-            self._entity_picker_search = ""
-            return await self.async_step_entity_items()
+            self._entity_picker_selected_groups = selected_groups.intersection(eligible)
+            return self.async_show_menu(
+                step_id="entity_group_menu",
+                menu_options=[
+                    "entity_group_edit",
+                    "entity_items",
+                    "entity_selection_done",
+                    "entity_nodes",
+                ],
+            )
         defaults = self._picker_default_selected(eligible)
         selected_groups = [
             key
@@ -1624,21 +1653,40 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                     translation_key="entity_selection_action",
                 )
             ),
-            vol.Required(
-                _CONF_ENTITY_GROUP_ACTION, default="edit"
-            ): selector.SelectSelector(
-                selector.SelectSelectorConfig(
-                    options=list(_ENTITY_PICKER_ACTIONS),
-                    translation_key="entity_group_action",
-                )
-            ),
         }
-        if groups:
-            fields[
-                vol.Required(_CONF_ENTITY_GROUP_EDIT, default=next(iter(groups)))
-            ] = vol.In(choices)
-        fields.update(dict([_navigation_field()]))
         return fields
+
+    async def async_step_entity_group_edit(self, user_input=None):
+        groups = self._entity_selection_catalog()
+        selected_nodes = set(getattr(self, "_entity_picker_nodes", set()))
+        eligible = {
+            key: group
+            for key, group in groups.items()
+            if group["node"] in selected_nodes
+        }
+        choices = {
+            key: f"{group['label']} ({len(group['items'])})"
+            for key, group in eligible.items()
+        }
+        if user_input is not None:
+            group_key = str(user_input.get(_CONF_ENTITY_GROUP_EDIT, ""))
+            if group_key not in eligible:
+                return await self.async_step_entity_groups()
+            self._entity_picker_group = group_key
+            self._entity_picker_search = ""
+            return await self.async_step_entity_items()
+        if not choices:
+            return self.async_show_menu(
+                step_id="entity_group_menu",
+                menu_options=[
+                    "entity_selection_done",
+                    "entity_nodes",
+                ],
+            )
+        return self._entity_picker_form(
+            "entity_group_edit",
+            {vol.Required(_CONF_ENTITY_GROUP_EDIT): vol.In(choices)},
+        )
 
     async def async_step_entity_items(self, user_input=None):
         groups = self._entity_selection_catalog()
@@ -1655,9 +1703,6 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             if not search or search in group["search"].get(uid, "")
         }
         if user_input is not None:
-            action = str(user_input.get(_CONF_ENTITY_ITEM_NAV, "next"))
-            if action == "back":
-                return await self.async_step_entity_groups()
             overrides = self._picker_overrides()
             preset = str(user_input.get(_CONF_ENTITY_PRESET, "default"))
             self._apply_picker_preset(overrides, items, preset)
@@ -1666,11 +1711,15 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                 overrides.update({uid: uid in chosen for uid in items})
             self._entity_picker_overrides = overrides
             self._entity_picker_search = str(user_input.get(_CONF_ENTITY_SEARCH, ""))
-            if action == "done":
-                return await self.async_step_entity_selection_done()
-            if action == "search":
-                return await self.async_step_entity_items()
-            return await self.async_step_entity_groups()
+            return self.async_show_menu(
+                step_id="entity_group_menu",
+                menu_options=[
+                    "entity_group_edit",
+                    "entity_items",
+                    "entity_selection_done",
+                    "entity_nodes",
+                ],
+            )
         selected = self._picker_default_selected({key: group})
         fields: dict[vol.Marker, object] = {
             vol.Required(_CONF_ENTITY_SEARCH, default=search): cv.string,
@@ -1685,14 +1734,6 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             vol.Optional(
                 _CONF_ENTITY_ITEMS, default=sorted(selected.intersection(items))
             ): cv.multi_select(items),
-            vol.Required(
-                _CONF_ENTITY_ITEM_NAV, default="search"
-            ): selector.SelectSelector(
-                selector.SelectSelectorConfig(
-                    options=["search", "next", "done", "back"],
-                    translation_key="entity_item_navigation",
-                )
-            ),
         }
         return self._entity_picker_form("entity_items", fields)
 
@@ -1705,7 +1746,19 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
         self._entity_picker_overrides = None
         self._entity_picker_node_overrides = None
         self._entity_picker_group_overrides = None
-        return await self.async_step_init(pending)
+        self._options_draft = pending
+        return await self.async_step_init()
+
+    async def async_step_entity_picker_cancel(self, user_input=None):
+        pending = dict(getattr(self, "_entity_picker_pending", {}) or {})
+        # Cancel discards edits made in the picker while preserving the
+        # options-section draft that opened it.
+        self._options_draft = pending
+        self._entity_picker_pending = None
+        self._entity_picker_overrides = None
+        self._entity_picker_node_overrides = None
+        self._entity_picker_group_overrides = None
+        return await self.async_step_init()
 
     async def async_step_init(self, user_input=None):
         if user_input is not None:
@@ -1824,7 +1877,7 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                             write_enabled=user_input.get(CONF_WRITE_ENABLED, False),
                         )
                     },
-                    data_schema=_flow_schema(
+                    data_schema=vol.Schema(
                         {vol.Required(CONF_ACCESS_ACK, default=False): cv.boolean}
                     ),
                     errors={"base": "access_confirmation_required"},
@@ -1851,15 +1904,13 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                     selected = next(iter(choices))
                 if selected is None and len(choices) > 1:
                     self._pending_options_input = dict(user_input)
-                    return self.async_show_form(
-                        step_id="thin_controller",
-                        data_schema=_flow_schema(
-                            {vol.Required(CONF_THIN_CONTROLLER): vol.In(choices)}
-                        ),
+                    return self.async_show_menu(
+                        step_id="thin_controller_menu",
+                        menu_options=["thin_controller", "thin_controller_back"],
                     )
                 if selected is not None and selected not in choices:
-                    return self.async_show_form(
-                        step_id="init", errors={"base": "invalid_thin_rpc_controller"}
+                    return await self._async_options_page(
+                        "connection", errors={"base": "invalid_thin_rpc_controller"}
                     )
                 if selected in choices:
                     capability = choices[selected]
@@ -1887,25 +1938,19 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                             pending = dict(user_input)
                             pending.pop("_options_scan_complete", None)
                             self._pending_options_input = pending
-                            return self.async_show_form(
-                                step_id="thin_scan",
-                                data_schema=_flow_schema(
-                                    {
-                                        vol.Required(CONF_BLE_DEVICE): vol.In(
-                                            scan_choices
-                                        )
-                                    }
-                                ),
+                            return self.async_show_menu(
+                                step_id="thin_scan_menu",
+                                menu_options=["thin_scan", "thin_scan_back"],
                             )
                 elif backend == BACKEND_THIN_RPC:
-                    return self.async_show_form(
-                        step_id="init", errors={"base": "no_thin_rpc_services"}
+                    return await self._async_options_page(
+                        "connection", errors={"base": "no_thin_rpc_services"}
                     )
             if level >= 2 and not _valid_auth_key(user_input.get(CONF_AUTH_KEY)):
                 self._pending_options_input = dict(user_input)
                 return self.async_show_form(
                     step_id="credentials",
-                    data_schema=_flow_schema({vol.Required(CONF_AUTH_KEY): cv.string}),
+                    data_schema=vol.Schema({vol.Required(CONF_AUTH_KEY): cv.string}),
                     errors={"base": "auth_key_required"},
                 )
             # An options entry reloads only this existing entry.  Preserve
@@ -1914,8 +1959,8 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             # and break history, dashboards and automations.
             if _transport_route(previous) != _transport_route(user_input):
                 if not _transport_switch_is_safe(previous, user_input):
-                    return self.async_show_form(
-                        step_id="init", errors={"base": "transport_mac_mismatch"}
+                    return await self._async_options_page(
+                        "connection", errors={"base": "transport_mac_mismatch"}
                     )
                 user_input[CONF_TRANSPORT_MIGRATION] = {
                     "previous_options": dict(self._config_entry.options),
@@ -1923,12 +1968,60 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                 }
             await async_save_access_profile(self.hass, user_input)
             return self.async_create_entry(title="", data=user_input)
+        if not hasattr(self, "_options_draft"):
+            self._options_draft = {
+                **self._config_entry.data,
+                **self._config_entry.options,
+            }
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=["connection", "access", "features", "polling", "save"],
+            description_placeholders={
+                "esphome_proxy_setup_url": ESPHOME_PROXY_SETUP_URL
+            },
+        )
+
+    async def async_step_connection(self, user_input=None):
+        return await self._async_options_page("connection", user_input)
+
+    async def async_step_access(self, user_input=None):
+        return await self._async_options_page("access", user_input)
+
+    async def async_step_features(self, user_input=None):
+        return await self._async_options_page("features", user_input)
+
+    async def async_step_polling(self, user_input=None):
+        return await self._async_options_page("polling", user_input)
+
+    async def async_step_save(self, user_input=None):
+        draft = dict(getattr(self, "_options_draft", {}) or {})
+        return await self.async_step_init(draft)
+
+    async def _async_options_page(self, step_id: str, user_input=None, errors=None):
+        """Edit one settings section as a draft, then return to the overview."""
+        if user_input is not None:
+            draft = dict(getattr(self, "_options_draft", {}) or {})
+            values = _without_flow_action(user_input)
+            open_picker = bool(values.pop(_CONF_ENTITY_PICKER, False))
+            draft.update(values)
+            self._options_draft = draft
+            if open_picker:
+                self._entity_picker_pending = dict(draft)
+                self._entity_picker_overrides = self._picker_overrides()
+                node_overrides = self._picker_node_overrides()
+                group_overrides = self._picker_group_overrides()
+                self._entity_picker_node_overrides = dict(node_overrides)
+                self._entity_picker_group_overrides = dict(group_overrides)
+                return await self.async_step_entity_nodes()
+            return await self.async_step_init()
+
         # Options are the current source of truth; entry data is the legacy
         # fallback for entries created before this setting was moved to
         # options.  Normalize only this field so unrelated option defaults are
         # preserved exactly as stored.
         current = {**self._config_entry.data, **self._config_entry.options}
         current.update(getattr(self, "_pending_options_input", {}) or {})
+        current.update(getattr(self, "_options_draft", {}) or {})
         current.pop(CONF_FLOW_ACTION, None)
         stored_profile = await async_load_access_profile(
             self.hass, current.get(CONF_BLE_DEVICE)
@@ -1983,6 +2076,14 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
             vol.Required(
                 CONF_COOLING_ENABLED,
                 default=current.get(CONF_COOLING_ENABLED, DEFAULT_COOLING_ENABLED),
+            ): cv.boolean,
+            vol.Required(
+                CONF_CASCADE_ENABLED,
+                default=current.get(CONF_CASCADE_ENABLED, DEFAULT_CASCADE_ENABLED),
+            ): cv.boolean,
+            vol.Required(
+                CONF_HOLIDAY_ENABLED,
+                default=current.get(CONF_HOLIDAY_ENABLED, DEFAULT_HOLIDAY_ENABLED),
             ): cv.boolean,
             vol.Required(
                 CONF_BLE_DEVICE,
@@ -2045,25 +2146,57 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
         entity_choices = self._entity_choices(current)
         if entity_choices:
             fields[vol.Optional(_CONF_ENTITY_PICKER, default=False)] = cv.boolean
+        if not getattr(self, "_options_draft", None):
+            self._options_draft = dict(current)
+        for marker in fields:
+            if getattr(marker, "default", None) is not None:
+                self._options_draft.setdefault(marker.schema, marker.default())
+        page_fields = {
+            "connection": {CONF_BACKEND, CONF_BLE_DEVICE, CONF_PASSKEY},
+            "access": {
+                CONF_READ_ACCESS_LEVEL,
+                CONF_WRITE_ACCESS_LEVEL,
+                CONF_WRITE_ENABLED,
+                CONF_EXPERIMENTAL_WRITES,
+            },
+            "features": {
+                CONF_DIAGNOSTICS_ENABLED,
+                CONF_SCREED_DRYING_ENABLED,
+                CONF_COOLING_ENABLED,
+                CONF_CASCADE_ENABLED,
+                CONF_HOLIDAY_ENABLED,
+                CONF_ZONE_OVERRIDES,
+                _CONF_ENTITY_PICKER,
+            },
+            "polling": {
+                CONF_LANGUAGE,
+                CONF_POLL_FAST,
+                CONF_POLL_STANDARD,
+                CONF_POLL_SLOW,
+                CONF_INVALID_VALUE_DISABLE_AFTER,
+            },
+        }[step_id]
+        fields = {
+            marker: schema
+            for marker, schema in fields.items()
+            if marker.schema in page_fields
+        }
         self._diagnostic_toggle_baseline = {
             marker.schema: marker.default()
             for marker in fields
             if getattr(marker, "schema", None) != CONF_DIAGNOSTICS_ENABLED
         }
         return self.async_show_form(
-            step_id="init",
+            step_id=step_id,
             description_placeholders={
                 "esphome_proxy_setup_url": ESPHOME_PROXY_SETUP_URL
             },
             data_schema=vol.Schema(fields),
+            errors=errors,
         )
 
     async def async_step_access_warning(self, user_input=None):
         pending = dict(getattr(self, "_pending_options_input", {}))
-        if user_input is not None and _flow_action(user_input) == FLOW_ACTION_BACK:
-            pending.pop(CONF_ACCESS_ACK, None)
-            self._pending_options_input = pending
-            return await self.async_step_init()
         if not user_input or not user_input.get(CONF_ACCESS_ACK):
             return self.async_show_form(
                 step_id="access_warning",
@@ -2074,7 +2207,7 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                         write_enabled=pending.get(CONF_WRITE_ENABLED, False),
                     )
                 },
-                data_schema=_flow_schema(
+                data_schema=vol.Schema(
                     {vol.Required(CONF_ACCESS_ACK, default=False): cv.boolean}
                 ),
                 errors={"base": "access_confirmation_required"},
@@ -2088,13 +2221,10 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
         pending = dict(getattr(self, "_pending_options_input", {}))
         if user_input is not None:
             pending.update(_without_flow_action(user_input))
-            if _flow_action(user_input) == FLOW_ACTION_BACK:
-                self._pending_options_input = pending
-                return await self.async_step_init()
         if not user_input or not _valid_auth_key(user_input.get(CONF_AUTH_KEY)):
             return self.async_show_form(
                 step_id="credentials",
-                data_schema=_flow_schema({vol.Required(CONF_AUTH_KEY): cv.string}),
+                data_schema=vol.Schema({vol.Required(CONF_AUTH_KEY): cv.string}),
                 errors={"base": "auth_key_required"}
                 if user_input is not None
                 else None,
@@ -2129,30 +2259,62 @@ class OpenRBusOptionsFlowHandler(OptionsFlow):
                 )
             return self.async_show_form(
                 step_id="thin_controller",
-                data_schema=_flow_schema({controller_key: vol.In(choices)}),
+                data_schema=vol.Schema({controller_key: vol.In(choices)}),
             )
         pending = dict(getattr(self, "_pending_options_input", {}))
         pending.update(_without_flow_action(user_input))
-        if _flow_action(user_input) == FLOW_ACTION_BACK:
-            self._pending_options_input = pending
-            return await self.async_step_init()
+        choices = thin_rpc_controller_choices(
+            self.hass,
+            request_service=pending.get(
+                CONF_THIN_REQUEST_SERVICE, "openrbus_gatt_rpc_request"
+            ),
+            poll_service=pending.get(CONF_THIN_POLL_SERVICE, "openrbus_gatt_rpc_poll"),
+            diagnostics_service=pending.get(
+                CONF_THIN_DIAGNOSTICS_SERVICE, "openrbus_gatt_rpc_diagnostics"
+            ),
+        )
+        selected = pending.get(CONF_THIN_CONTROLLER)
+        if selected not in choices:
+            controller_key = vol.Required(CONF_THIN_CONTROLLER)
+            if selected in choices:
+                controller_key = vol.Required(CONF_THIN_CONTROLLER, default=selected)
+            return self.async_show_form(
+                step_id="thin_controller",
+                data_schema=vol.Schema({controller_key: vol.In(choices)}),
+                errors={"base": "invalid_thin_rpc_controller"},
+            )
         self._pending_options_input = None
         return await self.async_step_init(pending)
+
+    async def async_step_thin_controller_back(self, user_input=None):
+        self._options_draft = dict(getattr(self, "_pending_options_input", {}) or {})
+        self._pending_options_input = None
+        return await self._async_options_page("connection")
 
     async def async_step_thin_scan(self, user_input=None):
         """Persist a target selected from the proxy's current BLE scan."""
         pending = dict(getattr(self, "_pending_options_input", {}))
         if user_input is None:
-            return self.async_abort(reason="thin_rpc_scan_failed")
+            records = getattr(self, "_options_scan_devices", {})
+            scan_choices = _choices_from_ble_items(records.values())
+            if not scan_choices:
+                return self.async_abort(reason="thin_rpc_scan_failed")
+            return self.async_show_form(
+                step_id="thin_scan",
+                data_schema=vol.Schema(
+                    {vol.Required(CONF_BLE_DEVICE): vol.In(scan_choices)}
+                ),
+            )
         pending.update(_without_flow_action(user_input))
-        if _flow_action(user_input) == FLOW_ACTION_BACK:
-            self._pending_options_input = pending
-            return await self.async_step_thin_controller()
         item = getattr(self, "_options_scan_devices", {}).get(
             pending.get(CONF_BLE_DEVICE)
         )
-        if item:
-            pending[CONF_THIN_TARGET_ADDRESS_TYPE] = item.get("address_type", 0)
+        if item is None:
+            return await self.async_step_thin_scan()
+        pending[CONF_THIN_TARGET_ADDRESS_TYPE] = item.get("address_type", 0)
         pending["_options_scan_complete"] = True
         self._pending_options_input = None
         return await self.async_step_init(pending)
+
+    async def async_step_thin_scan_back(self, user_input=None):
+        return await self.async_step_thin_controller()

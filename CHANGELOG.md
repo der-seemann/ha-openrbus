@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.4.8 — 2026-10-14
+
+### Added
+
+- Replace the single long Options form with a menu and focused Connection,
+  Access, Features, Polling, and entity-selection sections. Save applies the
+  complete draft; cancel leaves stored options unchanged.
+- Add default-off opt-ins for cascade and holiday register projections, a
+  native time picker for clock-valued registers, and source-backed zone device
+  and register naming.
+- Add exact default-off cooling and screed filters and CP020 function
+  membership for specialized pool, process-heat, and DHW zone objects.
+- Normalize register sensor classes, keep unknown enum values numeric, and
+  use catalog labels where known while preserving stable entity identities.
+
+### Fixed
+
+- Schedule options reload after the flow response instead of awaiting full
+  unload/setup inside the flow; retain one reload path and leave no-op/cancel
+  paths quiet.
+- Exclude all 20 source-mapped per-zone anti-Legionella objects from mixer
+  heating circuits, including CP400 duration `342a:00`, across projection,
+  entity selection, and polling. Preserve shared system-level DHW rows and
+  user-disabled registry choices.
+- Keep entity polling and visibility aligned with exact category, feature,
+  zone, and access choices; retain registry IDs through sensor migrations.
+
+### Compatibility and limits
+
+- Continues to pin OpenRBus Core 0.4.7. This HA patch does not publish a new
+  Core version.
+- The source-backed zone map remains deliberately bounded; it does not claim
+  physical write safety or complete transport recovery.
+
 ## 0.4.7 — 2026-10-09
 
 ### Changed

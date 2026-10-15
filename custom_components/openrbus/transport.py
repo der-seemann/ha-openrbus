@@ -2228,25 +2228,15 @@ class ThinRpcBackend:
 
     async def _wait_for_pairing_arm_boundary(self) -> None:
         """Wait for this arm's disconnect; stale RPC terminals are not proof."""
-
-        deadline = asyncio.get_running_loop().time() + _THIN_DISCONNECT_TIMEOUT
-        while True:
-            snapshot = await self.channel.diagnostics()
-            if (
-                snapshot.get("link_active") is False
-                and snapshot.get("parent_connected") is False
-            ):
-                return
-            # The RPC already-secure terminal belongs to PAIR_ENCRYPT, which
-            # is issued only after this pairing-arm boundary. It cannot prove
-            # that the ESPHome pairing action just completed: diagnostics may
-            # still contain that terminal from an earlier session. Keep the
-            # arm boundary physical and current to this operation.
-            if asyncio.get_running_loop().time() >= deadline:
-                raise _PairingArmBoundaryTimeout(
-                    "Thin-RPC pairing arm did not reach the disconnect boundary"
-                )
-            await asyncio.sleep(0.05)
+        # Use the same deadline-bounded observation path as backend shutdown.
+        # Pairing recovery also requires both live proxy flags to be down; a
+        # stale PAIR_ENCRYPT terminal cannot establish that boundary.
+        try:
+            await self._wait_for_physical_disconnect()
+        except HomeAssistantError as error:
+            raise _PairingArmBoundaryTimeout(
+                "Thin-RPC pairing arm did not reach the disconnect boundary"
+            ) from error
 
     async def async_stop(self) -> None:
         # Read operations take the read lock before the lifecycle lock.  Stop
@@ -2290,7 +2280,27 @@ class ThinRpcBackend:
             return
         deadline = asyncio.get_running_loop().time() + _THIN_DISCONNECT_TIMEOUT
         while True:
-            snapshot = await channel.diagnostics()
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                if recovery_fence is not None:
+                    recovery_fence.record_timeout()
+                raise HomeAssistantError(
+                    "Thin-RPC physical disconnect did not complete before reload"
+                )
+            try:
+                # ESPHome's blocking service call may otherwise wait forever
+                # when the proxy is busy during startup cancellation. Bound
+                # each observation by the physical-disconnect deadline; a
+                # failed observation remains unproven and keeps ownership.
+                snapshot = await channel.diagnostics(timeout=remaining)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if recovery_fence is not None:
+                    recovery_fence.record_timeout()
+                raise HomeAssistantError(
+                    "Thin-RPC physical disconnect could not be observed"
+                ) from error
             epoch = snapshot.get("epoch")
             self._last_disconnect_snapshot = {
                 "link_active": (
@@ -2318,12 +2328,6 @@ class ThinRpcBackend:
                 and snapshot.get("parent_connected") is False
             ):
                 return
-            if asyncio.get_running_loop().time() >= deadline:
-                if recovery_fence is not None:
-                    recovery_fence.record_timeout()
-                raise HomeAssistantError(
-                    "Thin-RPC physical disconnect did not complete before reload"
-                )
             await asyncio.sleep(0.05)
 
     async def _drain_stale_frames(self) -> None:

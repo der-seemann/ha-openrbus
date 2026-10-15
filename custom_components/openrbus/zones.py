@@ -70,6 +70,146 @@ _DHW_FUNCTIONS = frozenset({6, 7, 10, 11, 12, 13, 31})
 # known enabled values are neither heating nor DHW; they stay separate.
 _HEATING_FUNCTIONS = frozenset({1, 2, 4, 5, 200})
 
+# Exact OBD objects reserved for one CP020 function family. These are excluded
+# from other active zones (including a mixer circuit) while shared zone
+# objects remain available. Addresses come from the source-name inventory
+# below; keep membership explicit so translated labels never affect filtering.
+_FUNCTION_ONLY_OBJECTS: Mapping[int, frozenset[int]] = MappingProxyType(
+    {
+        **{
+            index: _DHW_FUNCTIONS
+            for index in (
+                0x3425,
+                0x3426,
+                0x3427,
+                0x3428,
+                0x3429,
+                0x342A,
+                0x342C,
+                0x342D,
+                0x342E,
+                0x3430,
+                0x3456,
+                0x345E,
+                0x3467,
+                0x3468,
+                0x346E,
+                0x346F,
+                0x3472,
+                0x3473,
+                0x3474,
+                0x3475,
+                0x3478,
+                0x3479,
+                0x347A,
+                0x347B,
+                0x347C,
+                0x348F,
+                0x3490,
+                0x3491,
+                0x363D,
+                0x363E,
+                0x363F,
+                0x3640,
+                0x3641,
+                0x3642,
+                0x3643,
+                0x3644,
+                0x3645,
+                0x3646,
+                0x3647,
+                0x3648,
+                0x3649,
+                0x364A,
+                0x364B,
+                0x364C,
+                0x364D,
+                0x364E,
+                0x364F,
+                0x3650,
+                0x3651,
+                0x3652,
+                0x3653,
+                0x3654,
+                0x3655,
+                0x3656,
+                0x3657,
+                0x3658,
+                0x3659,
+                0x365A,
+                0x365B,
+                0x365C,
+                0x365D,
+                0x365E,
+                0x365F,
+                0x3660,
+                0x3661,
+                0x3665,
+                0x3666,
+                0x3667,
+                0x3668,
+                0x3669,
+                0x366A,
+                0x366B,
+                0x366C,
+                0x366D,
+                0x366E,
+                0x366F,
+                0x3670,
+                0x3675,
+                0x3676,
+                0x3677,
+                0x3678,
+                0x3679,
+                0x3680,
+                0x3681,
+                0x3683,
+                0x3686,
+                0x3687,
+                0x3690,
+                0x3691,
+                0x3699,
+                0x369A,
+                0x369B,
+                0x36AA,
+                0x36AB,
+                0x5433,
+                0x543B,
+                0x543E,
+                0x543F,
+                0x5450,
+                0x5451,
+                0x5452,
+                0x560F,
+                0x5611,
+                0x5612,
+                0x5613,
+                0x561E,
+                0x561F,
+                0x5628,
+                0x5629,
+                0x562A,
+            )
+        },
+        0x3454: frozenset({3}),  # SwimmingPoolSetpoint
+        0x5437: frozenset({3}),  # SecondarySwimmingPoolPumpStatus
+        **{
+            index: frozenset({9, 14})
+            for index in (
+                0x345B,
+                0x345C,
+                0x345D,
+                0x3462,
+                0x3469,
+                0x347E,
+                0x347F,
+                0x3480,
+                0x3482,
+            )
+        },
+    }
+)
+
 # Exact candidate inventory joined by address to Core v0.4.6 and manufacturer
 # OBD 1.47. These identifiers are provenance only, never parsed at runtime.
 # Matching ten-item array bounds do not establish that an item's subindex is a
@@ -529,7 +669,7 @@ def zone_display_name(profile: ZoneProfile, language: str = "de") -> str:
         f"{node_label} — Zone {max(1, profile.subindex)} — "
         f"{_function_description(profile, language)}"
     )
-    designation = (profile.friendly_name or profile.short_name or "").strip()
+    designation = (profile.short_name or profile.friendly_name or "").strip()
     if designation:
         name = f"{name} — {designation}"
     return name
@@ -579,6 +719,18 @@ def zone_association(register: Any, identity: Any | None = None) -> ZoneAssociat
             else ZoneAssociation.UNRESOLVED
         )
     return ZoneAssociation.NOT_ZONE
+
+
+def function_selector_name(name: str, register: Any) -> str | None:
+    """Prefix a CP020 selector with its stable slot, independent of activity."""
+
+    if zone_association(register) is not ZoneAssociation.FUNCTION_SELECTOR:
+        return None
+    address = getattr(register, "address", register)
+    slot = getattr(address, "subindex", None)
+    if not isinstance(slot, int) or not 1 <= slot <= 10:
+        return None
+    return f"Zone {slot} — {name}"
 
 
 def zone_function_slots(rows: Any) -> tuple[int, ...]:
@@ -733,6 +885,22 @@ def zone_is_confirmed_disabled(parent: Any, node: int, subindex: int) -> bool:
     return profile is not None and profile.function == 0
 
 
+def zone_function_supports_object(profile: ZoneProfile, index: int) -> bool:
+    """Apply exact manufacturer function membership for specialized objects.
+
+    The source catalog identifies a small set of zone-array objects that only
+    apply to DHW, swimming-pool, or process-heat functions. Shared zone
+    registers deliberately have no entry here and remain available for their
+    active CP020 slot. An unread/unknown CP020 value fails closed for a
+    specialized object; normal zone activation already excludes it elsewhere.
+    """
+
+    functions = _FUNCTION_ONLY_OBJECTS.get(index)
+    if functions is None:
+        return True
+    return profile.function in functions
+
+
 def zone_read_state(parent: Any, node: int, subindex: int) -> ZoneReadState:
     """Return explicit read evidence, treating missing evidence as unknown."""
 
@@ -796,6 +964,23 @@ def zone_device_name(profile: ZoneProfile, language: str = "de") -> str:
     return zone_display_name(profile, language)
 
 
+def zone_subdevice_name(profile: ZoneProfile, language: str = "de") -> str:
+    """Return only the register designation for an active zone child."""
+
+    if not profile.active:
+        return zone_display_name(profile, language)
+    designation = (profile.friendly_name or profile.short_name or "").strip()
+    zone = max(1, profile.subindex)
+    return designation or f"Zone {zone}"
+
+
+def zone_subdevice_model(profile: ZoneProfile) -> str | None:
+    """Put node and zone ownership in HA's supported model metadata."""
+
+    model = (profile.node_name or "OpenRBus").strip()
+    return f"{model} (Node {profile.node}, Zone {max(1, profile.subindex)})"
+
+
 __all__ = [
     "ZONE_FAMILY_SLOT_OBJECTS",
     "ZONE_FRIENDLY_NAME_INDEX",
@@ -810,6 +995,7 @@ __all__ = [
     "ZoneProfile",
     "ZoneReadState",
     "entity_zone_label",
+    "function_selector_name",
     "normalized_overrides",
     "normalized_selection_overrides",
     "override_key",
@@ -819,10 +1005,13 @@ __all__ = [
     "zone_display_name",
     "zone_enabled",
     "zone_function_label",
+    "zone_function_supports_object",
     "zone_is_active",
     "zone_is_confirmed_disabled",
     "zone_projection_exists",
     "zone_projection_record",
     "zone_read_state",
+    "zone_subdevice_model",
+    "zone_subdevice_name",
     "zone_subindex",
 ]

@@ -7,6 +7,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
+from .entity_names import assign_compact_entity_id
 from .register_entities import (
     OpenRBusRegisterEntity,
     async_apply_diagnostic_visibility,
@@ -54,6 +55,8 @@ async def async_setup_entry(
                 effective_access_level=effective,
             )
         )
+    for entity in entities:
+        assign_compact_entity_id(entity, "select")
     async_add_entities(entities)
     cleanup_legacy_sensor_entities(hass, parent)
 

@@ -54,7 +54,7 @@ from .coordinator import (
 from .proxy_provisioning import PROXY_SOURCE_VERSION, read_proxy_yaml
 from .zone_projection_storage import async_load_zone_projection
 
-PLATFORMS = ["sensor", "binary_sensor", "number", "select", "switch"]
+PLATFORMS = ["sensor", "binary_sensor", "number", "select", "switch", "time"]
 _LOGGER = logging.getLogger(__name__)
 
 # The opt-in ESPHome Thin-RPC firmware exposes the same canonical EHC
@@ -646,7 +646,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             schema=vol.Schema({}),
             supports_response=SupportsResponse.OPTIONAL,
         )
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    # The time platform creates companions only for already-registered
+    # numeric controls. Forward it after those platforms have finished so a
+    # fresh entry gets deterministic companion creation.
+    await _async_forward_platforms(hass, entry)
     first_refresh = schedule_first_refresh_in_background(
         hass,
         entry,
@@ -655,16 +658,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     )
 
     entry.async_on_unload(lambda: _cancel_task(first_refresh))
-    entry.async_on_unload(entry.add_update_listener(_async_reload_entry))
     if isinstance(migration, Mapping):
         # Remove old-route material only after the full candidate setup
-        # succeeded.  The update listener performs one harmless clean reload;
-        # later restarts consequently use the committed route directly.
+        # succeeded. The active coordinator already uses the committed route,
+        # so dropping this marker does not need a second reload.
         committed_options = dict(entry.options)
         committed_options.pop(CONF_TRANSPORT_MIGRATION, None)
         hass.config_entries.async_update_entry(entry, options=committed_options)
     coordinator.detach_startup_lifecycle()
     return True
+
+
+async def _async_forward_platforms(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Set up the time companions after their existing number controls."""
+
+    await hass.config_entries.async_forward_entry_setups(
+        entry, [platform for platform in PLATFORMS if platform != "time"]
+    )
+    await hass.config_entries.async_forward_entry_setups(entry, ["time"])
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -717,8 +728,3 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     if isinstance(coordinator, OpenRBusCoordinator):
         await coordinator.async_shutdown()
         coordinator.detach_startup_lifecycle()
-
-
-async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Reload OpenRBus after options change."""
-    await hass.config_entries.async_reload(entry.entry_id)

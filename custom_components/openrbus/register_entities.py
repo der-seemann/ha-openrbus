@@ -28,13 +28,17 @@ from openrbus.registry import Registry
 
 from .bridge import GenericRead
 from .const import (
+    CONF_CASCADE_ENABLED,
     CONF_COOLING_ENABLED,
     CONF_DIAGNOSTICS_ENABLED,
     CONF_GROUP_OVERRIDES,
+    CONF_HOLIDAY_ENABLED,
     CONF_NODE_OVERRIDES,
     CONF_SCREED_DRYING_ENABLED,
     CONF_ZONE_OVERRIDES,
+    DEFAULT_CASCADE_ENABLED,
     DEFAULT_COOLING_ENABLED,
+    DEFAULT_HOLIDAY_ENABLED,
     DOMAIN,
 )
 from .coordinator import (
@@ -54,20 +58,231 @@ from .zones import (
     ZoneKind,
     ZoneReadState,
     entity_zone_label,
+    function_selector_name,
     override_key,
     profile_for,
     zone_association,
-    zone_device_name,
     zone_enabled,
+    zone_function_supports_object,
     zone_is_active,
     zone_is_confirmed_disabled,
     zone_projection_exists,
     zone_projection_record,
     zone_read_state,
+    zone_subdevice_model,
+    zone_subdevice_name,
     zone_subindex,
 )
 
 CATALOG_REGISTRY = Registry.load_default()
+
+
+# These exact OBD objects are monotonically accumulated energy counters in the
+# reviewed controller catalog.  This is an HA presentation policy only: some
+# source rows declare writes, and those Core declarations remain untouched.
+# Array count headers are deliberately excluded; only concrete elements are
+# sensor candidates.
+_CUMULATIVE_ENERGY_ADDRESSES = {
+    (0x5044, 0),
+    (0x5045, 0),
+    (0x5085, 0),
+    (0x5086, 0),
+    (0x5088, 0),
+    (0x5089, 0),
+    (0x50DA, 0),
+    (0x50F7, 0),
+    (0x50F8, 0),
+    (0x512C, None),
+    (0x512D, None),
+    (0x512F, None),
+    (0x5130, None),
+    (0x5131, None),
+    (0x5133, None),
+    (0x5139, None),
+    (0x513B, None),
+    (0x513C, None),
+    (0x513D, None),
+    (0x513E, None),
+    (0x513F, None),
+    (0x5140, None),
+    (0x5141, None),
+    (0x5144, 0),
+}
+
+_TEMPERATURE_MEASUREMENT_CODES = frozenset(
+    {
+        "HM001",
+        "HM002",
+        "HM019",
+        "HM034",
+        "HM035",
+        "HM036",
+        "HM087",
+        "HM094",
+        "HM098",
+        "HM102",
+        "HM111",
+        "HM112",
+        "HM128",
+        "HM185",
+        "HM186",
+        "AM016",
+        "AM027",
+        "AM046",
+        "AM170",
+        "AM175",
+        "BM000",
+        "BM001",
+        "DM001",
+        "DM006",
+        "DM008",
+        "DM062",
+        "DM114",
+    }
+)
+
+# Exact rows from the 2026-10-10 status-detail audit that still lack an
+# enum/bitfield decoder.  Each entry pins Core's code, wire/storage type,
+# gain, unit and scalar/array shape to the audited EHC-16 family.
+_UNDECODED_STATUS_LAYOUTS = {
+    (0x4326, 0): ("HM038", "UINT8", "UINT8", "1", "status"),
+    (0x4356, 0): (None, "UINT8", "UINT8", "1", "status"),
+    (0x437E, 0): ("HM092", "UINT8", "UINT8", "1", "status"),
+    (0x4395, 1): ("HM144", "UINT16", "UINT16", "1", "error"),
+    (0x4397, 0): ("HM119", "UINT8", "UINT8", "1", "status"),
+    (0x4399, 0): ("HM122", "UINT8", "UINT8", "1", "status"),
+    (0x439E, 0): ("HM126", "UINT8", "UINT8", "1", "status"),
+    (0x439F, 0): ("HM127", "UINT8", "UINT8", "1", "status"),
+    (0x43A2, 0): ("HM130", "UINT8", "UINT8", "1", "status"),
+    (0x43B6, 1): ("HM162", "UINT16", "UINT16", "0.01", "error"),
+    (0x43C6, 0): ("HM189", "UINT16", "UINT16", "1", "error"),
+    (0x434C, 0): (None, "INT16", "INT16", "1", "error"),
+    (0x50B3, 1): (None, "UINT8", "UINT8", "1", "status"),
+    (0x517C, 0): ("AM191", "UINT8", "UINT8", "1", "error"),
+}
+
+
+def is_undecoded_status_address(register: RegisterCatalogEntry) -> bool:
+    """Check whether an address is in the audited status fallback scope."""
+
+    return (
+        register.address.index,
+        register.address.subindex,
+    ) in _UNDECODED_STATUS_LAYOUTS
+
+
+def undecoded_status_kind(register: RegisterCatalogEntry) -> str | None:
+    """Return a status fallback only while the full audited Core shape matches."""
+
+    address = register.address
+    layout = _UNDECODED_STATUS_LAYOUTS.get((address.index, address.subindex))
+    if layout is None:
+        return None
+    code, datatype, storage, scale, kind = layout
+    definition = CATALOG_REGISTRY.find(address)
+    wire = getattr(definition, "wire", None)
+    if (
+        definition is None
+        or wire is None
+        or getattr(getattr(definition, "evidence", None), "type_conflict", False)
+        or register.internal_code != code
+        or definition.code != code
+        or register.datatype != datatype
+        or register.storage != storage
+        or wire.type.value != datatype
+        or wire.storage.value != storage
+        or Decimal(str(register.scale or 1)) != Decimal(scale)
+        or Decimal(str(wire.gain or 1)) != Decimal(scale)
+        or register.unit is not None
+        or wire.unit is not None
+        or "ehc-16" not in {str(family).casefold() for family in register.provenance}
+        or "ehc-16"
+        not in {
+            str(getattr(item, "family", item)).casefold()
+            for item in definition.evidence.device_families
+        }
+    ):
+        return None
+    if wire.is_array:
+        if address.subindex == 0 or address.subindex > (wire.max_items or 0):
+            return None
+        if (
+            definition.address.index != address.index
+            or definition.address.subindex != 0
+        ):
+            return None
+    elif address.subindex != 0 or definition.address != address:
+        return None
+    return kind
+
+
+def is_temperature_measurement(register: RegisterCatalogEntry) -> bool:
+    """Recognize catalogued temperature measurements, not temperature settings."""
+
+    definition = CATALOG_REGISTRY.find(register.address)
+    wire = getattr(definition, "wire", None)
+    return (
+        definition is not None
+        and wire is not None
+        and not getattr(getattr(definition, "evidence", None), "type_conflict", False)
+        and getattr(register, "readable", False)
+        and getattr(register, "unit", None) == "°C"
+        and getattr(register, "datatype", None) in {"INT16", "UINT16"}
+        and getattr(register, "storage", None) in {"INT16", "UINT16"}
+        and getattr(register, "internal_code", None) in _TEMPERATURE_MEASUREMENT_CODES
+        and definition.code == getattr(register, "internal_code", None)
+        and wire.type.value == getattr(register, "datatype", None)
+        and wire.storage.value == getattr(register, "storage", None)
+        and wire.unit == "°C"
+        and Decimal(str(getattr(register, "scale", None) or 1))
+        == Decimal(str(wire.gain or 1))
+        and not wire.is_array
+        and definition.address == register.address
+    )
+
+
+def is_cumulative_energy_counter(register: RegisterCatalogEntry) -> bool:
+    """Recognize reviewed kWh counters without treating unit as semantics."""
+
+    address = register.address
+    allowed_subindex = next(
+        (
+            subindex
+            for index, subindex in _CUMULATIVE_ENERGY_ADDRESSES
+            if index == address.index
+        ),
+        -1,
+    )
+    if allowed_subindex == -1:
+        return False
+    definition = CATALOG_REGISTRY.find(address)
+    wire = getattr(definition, "wire", None)
+    if (
+        definition is None
+        or wire is None
+        or getattr(getattr(definition, "evidence", None), "type_conflict", False)
+    ):
+        return False
+    if allowed_subindex is not None:
+        if address.subindex != allowed_subindex or wire.is_array:
+            return False
+    elif (
+        not wire.is_array
+        or address.subindex == 0
+        or address.subindex > (wire.max_items or 0)
+    ):
+        return False
+    return (
+        register.readable
+        and register.unit == "kWh"
+        and register.datatype in {"UINT16", "UINT32"}
+        and register.storage in {"UINT16", "UINT32"}
+        and register.internal_code == definition.code
+        and register.datatype == wire.type.value
+        and register.storage == wire.storage.value
+        and wire.unit == "kWh"
+        and Decimal(str(register.scale or 1)) == Decimal(str(wire.gain or 1))
+    )
 
 
 def register_name(register: RegisterCatalogEntry, language: str) -> str:
@@ -243,12 +458,67 @@ def screed_drying_enabled(parent: OpenRBusCoordinator) -> bool:
     return bool(configured.get(CONF_SCREED_DRYING_ENABLED, False))
 
 
+def cascade_enabled(parent: OpenRBusCoordinator) -> bool:
+    """Return the explicit parent-level cascade projection preference."""
+
+    configured = dict(getattr(parent.config_entry, "data", {}) or {})
+    configured.update(getattr(parent.config_entry, "options", {}) or {})
+    return bool(configured.get(CONF_CASCADE_ENABLED, DEFAULT_CASCADE_ENABLED))
+
+
+def holiday_enabled(parent: OpenRBusCoordinator) -> bool:
+    """Return the explicit parent-level holiday projection preference."""
+
+    configured = dict(getattr(parent.config_entry, "data", {}) or {})
+    configured.update(getattr(parent.config_entry, "options", {}) or {})
+    return bool(configured.get(CONF_HOLIDAY_ENABLED, DEFAULT_HOLIDAY_ENABLED))
+
+
+def optional_register_memberships(
+    register: RegisterCatalogEntry,
+) -> frozenset[str]:
+    """Resolve exact map membership, including Core-bounded array elements.
+
+    Existing ``:00`` rows retain the exact map behavior. A nonzero subindex
+    inherits the mapped array-head classification only when Core resolves the
+    address to that exact head, confirms a bounded array without a type
+    conflict, and the projected row agrees with Core's head code and wire
+    type/storage. This classifies rows already projected by Core; it never
+    enumerates new rows.
+    """
+
+    address = getattr(register, "address", None)
+    if address is None:
+        return frozenset()
+    exact = OPTIONAL_REGISTER_FILTERS.get(address)
+    if exact is not None:
+        return exact
+    if address.subindex <= 0:
+        return frozenset()
+    definition = CATALOG_REGISTRY.find(address)
+    if definition is None:
+        return frozenset()
+    head = definition.address
+    wire = definition.wire
+    if (
+        head.index != address.index
+        or head.subindex != 0
+        or not wire.is_array
+        or wire.max_items is None
+        or address.subindex > wire.max_items
+        or definition.evidence.type_conflict
+        or getattr(register, "internal_code", None) != definition.code
+        or getattr(register, "datatype", None) != wire.type.value
+        or getattr(register, "storage", None) != wire.storage.value
+    ):
+        return frozenset()
+    return OPTIONAL_REGISTER_FILTERS.get(head, frozenset())
+
+
 def is_screed_drying_register(register: RegisterCatalogEntry) -> bool:
     """Return whether the reviewed exact register map classifies this row."""
 
-    return "screed" in OPTIONAL_REGISTER_FILTERS.get(
-        getattr(register, "address", None), ()
-    )
+    return "screed" in optional_register_memberships(register)
 
 
 def cooling_enabled(parent: OpenRBusCoordinator) -> bool:
@@ -262,9 +532,19 @@ def cooling_enabled(parent: OpenRBusCoordinator) -> bool:
 def is_cooling_register(register: RegisterCatalogEntry) -> bool:
     """Return whether the reviewed exact register map classifies this row."""
 
-    return "cooling" in OPTIONAL_REGISTER_FILTERS.get(
-        getattr(register, "address", None), ()
-    )
+    return "cooling" in optional_register_memberships(register)
+
+
+def is_cascade_register(register: RegisterCatalogEntry) -> bool:
+    """Return whether the exact reviewed map classifies a cascade row."""
+
+    return "cascade" in optional_register_memberships(register)
+
+
+def is_holiday_register(register: RegisterCatalogEntry) -> bool:
+    """Return whether the exact reviewed map classifies a holiday row."""
+
+    return "holiday" in optional_register_memberships(register)
 
 
 def is_optional_filter_register(
@@ -275,12 +555,7 @@ def is_optional_filter_register(
 ) -> bool:
     """Apply the reviewed exact-address classification."""
 
-    semantic_match = (
-        is_screed_drying_register(register)
-        if filter_name == "screed"
-        else is_cooling_register(register)
-    )
-    return semantic_match
+    return filter_name in optional_register_memberships(register)
 
 
 def rows_for_parent(
@@ -289,6 +564,8 @@ def rows_for_parent(
     include_diagnostics: bool | None = None,
     include_screed_drying: bool | None = None,
     include_cooling: bool | None = None,
+    include_cascade: bool | None = None,
+    include_holiday: bool | None = None,
 ) -> tuple[tuple[DeviceIdentity, RegisterCatalogEntry, str, bool], ...]:
     """Project all known rows and their poll eligibility for this entry."""
 
@@ -311,6 +588,10 @@ def rows_for_parent(
         include_screed_drying = screed_drying_enabled(parent)
     if include_cooling is None:
         include_cooling = cooling_enabled(parent)
+    if include_cascade is None:
+        include_cascade = cascade_enabled(parent)
+    if include_holiday is None:
+        include_holiday = holiday_enabled(parent)
     rows: list[tuple[DeviceIdentity, RegisterCatalogEntry, str, bool]] = []
     for runtime_node in runtime_nodes(parent):
         identity = identity_for_runtime(runtime_node)
@@ -372,6 +653,14 @@ def rows_for_parent(
                 parent, identity, register, "cooling"
             ):
                 continue
+            if not include_cascade and is_optional_filter_register(
+                parent, identity, register, "cascade"
+            ):
+                continue
+            if not include_holiday and is_optional_filter_register(
+                parent, identity, register, "holiday"
+            ):
+                continue
             rows.append(
                 (
                     identity,
@@ -396,8 +685,12 @@ def zone_row_enabled(
     if association is not ZoneAssociation.ZONE_SLOT:
         return True
     slot = register.address.subindex
-    return zone_is_active(parent, identity.node, slot) and zone_enabled(
-        parent, identity.node, slot
+    profile = profile_for(parent, identity.node, slot, identity)
+    return (
+        profile is not None
+        and zone_is_active(parent, identity.node, slot)
+        and zone_enabled(parent, identity.node, slot)
+        and zone_function_supports_object(profile, register.address.index)
     )
 
 
@@ -449,6 +742,8 @@ def _poll_selection_filter_counts(
         "diagnostics_filtered": 0,
         "screed_filtered": 0,
         "cooling_filtered": 0,
+        "cascade_filtered": 0,
+        "holiday_filtered": 0,
         "rows_after_optional_filters": len(rows),
     }
     for _identity, register, _group, _allowed in complete_rows:
@@ -458,6 +753,10 @@ def _poll_selection_filter_counts(
             counts["screed_filtered"] += 1
         if not cooling_enabled(parent) and is_cooling_register(register):
             counts["cooling_filtered"] += 1
+        if not cascade_enabled(parent) and is_cascade_register(register):
+            counts["cascade_filtered"] += 1
+        if not holiday_enabled(parent) and is_holiday_register(register):
+            counts["holiday_filtered"] += 1
     return counts
 
 
@@ -592,6 +891,10 @@ def entity_group_key(
         base = f"node:{node}:optional:screed"
     elif is_optional_filter_register(parent, identity, register, "cooling"):
         base = f"node:{node}:optional:cooling"
+    elif is_optional_filter_register(parent, identity, register, "cascade"):
+        base = f"node:{node}:optional:cascade"
+    elif is_optional_filter_register(parent, identity, register, "holiday"):
+        base = f"node:{node}:optional:holiday"
     else:
         slot = zone_subindex(register, identity)
         if slot is not None:
@@ -776,6 +1079,18 @@ def _poll_row_selected(
         return False
 
     base_uid = entity_unique_id(parent, identity, register)
+    time_entities = enabled_registry_entities.get(f"{base_uid}:time", ())
+    if (
+        time_entities
+        and _selection_override(parent, identity, register, base_uid) is not False
+        and write_access_allowed(
+            parent,
+            register,
+            getattr(parent, "effective_access_levels", {}).get(identity.node),
+        )
+        and any(_registry_entity_domain(entity) == "time" for entity in time_entities)
+    ):
+        return True
     for unique_id, entities in enabled_registry_entities.items():
         if unique_id != base_uid and not (
             unique_id.startswith(f"{base_uid}:bit:")
@@ -791,7 +1106,12 @@ def _poll_row_selected(
             domain = _registry_entity_domain(entity)
             if domain in {"sensor", "binary_sensor"}:
                 return True
-            if domain in {"number", "select", "switch"} and write_access_allowed(
+            if domain in {
+                "number",
+                "select",
+                "switch",
+                "time",
+            } and write_access_allowed(
                 parent,
                 register,
                 getattr(parent, "effective_access_levels", {}).get(identity.node),
@@ -909,6 +1229,8 @@ def async_apply_entity_overrides(
         include_diagnostics=True,
         include_screed_drying=True,
         include_cooling=True,
+        include_cascade=True,
+        include_holiday=True,
     ):
         uid = entity_unique_id(parent, identity, register)
         rows_by_uid[uid] = (identity, register)
@@ -933,6 +1255,14 @@ def async_apply_entity_overrides(
             and (
                 not is_optional_filter_register(parent, identity, register, "cooling")
                 or cooling_enabled(parent)
+            )
+            and (
+                not is_optional_filter_register(parent, identity, register, "cascade")
+                or cascade_enabled(parent)
+            )
+            and (
+                not is_optional_filter_register(parent, identity, register, "holiday")
+                or holiday_enabled(parent)
             )
         )
         safe[uid] = bool(
@@ -1052,6 +1382,8 @@ def async_apply_diagnostic_visibility(
     diagnostics_visible = diagnostics_enabled(parent)
     screed_drying_visible = screed_drying_enabled(parent)
     cooling_visible = cooling_enabled(parent)
+    cascade_visible = cascade_enabled(parent)
+    holiday_visible = holiday_enabled(parent)
     permitted: dict[str, bool] = {}
     visibility: dict[str, bool] = {}
     row_policies: dict[str, tuple[DeviceIdentity, RegisterCatalogEntry, bool]] = {}
@@ -1074,13 +1406,23 @@ def async_apply_diagnostic_visibility(
         include_diagnostics=True,
         include_screed_drying=True,
         include_cooling=True,
+        include_cascade=True,
+        include_holiday=True,
     ):
         diagnostic = is_diagnostic_register(register)
         screed_drying = is_optional_filter_register(
             parent, identity, register, "screed"
         )
         cooling = is_optional_filter_register(parent, identity, register, "cooling")
-        if not diagnostic and not screed_drying and not cooling:
+        cascade = is_optional_filter_register(parent, identity, register, "cascade")
+        holiday = is_optional_filter_register(parent, identity, register, "holiday")
+        if (
+            not diagnostic
+            and not screed_drying
+            and not cooling
+            and not cascade
+            and not holiday
+        ):
             continue
         unique_id = entity_unique_id(parent, identity, register)
         read_safe = bool(allowed and zone_row_enabled(parent, identity, register))
@@ -1103,6 +1445,8 @@ def async_apply_diagnostic_visibility(
             (not diagnostic or diagnostics_visible)
             and (not screed_drying or screed_drying_visible)
             and (not cooling or cooling_visible)
+            and (not cascade or cascade_visible)
+            and (not holiday or holiday_visible)
         )
         if structure is not None:
             for field in structure.fields:
@@ -1156,6 +1500,8 @@ def ensure_polling_coordinators(
         include_diagnostics=True,
         include_screed_drying=True,
         include_cooling=True,
+        include_cascade=True,
+        include_holiday=True,
     )
     rows = rows_for_parent(parent)
     selection_counts = {
@@ -1321,12 +1667,10 @@ def cleanup_legacy_sensor_entities(
         effective = parent.effective_access_levels.get(identity.node)
         if effective is None and parent.configured_access_level == 1:
             effective = 1
-        if control_kind(register, parent.language) is None or not write_access_allowed(
-            parent, register, effective
-        ):
-            downgrade_rows.add(unique_id)
-        else:
+        if should_project_as_control(parent, register, effective):
             typed_rows.add(unique_id)
+        else:
+            downgrade_rows.add(unique_id)
     removed = 0
     for entity in registry_entries:
         if (
@@ -1352,6 +1696,13 @@ def cleanup_legacy_sensor_entities(
         metadata = pending.setdefault(unique_id, {})
         for field in _MIGRATED_REGISTRY_FIELDS:
             value = getattr(entity, field, None)
+            if field == "disabled_by" and value is None:
+                # HA persists ``None`` as a deliberate user enable. Preserve
+                # that choice across a typed→sensor replacement; otherwise
+                # the new platform's conservative default can silently hide
+                # a previously active measurement.
+                metadata.setdefault(field, None)
+                continue
             if field in {"disabled_by", "hidden_by"} and not _is_user_registry_value(
                 value
             ):
@@ -1462,10 +1813,20 @@ def cleanup_inactive_zone_entities(
                     inactive_unique_ids.add(unique_id)
                     continue
     removed = 0
-    allowed_domains = {"sensor", "binary_sensor", "number", "select", "switch"}
+    allowed_domains = {
+        "sensor",
+        "binary_sensor",
+        "number",
+        "select",
+        "switch",
+        "time",
+    }
     for entity in tuple(registry.entities.values()):
         unique_id = getattr(entity, "unique_id", "")
-        base_unique_id, bit_separator, bit_name = unique_id.partition(":bit:")
+        projection_unique_id = unique_id.removesuffix(":time")
+        base_unique_id, bit_separator, bit_name = projection_unique_id.partition(
+            ":bit:"
+        )
         exact_mapped_row = base_unique_id in inactive_unique_ids and (
             not bit_separator or (bool(bit_name) and ":" not in bit_name)
         )
@@ -1829,6 +2190,12 @@ def should_project_as_control(
 ) -> bool:
     """Use a typed HA control only when both policy and Core evidence allow writes."""
 
+    if is_cumulative_energy_counter(register):
+        return False
+    if is_temperature_measurement(register):
+        return False
+    if undecoded_status_kind(register) is not None:
+        return False
     return control_kind(register, parent.language) is not None and write_access_allowed(
         parent, register, effective_access_level
     )
@@ -1952,6 +2319,11 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
     def name_with_zone(name: str, parent: Any, identity: Any, register: Any) -> str:
         """Make zone-scoped register names distinguishable in HA's entity list."""
 
+        if selector_name := function_selector_name(name, register):
+            # CP020 item coordinates identify selector slots even when the
+            # selector is disabled or unread. Keep the entity on its parent
+            # device; this label names the slot without claiming activity.
+            return selector_name
         zone_label = entity_zone_label(parent, identity, register)
         slot = zone_subindex(register, identity)
         profile = (
@@ -2030,10 +2402,11 @@ class OpenRBusRegisterEntity(CoordinatorEntity[OpenRBusPollingCoordinator]):
                 identifiers={
                     ("openrbus", f"{node_identifier}:zone:{profile.subindex}")
                 },
-                name=zone_device_name(profile, self._parent.language),
+                name=zone_subdevice_name(profile, self._parent.language),
                 manufacturer=getattr(self._identity, "manufacturer", None)
                 or "OpenRBus",
-                model=getattr(self._identity, "model", None)
+                model=zone_subdevice_model(profile)
+                or getattr(self._identity, "model", None)
                 or getattr(self._identity, "family", None),
                 via_device=("openrbus", node_identifier),
             )
@@ -2173,12 +2546,16 @@ __all__ = [
     "entity_unique_id",
     "enum_for",
     "enum_options",
+    "is_cumulative_energy_counter",
+    "is_temperature_measurement",
+    "is_undecoded_status_address",
     "number_bounds",
     "poll_group",
     "recommended_addresses",
     "restore_migrated_sensor_entities",
     "rows_for_parent",
     "runtime_nodes",
+    "undecoded_status_kind",
     "write_access_allowed",
     "zone_row_enabled",
 ]

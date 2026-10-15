@@ -1,6 +1,32 @@
 # Device, category, and entity selection
 
-The Home Assistant Options Flow presents three steps: **Device → Category → Entities**. The device step includes every discovered node and displays its runtime model, family, or discovered name; no fixed product-name allowlist controls the picker. A category appears only when catalog or runtime configuration evidence assigns at least one entity to it. Rows without category evidence use the neutral **Nicht klassifiziert / Unclassified** bucket. The final step selects individual entities and bitfields.
+The Home Assistant Options Flow overview separates **Connection**, **Access**,
+**Features**, and **Polling and display**. Submissions stay in a flow-local
+draft until **Save changes** is selected; closing the flow discards the draft.
+Saving retains the existing config-entry identity. Home Assistant documents
+[`OptionsFlowWithReload`](https://developers.home-assistant.io/docs/core/integration/options_flow/)
+to schedule one reload after changed options are stored;
+unchanged options do not schedule another reload. The integration does not
+register an update listener, so it cannot trigger a second blocking reload.
+
+Backend controller and gateway selections, when needed, also use native menu
+actions around their forms. The entity picker uses native Home Assistant menu
+actions around its forms:
+device selection, category bulk selection, then entity selection. The category
+menu has direct actions to edit a category, continue searching the current
+category, return to devices, or finish back to the Options overview. Search
+state and selections remain in the flow draft until the options are saved.
+Home Assistant's [data-entry flow API](https://developers.home-assistant.io/docs/data_entry_flow_index/)
+documents menus and forms but does not define form-level
+Back/Next button fields; the flow does not add a direction selector to the
+picker forms.
+
+The device step includes every discovered node and displays its runtime model,
+family, or discovered name; no fixed product-name allowlist controls the
+picker. A category appears only when catalog or runtime configuration
+evidence assigns at least one entity to it. Rows without category evidence use
+the neutral **Nicht klassifiziert / Unclassified** bucket. The final step
+selects individual entities and bitfields.
 
 Membership is conservative. Active CP02x configuration evidence can assign configured heating functions to Zone and configured domestic-hot-water functions to Trinkwarmwasser. DHW remains its own category; DHW values do not create heating circuits. Disabled, unread, or unknown configuration slots remain inactive by default. Other categories are accepted only from structured category metadata supplied by Core. Register names, model names, neighboring object rows, and static Original-App category labels do not establish runtime category membership. Cooling, screed drying, diagnostics, access, readability, and write safety gates remain independent of picker category.
 
@@ -33,17 +59,40 @@ does not prove that a concrete subindex exists.
 
 ## Global optional filters
 
-Estrichtrocknung and Kühlbetrieb are default-off, entry-wide filters. A
-manually reviewed exact-address map classifies each register from its OBD
-function and Core's localized catalogue label. The existing device catalog
-still decides whether a register is available on a specific node; the filter
-does not assign manufacturer navigation categories or invent device names.
-Filtering runs before picker choices, entity construction, and poll-group
-assembly. Turning a filter back on restores its normal projection. Existing
-entity registry rows and user disable choices are retained.
+Estrichtrocknung, Kühlbetrieb, and Kaskadenfunktionen are default-off,
+entry-wide filters. Manually reviewed exact-address maps classify rows using
+their OBD operational meaning and Core catalog definition. The existing
+device catalog still decides whether a register is available on a specific
+node; the filters do not assign manufacturer navigation categories or invent
+device names. Filtering runs before picker choices, entity construction, and
+poll-group assembly. Turning a filter back on restores the normal projection
+with the same unique IDs. Existing entity registry rows are retained;
+integration-disabled rows return when all applicable filters are enabled, and
+`disabled_by: user` remains authoritative. A row with overlapping Cooling and
+Cascade membership requires both preferences.
 
 The implementation is in `optional_register_filters.py`; the evidence,
 positive register lists, functional boundaries, and exclusions are recorded in
 `global-register-filters.md`. Runtime FunctionGroup discovery is not used for
 these filters because the tested controller does not expose the candidate
 arrays and these are not manufacturer FunctionGroup categories.
+
+## CP020 function-specific zone objects and child names
+
+CP020 specialization is a separate exact-address gate in `zones.py`. The
+current Core `ZoneFunction` enum identifies mixing circuits as `2`, swimming
+pools as `3`, process heat as `9` or `14`, and DHW functions as `6`, `7`, `10`,
+`11`, `12`, `13`, or `31`. Exact zone-slot objects with DHW, swimming-pool, or
+process-heat semantics are gated by those memberships; shared heating values
+remain available. Unknown CP020 reads do not expose specialized objects. This
+gate is shared by picker eligibility, entity defaults, and poll selection.
+The reviewed DHW-primary block has source-backed objects at `363d`–`3661` and
+`3665`–`3670`; `3662`–`3664` are not in the source map and are deliberately
+not inferred from the surrounding addresses. Existing filtered registry rows
+are retained and integration-disabled, preserving their IDs and any user
+disable decision.
+
+Active zone child devices use only their configured register designation as
+the HA device name, falling back to `Zone N`. Node model, node number, and
+one-based zone number remain in the supported `DeviceInfo.model` field;
+existing zone identifiers and `via_device` ownership are unchanged.

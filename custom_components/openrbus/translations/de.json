@@ -53,7 +53,9 @@
           "diagnostics_enabled": "Diagnosedaten aktivieren",
           "flow_action": "Navigation",
           "cooling_enabled": "Kühlfunktionen aktivieren",
-          "experimental_writes": "Laut OBD schreibbare Register ohne bestätigten RW-Quellennachweis als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt."
+          "experimental_writes": "Laut OBD schreibbare Register ohne bestätigten RW-Quellennachweis als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt.",
+          "cascade_enabled": "Kaskadenfunktionen aktivieren",
+          "holiday_enabled": "Ferienfunktionen anzeigen"
         },
         "data_description": {
           "read_access_level": "Schieberegler: 1 Benutzer, 2 Installateur, 3 Fachhandwerker. Die gespeicherte Stufe ist vorausgewählt.",
@@ -62,7 +64,9 @@
           "diagnostics_enabled": "Fügt Diagnose-Entitäten mit Transport- und Kommunikationsstatus zur Fehlersuche hinzu.",
           "screed_drying_enabled": "Fügt Entitäten für das Estrichtrocknungsprogramm hinzu, sofern der Regler diese bereitstellt.",
           "cooling_enabled": "Register aus der geprüften Funktionszuordnung Kühlung anzeigen. Ist die Option aus, werden genau diese Register vor Auswahl und Entitätserzeugung ausgeschlossen.",
-          "experimental_writes": "Laut OBD schreibbare Register ohne bestätigten RW-Quellennachweis als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt."
+          "experimental_writes": "Laut OBD schreibbare Register ohne bestätigten RW-Quellennachweis als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt.",
+          "cascade_enabled": "Zusätzliche Einstellungen und Statuswerte für Anlagen anzeigen, in denen mehrere Wärmeerzeuger gemeinsam geregelt werden. Für Kaskaden-Kühlfunktionen muss auch Kühlbetrieb aktiviert sein.",
+          "holiday_enabled": "Zeigt Einstellungen für Ferienzeiten und Ferientemperaturen, sofern der Regler sie bereitstellt."
         }
       },
       "access_warning": {
@@ -149,7 +153,9 @@
           "poll_interval_slow": "Langsames Polling (Sekunden)",
           "cooling_enabled": "Kühlfunktionen aktivieren",
           "_openrbus_entity_picker": "Entitätsauswahl konfigurieren",
-          "experimental_writes": "Laut OBD schreibbare Register ohne bestätigten RW-Quellennachweis als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt."
+          "experimental_writes": "Laut OBD schreibbare Register ohne bestätigten RW-Quellennachweis als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt.",
+          "cascade_enabled": "Kaskadenfunktionen aktivieren",
+          "holiday_enabled": "Ferienfunktionen anzeigen"
         },
         "data_description": {
           "language": "Legt die Sprache für Namen und Beschreibungen der Entitäten fest.",
@@ -169,16 +175,24 @@
           "passkey": "PIN zum Koppeln des Gateways über Bluetooth.",
           "cooling_enabled": "Register aus der geprüften Funktionszuordnung Kühlung anzeigen. Ist die Option aus, werden genau diese Register vor Auswahl und Entitätserzeugung ausgeschlossen.",
           "_openrbus_entity_picker": "Dreistufige Auswahl öffnen: Gerät, Kategorie, Entitäten. Vorhandene Entitätskennungen und gespeicherte Auswahl bleiben erhalten.",
-          "experimental_writes": "Laut OBD schreibbare Register ohne bestätigten RW-Quellennachweis als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt."
+          "experimental_writes": "Laut OBD schreibbare Register ohne bestätigten RW-Quellennachweis als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt.",
+          "cascade_enabled": "Zusätzliche Einstellungen und Statuswerte für Anlagen anzeigen, in denen mehrere Wärmeerzeuger gemeinsam geregelt werden. Für Kaskaden-Kühlfunktionen muss auch Kühlbetrieb aktiviert sein.",
+          "holiday_enabled": "Zeigt Einstellungen für Ferienzeiten und Ferientemperaturen, sofern der Regler sie bereitstellt."
         },
-        "description": "Kein passender Bluetooth-Adapter in Reichweite? [ESP-Proxy einrichten]({esphome_proxy_setup_url})."
+        "description": "Prüfe die Einstellungen bereichsweise. Änderungen bleiben ein Entwurf, bis du Speichern auswählst.",
+        "menu_options": {
+          "connection": "Verbindung",
+          "access": "Zugriff und Berechtigungen",
+          "features": "Entitäten und Funktionen",
+          "polling": "Abfrage und Anzeige",
+          "save": "Änderungen speichern"
+        }
       },
       "access_warning": {
         "title": "Zugriffs- und Schreibrechte prüfen",
         "description": "{warning}",
         "data": {
-          "access_level_acknowledged": "Ich verstehe die möglichen Auswirkungen und möchte diese Berechtigungen aktivieren.",
-          "flow_action": "Navigation"
+          "access_level_acknowledged": "Ich verstehe die möglichen Auswirkungen und möchte diese Berechtigungen aktivieren."
         },
         "data_description": {
           "access_level_acknowledged": "Bestätigen, dass die oben angezeigten Zugriffs- und Schreiboptionen verstanden wurden."
@@ -187,8 +201,7 @@
       "credentials": {
         "title": "Verbindung",
         "data": {
-          "auth_encryption_key": "Verschlüsselungskey",
-          "flow_action": "Navigation"
+          "auth_encryption_key": "Verschlüsselungskey"
         },
         "data_description": {
           "auth_encryption_key": "Achtstelliger Hexadezimal-Schlüssel zur Authentifizierung und Verschlüsselung der Verbindung."
@@ -197,8 +210,7 @@
       "thin_controller": {
         "title": "Thin-RPC-Controller auswählen",
         "data": {
-          "thin_rpc_controller": "Controller",
-          "flow_action": "Navigation"
+          "thin_rpc_controller": "Controller"
         },
         "data_description": {
           "thin_rpc_controller": "Den ESPHome-Controller auswählen, der die zusammengehörigen Request-, Poll- und Diagnose-Services bereitstellt."
@@ -207,8 +219,7 @@
       "thin_scan": {
         "title": "BLE-Gerät hinter dem ESP-Proxy auswählen",
         "data": {
-          "ble_device": "BLE-Gerät",
-          "flow_action": "Navigation"
+          "ble_device": "BLE-Gerät"
         },
         "data_description": {
           "ble_device": "Das Heizungs-Gateway auswählen, das über den ausgewählten ESPHome-Proxy gefunden wurde."
@@ -219,12 +230,15 @@
         "description": "Erkannte Geräte auswählen. Bekannte Modelle werden bei eindeutiger Erkennung benannt; weitere Geräte bleiben verfügbar.",
         "data": {
           "_openrbus_entity_nodes": "Geräte",
-          "_openrbus_entity_node_preset": "Bulk action",
-          "flow_action": "Navigation"
+          "_openrbus_entity_node_preset": "Sammelaktion"
         },
         "data_description": {
           "_openrbus_entity_nodes": "Erkannte Geräte auswählen. Die Liste enthält alle Geräte dieser Anlage.",
-          "_openrbus_entity_node_preset": "Set selected nodes to all, none, or their automatic defaults."
+          "_openrbus_entity_node_preset": "Ausgewählte Geräte auf alle, keine oder ihre automatischen Standardwerte setzen."
+        },
+        "menu_options": {
+          "entity_node_select": "Geräte auswählen",
+          "entity_picker_cancel": "Zurück zu den Optionen"
         }
       },
       "entity_groups": {
@@ -232,31 +246,136 @@
         "description": "Eine Kategorie für eine Sammelaktion auswählen oder zur Auswahl einzelner Entitäten öffnen.",
         "data": {
           "_openrbus_entity_groups": "Kategorien",
-          "_openrbus_entity_group_preset": "Bulk action",
-          "_openrbus_entity_group_edit": "Group to edit",
-          "_openrbus_entity_group_action": "Next action",
-          "flow_action": "Navigation"
+          "_openrbus_entity_group_preset": "Sammelaktion"
         },
         "data_description": {
           "_openrbus_entity_groups": "Kategorien folgen der Original-App, soweit Katalog- oder CP020-Belege die Zuordnung stützen. Nicht zugeordnete Einträge bleiben unter Allgemein.",
-          "_openrbus_entity_group_preset": "Apply all, none, or defaults to selected groups.",
-          "_openrbus_entity_group_edit": "Eine Kategorie zur Auswahl einzelner Entitäten wählen.",
-          "_openrbus_entity_group_action": "Edit the chosen group or finish the selection."
+          "_openrbus_entity_group_preset": "Alle, keine oder Standardwerte auf die ausgewählten Kategorien anwenden."
         }
       },
       "entity_items": {
         "title": "Entitäten der Kategorie",
         "description": "Nach Name, Objekt-/Register-ID, Gerät, Zone oder Kategorie suchen.",
         "data": {
-          "_openrbus_entity_search": "Search",
-          "_openrbus_entity_preset": "Selection mode",
-          "_openrbus_entity_items": "Enabled entities",
-          "_openrbus_entity_item_nav": "Action"
+          "_openrbus_entity_search": "Suche",
+          "_openrbus_entity_preset": "Auswahlmodus",
+          "_openrbus_entity_items": "Aktivierte Entitäten"
         },
         "data_description": {
           "_openrbus_entity_search": "Nach Name, Objekt-/Register-ID, Gerät, Zone oder Kategorie suchen.",
-          "_openrbus_entity_preset": "Use a bulk preset or edit individual checkboxes.",
+          "_openrbus_entity_preset": "Eine Sammelaktion wählen oder einzelne Kontrollkästchen bearbeiten.",
           "_openrbus_entity_items": "Einzelne Entitäten dieser Kategorie auswählen."
+        }
+      },
+      "connection": {
+        "title": "Verbindung",
+        "description": "Gateway und Transport",
+        "data": {
+          "backend": "Transport",
+          "ble_device": "BLE-Gateway",
+          "passkey": "Bluetooth-Kopplungs-PIN"
+        },
+        "data_description": {
+          "backend": "Legt fest, wie Home Assistant eine Verbindung zur Heizungsanlage herstellt.",
+          "ble_device": "Das BLE-Gateway auswählen. Erkannte Geräte werden als Name — MAC-Adresse angezeigt; ohne verfügbaren Namen wird die MAC-Adresse verwendet.",
+          "passkey": "PIN zum Koppeln des Gateways über Bluetooth."
+        }
+      },
+      "access": {
+        "title": "Zugriff und Berechtigungen",
+        "description": "Lese- und Schreibrechte",
+        "data": {
+          "read_access_level": "Lesezugriffsebene",
+          "write_access_level": "Schreibzugriffsebene",
+          "write_enabled": "Schreibzugriff aktivieren",
+          "experimental_writes": "Laut OBD schreibbare Register ohne bestätigten RW-Quellennachweis als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt."
+        },
+        "data_description": {
+          "read_access_level": "Schieberegler: 1 Benutzer, 2 Installateur, 3 Fachhandwerker. Die gespeicherte Stufe ist vorausgewählt.",
+          "write_access_level": "Schieberegler: 0 kein Schreibzugriff, 1 Benutzer, 2 Installateur, 3 Fachhandwerker. Die gespeicherte Stufe ist vorausgewählt.",
+          "write_enabled": "Erlaubt unterstützten Bedienelementen, Änderungen an die Heizungsanlage zu senden.",
+          "experimental_writes": "Laut OBD schreibbare Register ohne bestätigten RW-Quellennachweis als experimentelle Bedienelemente anzeigen. Nur zusammen mit aktiviertem Schreibzugriff; diese Register sind nicht regulär als schreibbare Parameter bestätigt."
+        }
+      },
+      "features": {
+        "title": "Entitäten und Funktionen",
+        "description": "Entitäts- und Funktionsauswahl",
+        "data": {
+          "diagnostics_enabled": "Diagnosedaten aktivieren",
+          "screed_drying_enabled": "Estrichtrocknung aktivieren",
+          "cooling_enabled": "Kühlfunktionen aktivieren",
+          "cascade_enabled": "Kaskadenfunktionen aktivieren",
+          "holiday_enabled": "Ferienfunktionen anzeigen",
+          "zone_overrides": "Aktive Zonen",
+          "_openrbus_entity_picker": "Entitätsauswahl konfigurieren"
+        },
+        "data_description": {
+          "diagnostics_enabled": "Fügt Diagnose-Entitäten mit Transport- und Kommunikationsstatus zur Fehlersuche hinzu.",
+          "screed_drying_enabled": "Fügt Entitäten für das Estrichtrocknungsprogramm hinzu, sofern der Regler diese bereitstellt.",
+          "cooling_enabled": "Register aus der geprüften Funktionszuordnung Kühlung anzeigen. Ist die Option aus, werden genau diese Register vor Auswahl und Entitätserzeugung ausgeschlossen.",
+          "cascade_enabled": "Zusätzliche Einstellungen und Statuswerte für Anlagen anzeigen, in denen mehrere Wärmeerzeuger gemeinsam geregelt werden. Für Kaskaden-Kühlfunktionen muss auch Kühlbetrieb aktiviert sein.",
+          "holiday_enabled": "Zeigt Einstellungen für Ferienzeiten und Ferientemperaturen, sofern der Regler sie bereitstellt.",
+          "zone_overrides": "Zeigt zugehörigen Node und erkannte Herstellerfunktion; nur geräteseitig aktive Zonen können ausgewählt werden.",
+          "_openrbus_entity_picker": "Dreistufige Auswahl öffnen: Gerät, Kategorie, Entitäten. Vorhandene Entitätskennungen und gespeicherte Auswahl bleiben erhalten."
+        }
+      },
+      "polling": {
+        "title": "Abfrage und Anzeige",
+        "description": "Abfrageintervalle und Namen",
+        "data": {
+          "language": "Sprache der Entitäten",
+          "poll_interval_fast": "Schnelles Polling (Sekunden)",
+          "poll_interval_standard": "Standard-Polling (Sekunden)",
+          "poll_interval_slow": "Langsames Polling (Sekunden)",
+          "invalid_value_disable_after": "Entität nach dauerhaft ungültigen Werten deaktivieren nach (Minuten)"
+        },
+        "data_description": {
+          "language": "Legt die Sprache für Namen und Beschreibungen der Entitäten fest.",
+          "poll_interval_fast": "Abstand zwischen häufigen Leseabfragen in Sekunden. Ein längerer Abstand verringert den Bluetooth-Datenverkehr.",
+          "poll_interval_standard": "Abstand zwischen regulären Leseabfragen in Sekunden.",
+          "poll_interval_slow": "Abstand zwischen seltenen Leseabfragen in Sekunden.",
+          "invalid_value_disable_after": "Deaktiviert eine Entität, wenn ihr Wert so viele Minuten dauerhaft ungültig war."
+        }
+      },
+      "entity_node_select": {
+        "title": "Geräteauswahl",
+        "description": "Die zu verwaltenden Geräte auswählen. Bekannte Modelle werden bei eindeutiger Erkennung benannt; weitere Geräte bleiben verfügbar.",
+        "data": {
+          "_openrbus_entity_nodes": "Geräte",
+          "_openrbus_entity_node_preset": "Sammelaktion"
+        },
+        "data_description": {
+          "_openrbus_entity_nodes": "Erkannte Geräte auswählen. Die Liste enthält alle Geräte dieser Anlage.",
+          "_openrbus_entity_node_preset": "Ausgewählte Geräte auf alle, keine oder ihre automatischen Standardwerte setzen."
+        }
+      },
+      "entity_group_menu": {
+        "title": "Entitätsauswahl fortsetzen",
+        "menu_options": {
+          "entity_group_edit": "Kategorie bearbeiten",
+          "entity_items": "Diese Kategorie durchsuchen/bearbeiten",
+          "entity_selection_done": "Zurück zu den Optionen",
+          "entity_nodes": "Zurück zur Geräteauswahl"
+        }
+      },
+      "entity_group_edit": {
+        "title": "Zu bearbeitende Kategorie auswählen",
+        "data": {
+          "_openrbus_entity_group_edit": "Kategorie"
+        }
+      },
+      "thin_controller_menu": {
+        "title": "Proxy-Controller auswählen",
+        "menu_options": {
+          "thin_controller": "Controller auswählen",
+          "thin_controller_back": "Zurück zur Verbindung"
+        }
+      },
+      "thin_scan_menu": {
+        "title": "Gateway auswählen",
+        "menu_options": {
+          "thin_scan": "Gateway auswählen",
+          "thin_scan_back": "Zurück zum Controller"
         }
       }
     }
@@ -296,6 +415,18 @@
         "next": "Speichern und zu Gruppen",
         "done": "Auswahl abschließen",
         "back": "Zurück zu Gruppen"
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "register_status": {
+        "state": {
+          "reset_limit_wait_one_hour": "Rücksetzlimit erreicht – eine Stunde warten (Substatus 255)",
+          "unknown_status_code": "Unbekannter Statuscode",
+          "unknown_error_code": "Unbekannter Fehlercode",
+          "unknown_code": "Unbekannter Code"
+        }
       }
     }
   }
